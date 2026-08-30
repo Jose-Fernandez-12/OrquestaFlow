@@ -14,7 +14,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { v4 as uuid } from 'uuid';
-import { Play, Save, Maximize2, Minimize2, MoreHorizontal } from 'lucide-react';
+import { Play, Save, Maximize2, Minimize2, MoreHorizontal, Clock } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { 
@@ -170,36 +170,73 @@ function FlowCanvas() {
       </div>
 
       {/* Editor Body */}
-      <div className="flex-1 flex min-h-0 relative">
-        {!canvasExpanded && <NodeLibrary />}
-        
-        <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onInit={setReactFlowInstance}
-            onDrop={onDrop}
-            onDragOver={onDragOver}
-            onSelectionChange={onSelectionChange}
-            nodeTypes={nodeTypes}
-            fitView
-            className="bg-bg"
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background gap={16} size={1} color="#e5e5e5" />
-            <Controls className="!bg-surface !border-border !shadow-sm !rounded-sm" />
-            <MiniMap 
-              nodeColor="#e5e5e5"
-              maskColor="rgba(250, 250, 250, 0.7)"
-              className="!bg-surface !border-border !rounded-sm !shadow-sm" 
-            />
-          </ReactFlow>
+      <div className="flex-1 flex flex-col min-h-0 relative">
+        <div className="flex-1 flex min-h-0 relative">
+          {!canvasExpanded && <NodeLibrary />}
+          
+          <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              onInit={setReactFlowInstance}
+              onDrop={onDrop}
+              onDragOver={onDragOver}
+              onSelectionChange={onSelectionChange}
+              nodeTypes={nodeTypes}
+              fitView
+              className="bg-bg"
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={16} size={1} color="#e5e5e5" />
+              <Controls className="!bg-surface !border-border !shadow-sm !rounded-sm" />
+              <MiniMap 
+                nodeColor="#e5e5e5"
+                maskColor="rgba(250, 250, 250, 0.7)"
+                className="!bg-surface !border-border !rounded-sm !shadow-sm" 
+              />
+            </ReactFlow>
+          </div>
+
+          {!canvasExpanded && <NodeInspector />}
         </div>
 
-        {!canvasExpanded && <NodeInspector />}
+        {/* FlowSummary bottom cards */}
+        {!canvasExpanded && (
+          <div className="h-[140px] border-t border-border bg-surface grid grid-cols-2 gap-4 p-4 shrink-0 z-10 overflow-y-auto">
+            <div className="border border-border rounded-sm p-3 flex flex-col justify-between">
+              <div>
+                <h3 className="text-xs font-semibold">Programaciones activas</h3>
+                <p className="text-[10px] text-muted">Próximas ejecuciones automáticas de este flujo.</p>
+              </div>
+              <div className="flex items-center gap-2 pt-2 border-t border-border mt-2">
+                <div className="w-6 h-6 rounded-full bg-accent-light text-accent flex items-center justify-center shrink-0">
+                  <Clock size={12} />
+                </div>
+                <div className="text-[11px]">
+                  <strong>Lunes a las 08:00</strong>
+                  <span className="block text-[10px] text-muted">Cron: 0 8 * * 1</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="border border-border rounded-sm p-3 flex flex-col justify-between">
+              <div>
+                <h3 className="text-xs font-semibold">Último resultado de ejecución</h3>
+                <p className="text-[10px] text-muted">Historial del último disparo manual o automático.</p>
+              </div>
+              <div className="flex items-center gap-2 pt-2 border-t border-border mt-2">
+                <div className="w-2 h-2 rounded-full bg-success shrink-0"></div>
+                <div className="text-[11px]">
+                  <strong>Ejecución Exitosa</strong>
+                  <span className="block text-[10px] text-muted">Duración: {currentFlow.last_run_duration_ms || 1300}ms • Registros: {currentFlow.last_run_record_count || 148}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

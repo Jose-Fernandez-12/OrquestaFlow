@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
+import { JsonTreeViewer } from './JsonTreeViewer';
+import { X } from 'lucide-react';
 
 export function NodeInspector() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
@@ -61,9 +63,10 @@ export function NodeInspector() {
                 <option value="Text">Texto plano</option>
               </select>
             </div>
-            {/* Headers / Auth placeholder */}
+            
+            {/* JSON Selector Modal Trigger */}
             <div className="pt-2 border-t border-border mt-2">
-              <Button variant="textLink">Configurar Headers...</Button>
+              <JsonSelectorTrigger node={node} />
             </div>
           </>
         )}
@@ -103,5 +106,76 @@ export function NodeInspector() {
 
       </div>
     </div>
+  );
+}
+
+function JsonSelectorTrigger({ node }: { node: any }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [selectedKey, setSelectedKey] = useState('');
+
+  // Sample data to navigate
+  const sampleJson = {
+    status: "success",
+    code: 200,
+    data: {
+      items: [
+        { id: "prod_01", name: "Laptop Pro", price: 1299.99, stock: 45 },
+        { id: "prod_02", name: "Mouse Inalámbrico", price: 49.99, stock: 120 }
+      ],
+      pagination: {
+        page: 1,
+        total_pages: 5,
+        total_items: 10
+      }
+    }
+  };
+
+  const handleSelectKey = (path: string) => {
+    // Convert e.g. "response.data.items[0].price" to flow variable format like "{{nodeId.data.items[0].price}}"
+    const variableFormat = `{{${node.id}.${path}}}`;
+    setSelectedKey(variableFormat);
+    navigator.clipboard.writeText(variableFormat);
+    alert(`Copiado al portapapeles: ${variableFormat}`);
+  };
+
+  return (
+    <>
+      <Button variant="textLink" onClick={() => setIsOpen(true)}>
+        Visualizar Respuesta (JSON)
+      </Button>
+
+      {isOpen && (
+        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-lg p-6 relative flex flex-col gap-4">
+            <button 
+              onClick={() => setIsOpen(false)}
+              className="absolute top-4 right-4 text-muted hover:text-fg"
+            >
+              <X size={18} />
+            </button>
+
+            <div>
+              <h2 className="text-lg font-semibold">Selector de campos JSON</h2>
+              <p className="text-xs text-muted mt-1">Haz clic en cualquier propiedad para copiar su variable de referencia del flujo.</p>
+            </div>
+
+            <JsonTreeViewer data={sampleJson} onSelectKey={handleSelectKey} />
+
+            {selectedKey && (
+              <div className="p-3 bg-bg border border-border rounded-sm">
+                <span className="text-xs text-muted block mb-1">Variable seleccionada</span>
+                <code className="text-xs text-accent font-semibold">{selectedKey}</code>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <Button variant="default" size="sm" onClick={() => setIsOpen(false)}>
+                Cerrar
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
