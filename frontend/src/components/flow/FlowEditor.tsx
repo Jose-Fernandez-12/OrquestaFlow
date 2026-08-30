@@ -15,8 +15,19 @@ import {
 import '@xyflow/react/dist/style.css';
 import { v4 as uuid } from 'uuid';
 import { Play, Save, Maximize2, Minimize2, MoreHorizontal } from 'lucide-react';
+import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { fetchFlows, setCurrentFlow, saveFlow, selectNode, executeFlow, toggleCanvasExpanded } from '../../store/flowSlice';
+import { 
+  fetchFlows, 
+  setCurrentFlow, 
+  saveFlow, 
+  selectNode, 
+  executeFlow, 
+  toggleCanvasExpanded,
+  setNodeExecuting,
+  setNodeCompleted,
+  resetNodeStates
+} from '../../store/flowSlice';
 import { Button } from '../ui/button';
 import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
@@ -29,9 +40,28 @@ function FlowCanvas() {
   const canvasExpanded = useAppSelector(state => state.flows.canvasExpanded);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+
+  // Connect socket.io for real-time progress
+  useEffect(() => {
+    const socket = io('http://localhost:3001');
+
+    socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error' }) => {
+      if (currentFlow && data.flowId === currentFlow.id) {
+        if (data.status === 'running') {
+          dispatch(setNodeExecuting(data.nodeId));
+        } else if (data.status === 'completed') {
+          dispatch(setNodeCompleted(data.nodeId));
+        }
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [currentFlow, dispatch]);
 
   // Load flow definition when currentFlow changes
   useEffect(() => {
@@ -103,6 +133,7 @@ function FlowCanvas() {
 
   const handleExecute = () => {
     if (!currentFlow) return;
+    dispatch(resetNodeStates());
     dispatch(executeFlow(currentFlow.id));
   };
 

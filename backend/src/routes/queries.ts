@@ -121,44 +121,64 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
     if (!query) return reply.status(404).send({ error: 'Query not found' });
 
     const { connection_ids, params = {} } = request.body;
-    const logId = uuid();
+    if (!connection_ids || connection_ids.length === 0) {
+      return reply.status(400).send({ error: 'Debe seleccionar al menos una conexión de base de datos' });
+    }
 
+    const logId = uuid();
     db.prepare(`
       INSERT INTO execution_logs (id, target_type, target_id, status, result)
       VALUES (?, 'query', ?, 'running', ?)
     `).run(logId, request.params.id, JSON.stringify({ connection_ids, params }));
 
-    // TODO: Execute against real SQL Server connections using mssql
-    // For now, return simulated results
-    await new Promise(resolve => setTimeout(resolve, 800));
+    const startTime = Date.now();
+    try {
+      const { executeMssqlQuery } = await import('../engine/mssql.js');
 
-    const simulatedResults = [
-      { region: 'Centro', pedidos: 428, facturacion: 82430 },
-      { region: 'Norte', pedidos: 331, facturacion: 64820 },
-      { region: 'Sur', pedidos: 276, facturacion: 51190 }
-    ];
+      let combinedRows: any[] = [];
+      let columns: string[] = [];
 
-    db.prepare(`
-      UPDATE execution_logs
-      SET status = 'completed', duration_ms = 1800, record_count = ?, completed_at = datetime('now'),
-          result = ?
-      WHERE id = ?
-    `).run(simulatedResults.length, JSON.stringify(simulatedResults), logId);
-
-    db.prepare(`
-      UPDATE queries SET last_run_at = datetime('now'), last_row_count = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(simulatedResults.length, request.params.id);
-
-    return {
-      data: {
-        logId,
-        status: 'completed',
-        duration: 1800,
-        rowCount: simulatedResults.length,
-        columns: ['region', 'pedidos', 'facturacion'],
-        rows: simulatedResults
+      // Execute on each selected connection
+      for (const connId of connection_ids) {
+        const result = await executeMssqlQuery(connId, query.sql_text as string, params);
+        if (columns.length === 0) columns = result.columns;
+        combinedRows = [...combinedRows, ...result.rows];
       }
-    };
+
+      const duration = Date.now() - startTime;
+
+      db.prepare(`
+        UPDATE execution_logs
+        SET status = 'completed', duration_ms = ?, record_count = ?, completed_at = datetime('now'),
+            result = ?
+        WHERE id = ?
+      `).run(duration, combinedRows.length, JSON.stringify(combinedRows), logId);
+
+      db.prepare(`
+        UPDATE queries SET last_run_at = datetime('now'), last_row_count = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(combinedRows.length, request.params.id);
+
+      return {
+        data: {
+          logId,
+          status: 'completed',
+          duration,
+          rowCount: combinedRows.length,
+          columns,
+          rows: combinedRows
+        }
+      };
+
+    } catch (err: any) {
+      const duration = Date.now() - startTime;
+      db.prepare(`
+        UPDATE execution_logs
+        SET status = 'error', duration_ms = ?, completed_at = datetime('now'), result = ?
+        WHERE id = ?
+      `).run(duration, 0, JSON.stringify({ error: err.message }), logId);
+
+      return reply.status(500).send({ error: 'Query execution failed', message: err.message });
+    }
   });
 }

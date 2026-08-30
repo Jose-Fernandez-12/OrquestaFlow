@@ -46,6 +46,11 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     `).run(id, target_type, target_id, name || '', cron_expression);
 
     const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
+
+    // Update cron job dynamically
+    const { updateJobSchedule } = await import('../engine/scheduler.js');
+    updateJobSchedule(id);
+
     return { data: schedule };
   });
 
@@ -70,6 +75,10 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     values.push(request.params.id);
     db.prepare(`UPDATE schedules SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
+    // Update cron job dynamically
+    const { updateJobSchedule } = await import('../engine/scheduler.js');
+    updateJobSchedule(request.params.id);
+
     const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(request.params.id);
     return { data: schedule };
   });
@@ -81,6 +90,11 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) return reply.status(404).send({ error: 'Schedule not found' });
 
     db.prepare('DELETE FROM schedules WHERE id = ?').run(request.params.id);
+
+    // Stop cron job dynamically
+    const { updateJobSchedule } = await import('../engine/scheduler.js');
+    updateJobSchedule(request.params.id);
+
     return { data: { deleted: true } };
   });
 }

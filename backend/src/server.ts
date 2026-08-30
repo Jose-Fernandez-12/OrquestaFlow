@@ -32,6 +32,10 @@ async function start(): Promise<void> {
   const { initDb } = await import('./db/database.js');
   await initDb();
 
+  // Initialize scheduler
+  const { initScheduler } = await import('./engine/scheduler.js');
+  await initScheduler();
+
   // Plugins
   await app.register(cors, {
     origin: ['http://localhost:5173', 'http://localhost:3000'],
@@ -73,6 +77,9 @@ async function start(): Promise<void> {
   }
 
   try {
+    const { initIo } = await import('./engine/socket.js');
+    initIo(app.server);
+
     await app.listen({ port: PORT, host: HOST });
     app.log.info(`OrquestaFlow API running on http://${HOST}:${PORT}`);
   } catch (err) {

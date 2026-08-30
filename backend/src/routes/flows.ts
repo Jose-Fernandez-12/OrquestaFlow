@@ -59,7 +59,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
-  // Execute flow (placeholder - will be implemented with DAG engine)
+  // Execute flow (using DAG engine)
   app.post<{ Params: { id: string } }>('/:id/execute', async (request, reply) => {
     const db = getDb();
     const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
@@ -71,24 +71,48 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       VALUES (?, 'flow', ?, 'running')
     `).run(logId, request.params.id);
 
-    // Simulate execution for now
     const startTime = Date.now();
-    await new Promise(resolve => setTimeout(resolve, 1300));
-    const duration = Date.now() - startTime;
+    try {
+      const { executeFlowEngine } = await import('../engine/executor.js');
+      const { getIo } = await import('../engine/socket.js');
+      const io = getIo();
+      
+      // Execute the DAG with real-time socket callbacks
+      const context = await executeFlowEngine(request.params.id, (nodeId, status, result) => {
+        io.emit('flow-progress', { flowId: request.params.id, nodeId, status, result });
+      });
+      const duration = Date.now() - startTime;
 
-    db.prepare(`
-      UPDATE execution_logs
-      SET status = 'completed', duration_ms = ?, record_count = 148, completed_at = datetime('now')
-      WHERE id = ?
-    `).run(duration, logId);
+      db.prepare(`
+        UPDATE execution_logs
+        SET status = 'completed', duration_ms = ?, record_count = 1, completed_at = datetime('now')
+        WHERE id = ?
+      `).run(duration, logId);
 
-    db.prepare(`
-      UPDATE flows
-      SET last_run_at = datetime('now'), last_run_duration_ms = ?, last_run_record_count = 148, status = 'saved'
-      WHERE id = ?
-    `).run(duration, request.params.id);
+      db.prepare(`
+        UPDATE flows
+        SET last_run_at = datetime('now'), last_run_duration_ms = ?, last_run_record_count = 1, status = 'saved'
+        WHERE id = ?
+      `).run(duration, request.params.id);
 
-    return { data: { logId, status: 'completed', duration, recordCount: 148 } };
+      return { data: { logId, status: 'completed', duration, context } };
+
+    } catch (err: any) {
+      const duration = Date.now() - startTime;
+      db.prepare(`
+        UPDATE execution_logs
+        SET status = 'error', duration_ms = ?, completed_at = datetime('now')
+        WHERE id = ?
+      `).run(duration, logId);
+
+      db.prepare(`
+        UPDATE flows
+        SET status = 'saved'
+        WHERE id = ?
+      `).run(request.params.id);
+
+      return reply.status(500).send({ error: 'Flow execution failed', message: err.message });
+    }
   });
 
   // Execute individual node

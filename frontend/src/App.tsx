@@ -3,9 +3,9 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { AppLayout } from './components/layout/AppLayout';
 
 import { FlowEditor } from './components/flow/FlowEditor';
-const ScriptsView = () => <div className="p-8"><h2>Scripts (En construccion)</h2></div>;
-const DatabaseView = () => <div className="p-8"><h2>Bases de datos (En construccion)</h2></div>;
-const ScheduleView = () => <div className="p-8"><h2>Programacion (En construccion)</h2></div>;
+import { DatabaseView } from './components/database/DatabaseView';
+import { ScriptsView } from './components/scripts/ScriptsView';
+import { ScheduleView } from './components/schedule/ScheduleView';
 
 function App() {
   return (

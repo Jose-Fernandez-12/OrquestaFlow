@@ -94,13 +94,20 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
     const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
     if (!conn) return reply.status(404).send({ error: 'Connection not found' });
 
-    // TODO: Actually test with mssql
-    // For now simulate
-    await new Promise(resolve => setTimeout(resolve, 500));
+    const startTime = Date.now();
+    try {
+      const { executeMssqlQuery } = await import('../engine/mssql.js');
+      // Execute simple query to test connection
+      await executeMssqlQuery(request.params.id, 'SELECT 1 as connection_test');
+      const latency = Date.now() - startTime;
 
-    db.prepare("UPDATE connections SET last_tested_at = datetime('now') WHERE id = ?").run(request.params.id);
+      db.prepare("UPDATE connections SET last_tested_at = datetime('now') WHERE id = ?").run(request.params.id);
 
-    return { data: { success: true, latency: 45, message: 'Conexion verificada' } };
+      return { data: { success: true, latency, message: 'Conexión verificada exitosamente' } };
+    } catch (err: any) {
+      const latency = Date.now() - startTime;
+      return { data: { success: false, latency, message: `Error de conexión: ${err.message}` } };
+    }
   });
 
   // Delete connection
