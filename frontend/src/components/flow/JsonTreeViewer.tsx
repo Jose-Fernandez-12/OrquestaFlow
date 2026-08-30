@@ -41,24 +41,28 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
                   <div 
                     key={k} 
                     className={cn(
-                      "flex font-mono text-xs", 
+                      "flex font-mono text-xs group/key w-full justify-between items-center relative py-0.5 pr-2 hover:bg-bg-accent/10 rounded-sm", 
                       isValObject ? "flex-col items-start gap-0.5" : "flex-row items-center gap-1.5"
                     )}
                   >
-                    <div className="flex items-center gap-1 group/key shrink-0">
-                      <span className="text-accent font-semibold">{k}:</span>
-                      {onSelectKey && (
-                        <button
-                          type="button"
-                          onClick={() => onSelectKey(itemPath)}
-                          title={`Seleccionar ${itemPath}`}
-                          className="opacity-0 group-hover/key:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity"
-                        >
-                          <Copy size={10} />
-                        </button>
-                      )}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-1 shrink-0">
+                        <span className="text-accent font-semibold">{k}:</span>
+                      </div>
+                      {!isValObject && renderValue(val[k], itemPath, isValObject)}
                     </div>
-                    {renderValue(val[k], itemPath, isValObject)}
+                    {isValObject && renderValue(val[k], itemPath, isValObject)}
+
+                    {onSelectKey && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectKey(itemPath)}
+                        title={`Seleccionar ${itemPath}`}
+                        className="opacity-0 group-hover/key:opacity-100 ml-auto p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
+                      >
+                        <Copy size={10} />
+                      </button>
+                    )}
                   </div>
                 );
               })}

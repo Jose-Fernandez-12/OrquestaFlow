@@ -4,6 +4,7 @@ import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
 import { X } from 'lucide-react';
+import { createPortal } from 'react-dom';
 
 export function NodeInspector() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
@@ -144,8 +145,8 @@ function JsonSelectorTrigger({ node }: { node: any }) {
         Visualizar Respuesta (JSON)
       </Button>
 
-      {isOpen && (
-        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50">
+      {isOpen && createPortal(
+        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-fade-in">
           <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-lg p-6 relative flex flex-col gap-4">
             <button 
               onClick={() => setIsOpen(false)}
@@ -174,7 +175,8 @@ function JsonSelectorTrigger({ node }: { node: any }) {
               </Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
