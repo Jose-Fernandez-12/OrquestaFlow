@@ -21,15 +21,27 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
       const isCollapsed = collapsedKeys[path];
 
       return (
-        <div className={cn(isNested && "pl-4")}>
-          <button
-            type="button"
-            onClick={() => toggleCollapse(path)}
-            className="inline-flex items-center gap-1 text-muted hover:text-fg font-mono text-xs focus:outline-none"
-          >
-            {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-            <span>{isArray ? `Array [${val.length}]` : 'Object'}</span>
-          </button>
+        <div className={cn(isNested && "pl-4", "w-full")}>
+          <div className="flex items-center gap-1.5 group/obj py-0.5">
+            <button
+              type="button"
+              onClick={() => toggleCollapse(path)}
+              className="inline-flex items-center gap-1 text-muted hover:text-fg font-mono text-xs focus:outline-none"
+            >
+              {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+              <span>{isArray ? `Array [${val.length}]` : 'Object'}</span>
+            </button>
+            {onSelectKey && (
+              <button
+                type="button"
+                onClick={() => onSelectKey(path)}
+                title={`Seleccionar ${path}`}
+                className="opacity-0 group-hover/obj:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
+              >
+                <Copy size={10} />
+              </button>
+            )}
+          </div>
           
           {!isCollapsed && (
             <div className="border-l border-border pl-2 ml-1.5 my-1 flex flex-col gap-1.5">
@@ -41,28 +53,12 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
                   <div 
                     key={k} 
                     className={cn(
-                      "flex font-mono text-xs group/key w-full justify-between items-center relative py-0.5 pr-2 hover:bg-bg-accent/10 rounded-sm", 
+                      "flex font-mono text-xs", 
                       isValObject ? "flex-col items-start gap-0.5" : "flex-row items-center gap-1.5"
                     )}
                   >
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <div className="flex items-center gap-1 shrink-0">
-                        <span className="text-accent font-semibold">{k}:</span>
-                      </div>
-                      {!isValObject && renderValue(val[k], itemPath, isValObject)}
-                    </div>
-                    {isValObject && renderValue(val[k], itemPath, isValObject)}
-
-                    {onSelectKey && (
-                      <button
-                        type="button"
-                        onClick={() => onSelectKey(itemPath)}
-                        title={`Seleccionar ${itemPath}`}
-                        className="opacity-0 group-hover/key:opacity-100 ml-auto p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
-                      >
-                        <Copy size={10} />
-                      </button>
-                    )}
+                    <span className="text-accent font-semibold shrink-0">{k}:</span>
+                    {renderValue(val[k], itemPath, isValObject)}
                   </div>
                 );
               })}
@@ -83,9 +79,21 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
     }
 
     return (
-      <span className={cn("font-mono text-xs", isNested && "pl-4", valColor)}>
-        {typeof val === 'string' ? `"${valStr}"` : valStr}
-      </span>
+      <div className="flex items-center gap-1.5 group/val py-0.5">
+        <span className={cn("font-mono text-xs", valColor)}>
+          {typeof val === 'string' ? `"${valStr}"` : valStr}
+        </span>
+        {onSelectKey && (
+          <button
+            type="button"
+            onClick={() => onSelectKey(path)}
+            title={`Seleccionar ${path}`}
+            className="opacity-0 group-hover/val:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
+          >
+            <Copy size={10} />
+          </button>
+        )}
+      </div>
     );
   };
 
