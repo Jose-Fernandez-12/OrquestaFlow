@@ -18,13 +18,7 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 
 const app = Fastify({
-  logger: {
-    level: 'info',
-    transport: {
-      target: 'pino-pretty',
-      options: { colorize: true }
-    }
-  }
+  logger: true
 });
 
 async function start(): Promise<void> {

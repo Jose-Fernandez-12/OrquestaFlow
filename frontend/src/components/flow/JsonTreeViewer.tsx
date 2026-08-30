@@ -15,13 +15,13 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
     setCollapsedKeys(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const renderValue = (val: any, path: string) => {
+  const renderValue = (val: any, path: string, isNested = true) => {
     if (typeof val === 'object' && val !== null) {
       const isArray = Array.isArray(val);
       const isCollapsed = collapsedKeys[path];
 
       return (
-        <div className="pl-4">
+        <div className={cn(isNested && "pl-4")}>
           <button
             type="button"
             onClick={() => toggleCollapse(path)}
@@ -35,10 +35,18 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
             <div className="border-l border-border pl-2 ml-1.5 my-1 flex flex-col gap-1.5">
               {Object.keys(val).map(k => {
                 const itemPath = isArray ? `${path}[${k}]` : `${path}.${k}`;
+                const isValObject = typeof val[k] === 'object' && val[k] !== null;
+
                 return (
-                  <div key={k} className="flex flex-col gap-0.5">
-                    <div className="flex items-center gap-1.5 group/key">
-                      <span className="font-mono text-xs text-accent font-semibold">{k}:</span>
+                  <div 
+                    key={k} 
+                    className={cn(
+                      "flex font-mono text-xs", 
+                      isValObject ? "flex-col items-start gap-0.5" : "flex-row items-center gap-1.5"
+                    )}
+                  >
+                    <div className="flex items-center gap-1 group/key shrink-0">
+                      <span className="text-accent font-semibold">{k}:</span>
                       {onSelectKey && (
                         <button
                           type="button"
@@ -50,7 +58,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
                         </button>
                       )}
                     </div>
-                    {renderValue(val[k], itemPath)}
+                    {renderValue(val[k], itemPath, isValObject)}
                   </div>
                 );
               })}
@@ -71,7 +79,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
     }
 
     return (
-      <span className={cn("font-mono text-xs pl-4", valColor)}>
+      <span className={cn("font-mono text-xs", isNested && "pl-4", valColor)}>
         {typeof val === 'string' ? `"${valStr}"` : valStr}
       </span>
     );
@@ -79,7 +87,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
 
   return (
     <div className="bg-bg p-4 border border-border rounded-sm overflow-auto max-h-[350px]">
-      {renderValue(data, currentPath)}
+      {renderValue(data, currentPath, false)}
     </div>
   );
 }
