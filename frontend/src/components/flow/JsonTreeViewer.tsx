@@ -22,7 +22,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
 
       return (
         <div className={cn(isNested && "pl-4", "w-full")}>
-          <div className="flex items-center gap-1.5 group/obj py-0.5">
+          <div className="flex items-center gap-1.5 group py-0.5">
             <button
               type="button"
               onClick={() => toggleCollapse(path)}
@@ -36,7 +36,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
                 type="button"
                 onClick={() => onSelectKey(path)}
                 title={`Seleccionar ${path}`}
-                className="opacity-0 group-hover/obj:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
+                className="opacity-0 group-hover:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
               >
                 <Copy size={10} />
               </button>
@@ -53,7 +53,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
                   <div 
                     key={k} 
                     className={cn(
-                      "flex font-mono text-xs", 
+                      "flex font-mono text-xs group", 
                       isValObject ? "flex-col items-start gap-0.5" : "flex-row items-center gap-1.5"
                     )}
                   >
@@ -79,7 +79,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
     }
 
     return (
-      <div className="flex items-center gap-1.5 group/val py-0.5">
+      <div className="flex items-center gap-1.5 group py-0.5">
         <span className={cn("font-mono text-xs", valColor)}>
           {typeof val === 'string' ? `"${valStr}"` : valStr}
         </span>
@@ -88,7 +88,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
             type="button"
             onClick={() => onSelectKey(path)}
             title={`Seleccionar ${path}`}
-            className="opacity-0 group-hover/val:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
+            className="opacity-0 group-hover:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
           >
             <Copy size={10} />
           </button>
