@@ -6,8 +6,16 @@ import { v4 as uuid } from 'uuid';
 import mssql from 'mssql';
 import ExcelJS from 'exceljs';
 
-// Simple topological sort
-export function sortNodes(nodes: any[], edges: any[]): any[] {
+// Global execution wrapper with parallel dependency resolution
+export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error', result?: any) => void) {
+  const db = getDb();
+  const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
+  if (!flow) throw new Error('Flow not found');
+
+  const definition = JSON.parse(flow.definition || '{"nodes":[],"edges":[]}');
+  const nodes: any[] = definition.nodes || [];
+  const edges: any[] = definition.edges || [];
+
   const inDegree: Record<string, number> = {};
   const adjList: Record<string, string[]> = {};
 
@@ -23,82 +31,91 @@ export function sortNodes(nodes: any[], edges: any[]): any[] {
     }
   });
 
-  const queue: string[] = [];
-  nodes.forEach(node => {
-    if (inDegree[node.id] === 0) {
-      queue.push(node.id);
-    }
-  });
-
-  const sorted: any[] = [];
-  while (queue.length > 0) {
-    const currId = queue.shift()!;
-    const currNode = nodes.find(n => n.id === currId);
-    if (currNode) sorted.push(currNode);
-
-    (adjList[currId] || []).forEach(neighborId => {
-      inDegree[neighborId]--;
-      if (inDegree[neighborId] === 0) {
-        queue.push(neighborId);
-      }
-    });
-  }
-
-  // Return nodes in topological order
-  return sorted;
-}
-
-// Global execution wrapper
-export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error', result?: any) => void) {
-  const db = getDb();
-  const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
-  if (!flow) throw new Error('Flow not found');
-
-  const definition = JSON.parse(flow.definition || '{"nodes":[],"edges":[]}');
-  const sorted = sortNodes(definition.nodes || [], definition.edges || []);
-
   const context: Record<string, any> = {};
+  const runningPromises = new Map<string, Promise<void>>();
+  const completedNodes = new Set<string>();
+  const errorNodes = new Set<string>();
 
-  for (const node of sorted) {
-    if (onNodeProgress) onNodeProgress(node.id, 'running');
-    // Add artificial delay so progress animation is clearly visible
-    await new Promise(resolve => setTimeout(resolve, 1200));
+  return new Promise((resolve, reject) => {
+    let hasError = false;
 
-    try {
-      let output: any = {};
+    const checkAndRun = () => {
+      if (hasError) return; // Stop triggering new nodes if flow failed
+      
+      let allDone = true;
 
-      switch (node.type) {
-        case 'start':
-          output = { msg: 'Flow started' };
-          break;
+      nodes.forEach(node => {
+        if (!completedNodes.has(node.id) && !errorNodes.has(node.id)) {
+          allDone = false;
+          
+          if (inDegree[node.id] === 0 && !runningPromises.has(node.id)) {
+            // Node is ready to run
+            const p = (async () => {
+              if (onNodeProgress) onNodeProgress(node.id, 'running');
+              
+              // Añadimos un pequeño retraso artificial (150ms para inicio, 800ms para el resto)
+              // Esto es solo para que en el frontend dé tiempo a verse la animación de "ejecutando" (azul)
+              // a "completado" (verde), especialmente en endpoints muy rápidos.
+              const delayMs = node.type === 'start' ? 150 : 800;
+              await new Promise(r => setTimeout(r, delayMs));
+              
+              try {
+                let output: any = {};
+                switch (node.type) {
+                  case 'start':
+                    output = { msg: 'Flow started' };
+                    break;
+                  case 'httpGet':
+                  case 'httpPost':
+                  case 'httpRequest':
+                    output = await executeHttpNode(node, context);
+                    break;
+                  case 'scraping':
+                    output = await executeScrapingNode(node, context);
+                    break;
+                  case 'export':
+                    output = await executeExportNode(node, context);
+                    break;
+                  default:
+                    output = { warning: 'Unknown node type' };
+                }
 
-        case 'httpGet':
-        case 'httpPost':
-          output = await executeHttpNode(node, context);
-          break;
+                context[node.id] = output;
+                completedNodes.add(node.id);
+                if (onNodeProgress) onNodeProgress(node.id, 'completed', output);
 
-        case 'scraping':
-          output = await executeScrapingNode(node, context);
-          break;
+                // Unlock dependents
+                (adjList[node.id] || []).forEach(neighborId => {
+                  inDegree[neighborId]--;
+                });
+              } catch (err: any) {
+                errorNodes.add(node.id);
+                hasError = true;
+                if (onNodeProgress) onNodeProgress(node.id, 'error', { error: err.message || 'Error executing node' });
+                throw err;
+              }
+            })();
 
-        case 'export':
-          output = await executeExportNode(node, context);
-          break;
+            runningPromises.set(node.id, p);
+            
+            p.then(() => {
+              runningPromises.delete(node.id);
+              checkAndRun();
+            }).catch(err => {
+              runningPromises.delete(node.id);
+              reject(err);
+            });
+          }
+        }
+      });
 
-        default:
-          output = { warning: 'Unknown node type' };
+      if (allDone && runningPromises.size === 0) {
+        resolve(context);
       }
+    };
 
-      context[node.id] = output;
-      if (onNodeProgress) onNodeProgress(node.id, 'completed', output);
-
-    } catch (err: any) {
-      if (onNodeProgress) onNodeProgress(node.id, 'error', { error: err.message });
-      throw err;
-    }
-  }
-
-  return context;
+    checkAndRun();
+  });
 }
 
 // Http Node Handler
@@ -120,27 +137,62 @@ async function executeHttpNode(node: any, context: Record<string, any>) {
     };
   }
   
-  // Basic variable substitution: {{nodeId.key}}
-  endpoint = endpoint.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
-    const parts = pathStr.trim().split('.');
-    let val = context;
-    for (const part of parts) {
-      if (val === undefined || val === null) return '';
-      val = val[part];
-    }
-    return String(val || '');
-  });
+  // Substitution helper for {{nodeId.key}}
+  const substitute = (str: string) => {
+    if (typeof str !== 'string') return str;
+    return str.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
+      const parts = pathStr.trim().split('.');
+      let val = context;
+      for (const part of parts) {
+        if (val === undefined || val === null) return '';
+        val = val[part];
+      }
+      return typeof val === 'object' ? JSON.stringify(val) : String(val || '');
+    });
+  };
 
-  const method = node.type === 'httpPost' ? 'POST' : 'GET';
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  endpoint = substitute(endpoint);
+
+  // Apply query params
+  if (node.data?.params && node.data.params.trim() !== '') {
+    try {
+      const paramsObj = JSON.parse(substitute(node.data.params));
+      const url = new URL(endpoint);
+      for (const [k, v] of Object.entries(paramsObj)) {
+        url.searchParams.append(k, String(v));
+      }
+      endpoint = url.toString();
+    } catch (e) {
+      console.error('Failed to parse query params', e);
+    }
+  }
+
+  // Determine method
+  let method = node.data?.method || 'GET';
+  if (node.type === 'httpPost') method = 'POST'; // Backwards compatibility
+
+  // Determine headers
+  let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (node.data?.headers && node.data.headers.trim() !== '') {
+    try {
+      const parsedHeaders = JSON.parse(substitute(node.data.headers));
+      headers = { ...headers, ...parsedHeaders };
+    } catch(e) {
+      console.error('Failed to parse headers', e);
+    }
+  }
 
   const options: RequestInit = {
     method,
     headers,
   };
 
-  if (method === 'POST') {
-    options.body = JSON.stringify(node.data?.payload || {});
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    if (node.data?.body && node.data.body.trim() !== '') {
+      options.body = substitute(node.data.body);
+    } else if (node.data?.payload) {
+      options.body = JSON.stringify(node.data.payload || {}); // Backwards compatibility
+    }
   }
 
   const response = await fetch(endpoint, options);

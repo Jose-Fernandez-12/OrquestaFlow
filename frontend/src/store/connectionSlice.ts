@@ -46,6 +46,16 @@ export const testConnection = createAsyncThunk('connections/test', async (id: st
   return res.json();
 });
 
+export const createConnection = createAsyncThunk('connections/create', async (connectionData: any) => {
+  const res = await fetch(`${API_URL}/connections`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(connectionData)
+  });
+  const data = await res.json();
+  return data as { data: Connection };
+});
+
 const connectionSlice = createSlice({
   name: 'connections',
   initialState,
@@ -83,6 +93,14 @@ const connectionSlice = createSlice({
       .addCase(fetchConnections.rejected, (state, action) => {
         state.loading = false;
         state.error = action.error.message || 'Error';
+      })
+      .addCase(createConnection.fulfilled, (state, action) => {
+        state.connections.push(action.payload.data);
+        const region = action.payload.data.region;
+        if (!state.grouped[region]) {
+          state.grouped[region] = [];
+        }
+        state.grouped[region].push(action.payload.data);
       });
   },
 });

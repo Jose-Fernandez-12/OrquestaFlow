@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS connections (
   database_name TEXT NOT NULL,
   port INTEGER DEFAULT 1433,
   driver TEXT DEFAULT 'ODBC Driver 17 for SQL Server',
+  username TEXT,
+  password TEXT,
   env_credential_key TEXT,
   is_active INTEGER DEFAULT 1,
   last_tested_at TEXT,

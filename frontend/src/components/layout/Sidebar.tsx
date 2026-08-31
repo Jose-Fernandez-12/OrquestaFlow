@@ -95,7 +95,7 @@ export function Sidebar() {
 
         <div className="mt-2 pt-2 border-t border-border flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-bg border border-border flex items-center justify-center font-medium text-sm shrink-0">
-            JA
+            JF
           </div>
           {!collapsed && (
             <div className="flex-1 min-w-0">

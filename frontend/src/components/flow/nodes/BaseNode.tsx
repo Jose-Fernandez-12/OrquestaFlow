@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { Play, Check, AlertCircle, Loader2 } from 'lucide-react';
+import { Play, Check, AlertCircle, Loader2, X } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
 
@@ -18,6 +18,8 @@ interface BaseNodeProps {
 export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
   const executing = useAppSelector(state => state.flows.executingNodeIds.includes(id));
   const completed = useAppSelector(state => state.flows.completedNodeIds.includes(id));
+  const hasError = useAppSelector(state => state.flows.errorNodeIds.includes(id));
+  const nodeResult = useAppSelector(state => state.flows.nodeResults[id]);
   
   const Icon = data.icon;
   
@@ -30,24 +32,38 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
     export: 'text-orange-600',
   };
 
+  const dispatchEvent = () => {
+    // We dispatch a custom event to tell FlowEditor to open the modal
+    if (completed || hasError) {
+      window.dispatchEvent(new CustomEvent('inspect-node-result', { detail: { id, result: nodeResult, hasError, label: data.label } }));
+    }
+  };
+
   return (
     <div 
+      onDoubleClick={dispatchEvent}
       className={cn(
         "bg-surface rounded-md border min-w-[200px] shadow-sm transition-all relative group",
         selected ? "border-accent shadow-focus" : "border-border hover:border-muted",
-        executing && "border-accent ring-2 ring-accent/30 animate-pulse",
-        completed && "border-success",
+        executing && "border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10",
+        completed && !hasError && "border-success",
+        hasError && "border-red-500 ring-2 ring-red-500/30 bg-red-50",
       )}
     >
       {/* Node Status Badge */}
       {executing && (
-        <div className="absolute -top-3 -right-3 w-6 h-6 bg-surface border border-accent rounded-full flex items-center justify-center text-accent shadow-sm">
+        <div className="absolute -top-3 -right-3 w-6 h-6 bg-surface border border-blue-500 rounded-full flex items-center justify-center text-blue-500 shadow-sm">
           <Loader2 size={12} className="animate-spin" />
         </div>
       )}
-      {completed && !executing && (
+      {completed && !executing && !hasError && (
         <div className="absolute -top-3 -right-3 w-6 h-6 bg-success text-white rounded-full flex items-center justify-center shadow-sm">
           <Check size={12} strokeWidth={3} />
+        </div>
+      )}
+      {hasError && !executing && (
+        <div className="absolute -top-3 -right-3 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center shadow-sm">
+          <X size={12} strokeWidth={3} />
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { fetchConnections, setCurrentConnection, testConnection } from '../../store/connectionSlice';
+import { fetchConnections, setCurrentConnection, testConnection, createConnection } from '../../store/connectionSlice';
 import { fetchQueries, setCurrentQuery, executeQuery, updateQuery, createQuery } from '../../store/querySlice';
 import { Database, Plus, Play, RefreshCw, Save, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Button } from '../ui/button';
@@ -16,6 +16,19 @@ export function DatabaseView() {
   const [activeTab, setActiveTab] = useState<'connections' | 'queries'>('connections');
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [testing, setTesting] = useState(false);
+
+  // Local state for creating connection
+  const [isCreating, setIsCreating] = useState(false);
+  const [formName, setFormName] = useState('');
+  const [formRegion, setFormRegion] = useState('');
+  const [formCity, setFormCity] = useState('');
+  const [formHost, setFormHost] = useState('');
+  const [formDatabaseName, setFormDatabaseName] = useState('');
+  const [formPort, setFormPort] = useState(1433);
+  const [formDriver, setFormDriver] = useState('ODBC Driver 17 for SQL Server');
+  const [formUsername, setFormUsername] = useState('');
+  const [formPassword, setFormPassword] = useState('');
+  const [formEnvCredentialKey, setFormEnvCredentialKey] = useState('SQLSERVER');
   
   // Local state for editing/creating SQL
   const [sqlText, setSqlText] = useState('');
@@ -135,7 +148,17 @@ export function DatabaseView() {
               <>
                 <div className="flex items-center justify-between px-1 mb-1 shrink-0">
                   <span className="text-[10px] font-mono tracking-wider text-muted uppercase">Conexiones</span>
-                  <Button variant="icon" size="icon" className="h-6 w-6" title="Nueva Conexion">
+                  <Button
+                    variant="icon"
+                    size="icon"
+                    className="h-6 w-6"
+                    title="Nueva Conexion"
+                    onClick={() => {
+                      dispatch(setCurrentConnection(null));
+                      setIsCreating(true);
+                      setTestResult(null);
+                    }}
+                  >
                     <Plus size={14} />
                   </Button>
                 </div>
@@ -144,6 +167,7 @@ export function DatabaseView() {
                     key={conn.id}
                     onClick={() => {
                       dispatch(setCurrentConnection(conn));
+                      setIsCreating(false);
                       setTestResult(null);
                     }}
                     className={cn(
@@ -233,7 +257,7 @@ export function DatabaseView() {
                 </div>
               )}
 
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                 <div className="p-4 border border-border rounded-sm">
                   <span className="text-xs text-muted font-mono uppercase tracking-wider">Host</span>
                   <strong className="block text-sm mt-1">{selectedConn.host}</strong>
@@ -242,18 +266,13 @@ export function DatabaseView() {
                   <span className="text-xs text-muted font-mono uppercase tracking-wider">Base de Datos</span>
                   <strong className="block text-sm mt-1">{selectedConn.database_name}</strong>
                 </div>
-                <div className="p-4 border border-border rounded-sm">
-                  <span className="text-xs text-muted font-mono uppercase tracking-wider">Puerto</span>
-                  <strong className="block text-sm mt-1">{selectedConn.port}</strong>
-                </div>
               </div>
 
               <div className="p-4 border border-border rounded-sm">
                 <span className="text-xs text-muted font-mono uppercase tracking-wider">Región y Credenciales</span>
                 <div className="mt-2 text-sm">
                   <div><span className="text-muted">Región:</span> {selectedConn.region}</div>
-                  <div><span className="text-muted">Ciudad:</span> {selectedConn.city || 'No especificada'}</div>
-                  <div className="mt-1"><span className="text-muted">Clave de Entorno:</span> <code className="bg-bg px-1.5 py-0.5 rounded border text-xs">{selectedConn.env_credential_key || 'DEFAULT_SQL_SERVER'}</code></div>
+                  {selectedConn.username && <div><span className="text-muted">Usuario:</span> {selectedConn.username}</div>}
                 </div>
               </div>
             </div>
@@ -359,9 +378,169 @@ export function DatabaseView() {
             </div>
           )}
 
-          {!selectedConn && activeTab === 'connections' && (
+          {!selectedConn && activeTab === 'connections' && !isCreating && (
             <div className="flex-1 flex flex-col items-center justify-center p-8 text-muted">
               Selecciona una conexión para configurar o probar
+            </div>
+          )}
+
+          {isCreating && activeTab === 'connections' && (
+            <div className="p-6 flex flex-col gap-6 max-w-2xl">
+              <div>
+                <h2 className="text-lg font-semibold">Nueva Conexión</h2>
+                <p className="text-sm text-muted">Configura una nueva base de datos regional SQL Server o archivo SQLite local.</p>
+              </div>
+
+              <div className="flex flex-col gap-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium text-muted">Nombre de la conexión</label>
+                    <Input
+                      type="text"
+                      value={formName}
+                      onChange={(e) => setFormName(e.target.value)}
+                      placeholder="Ej. Producción Bogotá, DB Local SQLite"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium text-muted">Región</label>
+                    <Input
+                      type="text"
+                      value={formRegion}
+                      onChange={(e) => setFormRegion(e.target.value)}
+                      placeholder="Ej. Colombia, México, Local"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium text-muted">Motor / Driver</label>
+                    <select
+                      value={formDriver}
+                      onChange={(e) => {
+                        setFormDriver(e.target.value);
+                        if (e.target.value === 'sqlite') {
+                          setFormHost('');
+                          setFormDatabaseName('sqlite');
+                          setFormPort(0);
+                        } else {
+                          setFormHost('');
+                          setFormDatabaseName('');
+                          setFormPort(1433);
+                        }
+                      }}
+                      className="flex h-10 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    >
+                      <option value="ODBC Driver 17 for SQL Server">SQL Server (ODBC 17)</option>
+                      <option value="sqlite">SQLite (Local File)</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium text-muted">
+                      {formDriver === 'sqlite' ? 'Ruta del archivo SQLite' : 'Host / Dirección de servidor'}
+                    </label>
+                    <Input
+                      type="text"
+                      value={formHost}
+                      onChange={(e) => setFormHost(e.target.value)}
+                      placeholder={formDriver === 'sqlite' ? 'Ej. C:/ruta/a/mi_base_de_datos.db' : 'Ej. db.operaciones.local'}
+                    />
+                  </div>
+                </div>
+
+                {formDriver !== 'sqlite' && (
+                  <>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-medium text-muted">Nombre de la base de datos</label>
+                      <Input
+                        type="text"
+                        value={formDatabaseName}
+                        onChange={(e) => setFormDatabaseName(e.target.value)}
+                        placeholder="Ej. orquesta_bogota"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="flex flex-col gap-1.5">
+                        <label className="text-xs font-medium text-muted">Usuario</label>
+                        <Input
+                          type="text"
+                          value={formUsername}
+                          onChange={(e) => setFormUsername(e.target.value)}
+                          placeholder="Ej. sa"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label className="text-xs font-medium text-muted">Contraseña</label>
+                        <Input
+                          type="password"
+                          value={formPassword}
+                          onChange={(e) => setFormPassword(e.target.value)}
+                          placeholder="••••••••"
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <div className="flex justify-end gap-2 mt-4">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setIsCreating(false);
+                      setTestResult(null);
+                    }}
+                  >
+                    Cancelar
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={async () => {
+                      if (!formName || !formRegion || !formHost) {
+                        alert('Por favor complete los campos obligatorios: Nombre, Región y Host/Ruta');
+                        return;
+                      }
+                      const connData = {
+                        name: formName,
+                        region: formRegion,
+                        city: formCity || null,
+                        host: formHost,
+                        database_name: formDriver === 'sqlite' ? 'sqlite' : formDatabaseName,
+                        port: formDriver === 'sqlite' ? 0 : formPort,
+                        driver: formDriver,
+                        username: formDriver === 'sqlite' ? null : formUsername,
+                        password: formDriver === 'sqlite' ? null : formPassword,
+                        env_credential_key: formDriver === 'sqlite' ? null : formEnvCredentialKey
+                      };
+                      try {
+                        const resultAction = await dispatch(createConnection(connData));
+                        if (createConnection.fulfilled.match(resultAction)) {
+                          setIsCreating(false);
+                          // Reset form fields
+                          setFormName('');
+                          setFormRegion('');
+                          setFormCity('');
+                          setFormHost('');
+                          setFormDatabaseName('');
+                          setFormPort(1433);
+                          setFormDriver('ODBC Driver 17 for SQL Server');
+                          setFormUsername('');
+                          setFormPassword('');
+                          setFormEnvCredentialKey('SQLSERVER');
+                          dispatch(setCurrentConnection(resultAction.payload.data));
+                        } else {
+                          alert('Error al crear la conexión');
+                        }
+                      } catch (err) {
+                        alert('Error al crear la conexión');
+                      }
+                    }}
+                  >
+                    Guardar Conexión
+                  </Button>
+                </div>
+              </div>
             </div>
           )}
 
