@@ -35,6 +35,7 @@ interface FlowState {
   executingNodeIds: string[];
   completedNodeIds: string[];
   canvasExpanded: boolean;
+  nodeLibraryExpanded: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -46,6 +47,7 @@ const initialState: FlowState = {
   executingNodeIds: [],
   completedNodeIds: [],
   canvasExpanded: false,
+  nodeLibraryExpanded: true,
   loading: false,
   error: null,
 };
@@ -62,11 +64,21 @@ export const fetchFlow = createAsyncThunk('flows/fetchOne', async (id: string) =
   return data.data as Flow;
 });
 
-export const saveFlow = createAsyncThunk('flows/save', async (flow: { id: string; definition: string }) => {
+export const createFlow = createAsyncThunk('flows/create', async (flowData: { name: string; description?: string; definition?: string }) => {
+  const res = await fetch(`${API_URL}/flows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(flowData),
+  });
+  const data = await res.json();
+  return data.data as Flow;
+});
+
+export const saveFlow = createAsyncThunk('flows/save', async (flow: { id: string; definition?: string; name?: string; description?: string }) => {
   const res = await fetch(`${API_URL}/flows/${flow.id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ definition: flow.definition, status: 'saved' }),
+    body: JSON.stringify({ definition: flow.definition, name: flow.name, description: flow.description, status: 'saved' }),
   });
   const data = await res.json();
   return data.data as Flow;
@@ -106,6 +118,9 @@ const flowSlice = createSlice({
     toggleCanvasExpanded(state) {
       state.canvasExpanded = !state.canvasExpanded;
     },
+    toggleNodeLibraryExpanded(state) {
+      state.nodeLibraryExpanded = !state.nodeLibraryExpanded;
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -122,6 +137,10 @@ const flowSlice = createSlice({
         state.error = action.error.message || 'Error loading flows';
       })
       .addCase(fetchFlow.fulfilled, (state, action) => {
+        state.currentFlow = action.payload;
+      })
+      .addCase(createFlow.fulfilled, (state, action) => {
+        state.flows.unshift(action.payload);
         state.currentFlow = action.payload;
       })
       .addCase(saveFlow.fulfilled, (state, action) => {
@@ -142,6 +161,7 @@ export const {
   setNodeCompleted,
   resetNodeStates,
   toggleCanvasExpanded,
+  toggleNodeLibraryExpanded,
 } = flowSlice.actions;
 
 export default flowSlice.reducer;

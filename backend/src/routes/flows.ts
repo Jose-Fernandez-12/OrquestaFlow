@@ -83,6 +83,20 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       });
       const duration = Date.now() - startTime;
 
+      // Find any export output to surface the download link
+      const exportResult = Object.values(context).find((v: any) => v?.filePath && v?.success);
+      if (exportResult) {
+        const fileName = (exportResult as any).filePath.split(/[/\\]/).pop();
+        io.emit('flow-export-ready', {
+          flowId: request.params.id,
+          fileName,
+          downloadUrl: `/api/files/${fileName}`,
+          records: (exportResult as any).records,
+          format: (exportResult as any).format,
+          filePath: (exportResult as any).filePath
+        });
+      }
+
       db.prepare(`
         UPDATE execution_logs
         SET status = 'completed', duration_ms = ?, record_count = 1, completed_at = datetime('now')

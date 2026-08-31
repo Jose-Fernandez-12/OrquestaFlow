@@ -48,6 +48,16 @@ async function start(): Promise<void> {
     decorateReply: false
   });
 
+  // Serve exported files for download
+  await app.register(fastifyStatic, {
+    root: join(process.cwd(), 'data'),
+    prefix: '/api/files/',
+    decorateReply: false,
+    setHeaders: (res, path) => {
+      res.setHeader('Content-Disposition', 'attachment');
+    }
+  });
+
   // Routes
   await app.register(flowRoutes, { prefix: '/api/flows' });
   await app.register(queryRoutes, { prefix: '/api/queries' });

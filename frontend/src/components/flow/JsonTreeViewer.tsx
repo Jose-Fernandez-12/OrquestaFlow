@@ -1,14 +1,24 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Check, Plus } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 interface JsonTreeViewerProps {
   data: any;
   onSelectKey?: (path: string) => void;
   currentPath?: string;
+  mode?: 'copy' | 'select';
+  selectedPaths?: string[];
+  onTogglePath?: (path: string) => void;
 }
 
-export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: JsonTreeViewerProps) {
+export function JsonTreeViewer({ 
+  data, 
+  onSelectKey, 
+  currentPath = 'response',
+  mode = 'copy',
+  selectedPaths = [],
+  onTogglePath
+}: JsonTreeViewerProps) {
   const [collapsedKeys, setCollapsedKeys] = useState<Record<string, boolean>>({});
 
   const toggleCollapse = (key: string) => {
@@ -31,7 +41,7 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
               {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
               <span>{isArray ? `Array [${val.length}]` : 'Object'}</span>
             </button>
-            {onSelectKey && (
+            {mode === 'copy' && onSelectKey && (
               <button
                 type="button"
                 onClick={() => onSelectKey(path)}
@@ -78,12 +88,14 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
       valColor = 'text-red-500 font-semibold';
     }
 
+    const isSelected = selectedPaths.includes(path);
+
     return (
       <div className="flex items-center gap-1.5 group py-0.5">
         <span className={cn("font-mono text-xs", valColor)}>
           {typeof val === 'string' ? `"${valStr}"` : valStr}
         </span>
-        {onSelectKey && (
+        {mode === 'copy' && onSelectKey && (
           <button
             type="button"
             onClick={() => onSelectKey(path)}
@@ -91,6 +103,19 @@ export function JsonTreeViewer({ data, onSelectKey, currentPath = 'response' }: 
             className="opacity-0 group-hover:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
           >
             <Copy size={10} />
+          </button>
+        )}
+        {mode === 'select' && onTogglePath && (
+          <button
+            type="button"
+            onClick={() => onTogglePath(path)}
+            title={isSelected ? `Deseleccionar ${path}` : `Seleccionar ${path}`}
+            className={cn(
+              "p-0.5 transition-opacity shrink-0",
+              isSelected ? "text-accent opacity-100" : "text-muted hover:text-accent opacity-0 group-hover:opacity-100"
+            )}
+          >
+            {isSelected ? <Check size={12} /> : <Plus size={12} />}
           </button>
         )}
       </div>
