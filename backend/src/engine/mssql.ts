@@ -21,7 +21,7 @@ function buildMssqlConfig(connection: any) {
     database: connection.database_name,
     port: Number(connection.port || 1433),
     options: {
-      encrypt: false, // Local servers usually don't force encrypt
+      encrypt: connection.host.includes('.database.windows.net') || false, // Azure SQL requires encryption
       trustServerCertificate: true,
     },
     connectionTimeout: 5000,
