@@ -28,8 +28,10 @@ import {
   toggleNodeLibraryExpanded,
   setNodeExecuting,
   setNodeCompleted,
+  setNodeError,
   resetNodeStates
 } from '../../store/flowSlice';
+import { fetchSchedules } from '../../store/scheduleSlice';
 import { Button } from '../ui/button';
 import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
@@ -41,9 +43,16 @@ function FlowCanvas() {
   const dispatch = useAppDispatch();
   const flows = useAppSelector(state => state.flows.flows);
   const currentFlow = useAppSelector(state => state.flows.currentFlow);
+  const schedules = useAppSelector(state => state.schedules.schedules);
   const canvasExpanded = useAppSelector(state => state.flows.canvasExpanded);
   const nodeLibraryExpanded = useAppSelector(state => state.flows.nodeLibraryExpanded);
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
+  const completedNodeIds = useAppSelector(state => state.flows.completedNodeIds);
+  const errorNodeIds = useAppSelector(state => state.flows.errorNodeIds);
+
+  const flowSchedules = currentFlow 
+    ? schedules.filter(s => s.target_type === 'flow' && s.target_id === currentFlow.id && s.is_active === 1)
+    : [];
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -56,36 +65,84 @@ function FlowCanvas() {
     records: number;
     format: string;
     filePath?: string;
+    id: number;
+  }[]>([]);
+
+  const [inspectNodeData, setInspectNodeData] = useState<{
+    id: string;
+    label: string;
+    result: any;
+    hasError: boolean;
   } | null>(null);
+
+  useEffect(() => {
+    const handleInspect = (e: any) => {
+      setInspectNodeData(e.detail);
+    };
+    window.addEventListener('inspect-node-result', handleInspect);
+    return () => window.removeEventListener('inspect-node-result', handleInspect);
+  }, []);
 
   useEffect(() => {
     if (currentFlow) setEditingName(currentFlow.name);
   }, [currentFlow?.id]);
 
+  const flowId = currentFlow?.id;
+
   // Connect socket.io for real-time progress
   useEffect(() => {
+    if (!flowId) return;
+    
     const socket = io('http://localhost:3001');
 
-    socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error' }) => {
-      if (currentFlow && data.flowId === currentFlow.id) {
+    socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error', result?: any }) => {
+      if (data.flowId === flowId) {
         if (data.status === 'running') {
           dispatch(setNodeExecuting(data.nodeId));
         } else if (data.status === 'completed') {
-          dispatch(setNodeCompleted(data.nodeId));
+          dispatch(setNodeCompleted({ nodeId: data.nodeId, result: data.result }));
+        } else if (data.status === 'error') {
+          dispatch(setNodeError({ nodeId: data.nodeId, error: data.result }));
         }
       }
     });
 
     socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string; filePath?: string }) => {
-      if (currentFlow && data.flowId === currentFlow.id) {
-        setExportNotification(data);
+      if (data.flowId === flowId) {
+        setExportNotification(prev => [...prev, { ...data, id: Date.now() + Math.random() }]);
       }
     });
 
     return () => {
       socket.disconnect();
     };
-  }, [currentFlow, dispatch]);
+  }, [flowId, dispatch]);
+
+  // Update edge styles when node statuses change
+  useEffect(() => {
+    setEdges(eds => {
+      let changed = false;
+      const newEds = eds.map(edge => {
+        let expectedStroke = '#3b82f6'; // default blue
+        if (errorNodeIds.includes(edge.source)) {
+          expectedStroke = '#ef4444'; // red
+        } else if (completedNodeIds.includes(edge.source)) {
+          expectedStroke = '#22c55e'; // green
+        }
+        
+        if (!edge.style || edge.style.stroke !== expectedStroke) {
+          changed = true;
+          return {
+            ...edge,
+            style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2 },
+            interactionWidth: 20
+          };
+        }
+        return edge;
+      });
+      return changed ? newEds : eds;
+    });
+  }, [completedNodeIds, errorNodeIds, setEdges]);
 
   // Load flow definition when currentFlow changes
   useEffect(() => {
@@ -169,11 +226,11 @@ function FlowCanvas() {
     
     const result = await dispatch(executeFlow(currentFlow.id));
     
-    // Find export node result in the execution context
+    // Find export node results in the execution context
     const context = (result.payload as any)?.context as Record<string, any> | undefined;
     if (context) {
-      const exportNode = nodes.find(n => n.type === 'export');
-      if (exportNode) {
+      const exportNodes = nodes.filter(n => n.type === 'export');
+      exportNodes.forEach(exportNode => {
         const data = exportNode.data as any;
         const format = data?.format || 'CSV';
         const rawFileName = data?.fileName as string | undefined;
@@ -188,23 +245,36 @@ function FlowCanvas() {
             downloadAsCSV(exportData, columns, rawFileName || 'export');
           }
         }
-        
-        const finalName = (rawFileName || 'export').trim() === '' ? 'export' : (rawFileName || 'export').trim();
-        const ext = format === 'Excel' ? '.xls' : '.csv';
-
-        setExportNotification({
-          fileName: finalName + ext,
-          downloadUrl: '',
-          records: exportData.length,
-          format,
-          filePath: undefined
-        });
-      }
+      });
     }
   };
 
   if (!currentFlow) {
-    return <div className="flex-1 flex items-center justify-center text-muted">Selecciona o crea un flujo para comenzar</div>;
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-4 text-muted bg-bg p-8">
+        <p className="text-sm">Selecciona o crea un flujo para comenzar</p>
+        <div className="flex gap-2 items-center">
+          {flows.length > 0 && (
+            <select
+              className="bg-surface border border-border rounded-md px-3 py-1.5 text-sm focus-visible:outline-none max-w-[200px]"
+              value=""
+              onChange={(e) => {
+                const selected = flows.find(f => f.id === e.target.value);
+                if (selected) dispatch(setCurrentFlow(selected));
+              }}
+            >
+              <option value="" disabled>Seleccionar flujo...</option>
+              {flows.map(f => (
+                <option key={f.id} value={f.id}>{f.name}</option>
+              ))}
+            </select>
+          )}
+          <Button variant="primary" size="sm" onClick={handleNewFlow} className="gap-2">
+            <Plus size={16} /> Crear nuevo flujo
+          </Button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -281,6 +351,7 @@ function FlowCanvas() {
               onDragOver={onDragOver}
               onSelectionChange={onSelectionChange}
               nodeTypes={nodeTypes}
+              deleteKeyCode={['Backspace', 'Delete']}
               fitView
               className="bg-bg"
               proOptions={{ hideAttribution: true }}
@@ -305,35 +376,35 @@ function FlowCanvas() {
           )}
         </div>
 
-        {/* Export success notification toast */}
-        {exportNotification && (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 animate-fade-in">
-            <div className="bg-surface border border-success/40 rounded-md shadow-raised px-5 py-4 flex items-start gap-4 min-w-[380px] max-w-[520px]">
+        {/* Export success notification toasts */}
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2">
+          {exportNotification.map((notif) => (
+            <div key={notif.id} className="animate-fade-in bg-surface border border-success/40 rounded-md shadow-raised px-5 py-4 flex items-start gap-4 min-w-[380px] max-w-[520px]">
               <div className="w-9 h-9 rounded-full bg-success/10 flex items-center justify-center shrink-0 mt-0.5">
                 <CheckCircle2 size={18} className="text-success" />
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
                   <FileSpreadsheet size={14} className="text-muted shrink-0" />
-                  <span className="text-sm font-semibold">{exportNotification.fileName}</span>
-                  <span className="text-[10px] bg-success/10 text-success px-1.5 py-0.5 rounded-sm font-mono">{exportNotification.format}</span>
+                  <span className="text-sm font-semibold">{notif.fileName}</span>
+                  <span className="text-[10px] bg-success/10 text-success px-1.5 py-0.5 rounded-sm font-mono">{notif.format}</span>
                 </div>
                 <p className="text-xs text-muted mb-2">
-                  {exportNotification.records.toLocaleString()} registros exportados exitosamente
+                  {notif.records.toLocaleString()} registros exportados exitosamente
                 </p>
                 <p className="text-[10px] font-mono text-muted/70 break-all bg-bg px-2 py-1.5 rounded-sm border border-border">
-                  {exportNotification.filePath || `backend/data/${exportNotification.fileName}`}
+                  {notif.filePath || `backend/data/${notif.fileName}`}
                 </p>
               </div>
               <button
-                onClick={() => setExportNotification(null)}
+                onClick={() => setExportNotification(prev => prev.filter(n => n.id !== notif.id))}
                 className="text-muted hover:text-fg shrink-0 mt-0.5"
               >
                 <X size={16} />
               </button>
             </div>
-          </div>
-        )}
+          ))}
+        </div>
 
         {/* FlowSummary bottom cards */}
         {!canvasExpanded && (
@@ -343,15 +414,23 @@ function FlowCanvas() {
                 <h3 className="text-xs font-semibold">Programaciones activas</h3>
                 <p className="text-[10px] text-muted">Próximas ejecuciones automáticas de este flujo.</p>
               </div>
-              <div className="flex items-center gap-2 pt-2 border-t border-border mt-2">
-                <div className="w-6 h-6 rounded-full bg-accent-light text-accent flex items-center justify-center shrink-0">
-                  <Clock size={12} />
+              {flowSchedules.length > 0 ? (
+                flowSchedules.map(s => (
+                  <div key={s.id} className="flex items-center gap-2 pt-2 border-t border-border mt-2">
+                    <div className="w-6 h-6 rounded-full bg-accent-light text-accent flex items-center justify-center shrink-0">
+                      <Clock size={12} />
+                    </div>
+                    <div className="text-[11px] truncate">
+                      <strong>{s.name || 'Programación Activa'}</strong>
+                      <span className="block text-[10px] text-muted">Cron: {s.cron_expression}</span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2 text-[11px] text-muted">
+                  Sin programaciones activas
                 </div>
-                <div className="text-[11px]">
-                  <strong>Lunes a las 08:00</strong>
-                  <span className="block text-[10px] text-muted">Cron: 0 8 * * 1</span>
-                </div>
-              </div>
+              )}
             </div>
 
             <div className="border border-border rounded-sm p-3 flex flex-col justify-between">
@@ -359,17 +438,55 @@ function FlowCanvas() {
                 <h3 className="text-xs font-semibold">Último resultado de ejecución</h3>
                 <p className="text-[10px] text-muted">Historial del último disparo manual o automático.</p>
               </div>
-              <div className="flex items-center gap-2 pt-2 border-t border-border mt-2">
-                <div className="w-2 h-2 rounded-full bg-success shrink-0"></div>
-                <div className="text-[11px]">
-                  <strong>Ejecución Exitosa</strong>
-                  <span className="block text-[10px] text-muted">Duración: {currentFlow.last_run_duration_ms || 1300}ms • Registros: {currentFlow.last_run_record_count || 148}</span>
+              {currentFlow.last_run_at ? (
+                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2">
+                  <div className="w-2 h-2 rounded-full bg-success shrink-0"></div>
+                  <div className="text-[11px]">
+                    <strong>Ejecución Exitosa</strong>
+                    <span className="block text-[10px] text-muted">
+                      Duración: {currentFlow.last_run_duration_ms}ms • Registros: {currentFlow.last_run_record_count}
+                    </span>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2 text-[11px] text-muted">
+                  Ninguna ejecución previa
+                </div>
+              )}
             </div>
           </div>
         )}
       </div>
+
+      {/* Node Result Modal */}
+      {inspectNodeData && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div className="p-4 border-b border-border flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  Resultados del nodo: <span className="font-mono text-sm bg-muted px-2 py-1 rounded">{inspectNodeData.label}</span>
+                </h2>
+                <div className={cn("text-xs mt-1", inspectNodeData.hasError ? "text-red-500" : "text-success")}>
+                  {inspectNodeData.hasError ? "Error en ejecución" : "Ejecución exitosa"}
+                </div>
+              </div>
+              <button onClick={() => setInspectNodeData(null)} className="p-2 hover:bg-muted rounded-md text-muted-foreground">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-4 overflow-auto flex-1 bg-bg/50">
+              <pre className="text-xs font-mono p-4 bg-black/80 text-green-400 rounded-md overflow-auto h-full">
+                {JSON.stringify(inspectNodeData.result, null, 2)}
+              </pre>
+            </div>
+            <div className="p-4 border-t border-border flex justify-end">
+              <Button onClick={() => setInspectNodeData(null)}>Cerrar</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -381,6 +498,7 @@ export function FlowEditor() {
 
   useEffect(() => {
     dispatch(fetchFlows());
+    dispatch(fetchSchedules());
   }, [dispatch]);
 
   return (

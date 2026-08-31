@@ -34,6 +34,8 @@ interface FlowState {
   selectedNodeId: string | null;
   executingNodeIds: string[];
   completedNodeIds: string[];
+  errorNodeIds: string[];
+  nodeResults: Record<string, any>;
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
   loading: boolean;
@@ -46,6 +48,8 @@ const initialState: FlowState = {
   selectedNodeId: null,
   executingNodeIds: [],
   completedNodeIds: [],
+  errorNodeIds: [],
+  nodeResults: {},
   canvasExpanded: false,
   nodeLibraryExpanded: true,
   loading: false,
@@ -105,15 +109,31 @@ const flowSlice = createSlice({
         state.executingNodeIds.push(action.payload);
       }
     },
-    setNodeCompleted(state, action: PayloadAction<string>) {
-      state.executingNodeIds = state.executingNodeIds.filter(id => id !== action.payload);
-      if (!state.completedNodeIds.includes(action.payload)) {
-        state.completedNodeIds.push(action.payload);
+    setNodeCompleted(state, action: PayloadAction<{ nodeId: string; result?: any }>) {
+      const { nodeId, result } = action.payload;
+      state.executingNodeIds = state.executingNodeIds.filter(id => id !== nodeId);
+      if (!state.completedNodeIds.includes(nodeId)) {
+        state.completedNodeIds.push(nodeId);
+      }
+      if (result !== undefined) {
+        state.nodeResults[nodeId] = result;
+      }
+    },
+    setNodeError(state, action: PayloadAction<{ nodeId: string; error?: any }>) {
+      const { nodeId, error } = action.payload;
+      state.executingNodeIds = state.executingNodeIds.filter(id => id !== nodeId);
+      if (!state.errorNodeIds.includes(nodeId)) {
+        state.errorNodeIds.push(nodeId);
+      }
+      if (error !== undefined) {
+        state.nodeResults[nodeId] = error;
       }
     },
     resetNodeStates(state) {
       state.executingNodeIds = [];
       state.completedNodeIds = [];
+      state.errorNodeIds = [];
+      state.nodeResults = {};
     },
     toggleCanvasExpanded(state) {
       state.canvasExpanded = !state.canvasExpanded;
@@ -159,6 +179,7 @@ export const {
   selectNode,
   setNodeExecuting,
   setNodeCompleted,
+  setNodeError,
   resetNodeStates,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,

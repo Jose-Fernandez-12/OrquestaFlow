@@ -133,14 +133,23 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
 
     const startTime = Date.now();
     try {
-      const { executeMssqlQuery } = await import('../engine/mssql.js');
-
       let combinedRows: any[] = [];
       let columns: string[] = [];
 
       // Execute on each selected connection
       for (const connId of connection_ids) {
-        const result = await executeMssqlQuery(connId, query.sql_text as string, params);
+        const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(connId) as Record<string, any> | undefined;
+        if (!conn) throw new Error(`Conexión no encontrada: ${connId}`);
+
+        let result;
+        if (conn.driver === 'sqlite') {
+          const { executeSqliteQuery } = await import('../engine/sqlite.js');
+          result = await executeSqliteQuery(conn.host, query.sql_text as string, params);
+        } else {
+          const { executeMssqlQuery } = await import('../engine/mssql.js');
+          result = await executeMssqlQuery(connId, query.sql_text as string, params);
+        }
+
         if (columns.length === 0) columns = result.columns;
         combinedRows = [...combinedRows, ...result.rows];
       }

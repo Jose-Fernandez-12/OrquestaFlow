@@ -21,9 +21,7 @@ export function downloadAsXMLSpreadsheet(
     </Style>
     <Style ss:ID="Header">
       <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
-      <Borders>
-        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="2" ss:Color="#6366F1"/>
-      </Borders>
+      <Borders/>
       <Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#FFFFFF" ss:Bold="1"/>
       <Interior ss:Color="#1E293B" ss:Pattern="Solid"/>
     </Style>

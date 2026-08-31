@@ -88,8 +88,8 @@ textarea:focus-visible,
 }
 
 .react-flow__edge-path {
-  stroke: var(--accent) !important;
-  stroke-width: 2 !important;
+  stroke: var(--accent);
+  stroke-width: 2;
 }
 
 .react-flow__arrowhead {

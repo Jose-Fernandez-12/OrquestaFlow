@@ -7,7 +7,7 @@ export const StartNode = (props: any) => (
 );
 
 export const HttpNode = (props: any) => (
-  <BaseNode {...props} type={props.type || 'httpGet'} data={{ ...props.data, icon: Globe }} />
+  <BaseNode {...props} type="httpRequest" data={{ ...props.data, icon: Globe }} />
 );
 
 export const ScrapingNode = (props: any) => (
@@ -20,8 +20,7 @@ export const ExportNode = (props: any) => (
 
 export const nodeTypes = {
   start: StartNode,
-  httpGet: HttpNode,
-  httpPost: HttpNode,
+  httpRequest: HttpNode,
   scraping: ScrapingNode,
   export: ExportNode,
 };

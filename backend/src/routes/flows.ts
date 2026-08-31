@@ -84,30 +84,47 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       const duration = Date.now() - startTime;
 
       // Find any export output to surface the download link
-      const exportResult = Object.values(context).find((v: any) => v?.filePath && v?.success);
-      if (exportResult) {
-        const fileName = (exportResult as any).filePath.split(/[/\\]/).pop();
+      const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
+      
+      exportResults.forEach((exportResult: any) => {
+        const fileName = exportResult.filePath.split(/[/\\]/).pop();
         io.emit('flow-export-ready', {
           flowId: request.params.id,
           fileName,
           downloadUrl: `/api/files/${fileName}`,
-          records: (exportResult as any).records,
-          format: (exportResult as any).format,
-          filePath: (exportResult as any).filePath
+          records: exportResult.records,
+          format: exportResult.format,
+          filePath: exportResult.filePath
         });
+      });
+
+      let recordCount = 0;
+      if (exportResults.length > 0) {
+        recordCount = exportResults.reduce((acc, curr: any) => acc + (curr.records || 0), 0);
+      } else {
+        // Fallback: sum of items processed by nodes if no export node is present
+        for (const val of Object.values(context)) {
+          if (val && typeof val === 'object') {
+            if (Array.isArray((val as any).data?.items)) {
+              recordCount += (val as any).data.items.length;
+            } else if (Array.isArray((val as any).data)) {
+              recordCount += (val as any).data.length;
+            }
+          }
+        }
       }
 
       db.prepare(`
         UPDATE execution_logs
-        SET status = 'completed', duration_ms = ?, record_count = 1, completed_at = datetime('now')
+        SET status = 'completed', duration_ms = ?, record_count = ?, completed_at = datetime('now')
         WHERE id = ?
-      `).run(duration, logId);
+      `).run(duration, recordCount, logId);
 
       db.prepare(`
         UPDATE flows
-        SET last_run_at = datetime('now'), last_run_duration_ms = ?, last_run_record_count = 1, status = 'saved'
+        SET last_run_at = datetime('now'), last_run_duration_ms = ?, last_run_record_count = ?, status = 'saved'
         WHERE id = ?
-      `).run(duration, request.params.id);
+      `).run(duration, recordCount, request.params.id);
 
       return { data: { logId, status: 'completed', duration, context } };
 

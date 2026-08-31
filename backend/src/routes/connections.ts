@@ -34,9 +34,11 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
       region: string;
       city?: string;
       host: string;
-      database_name: string;
+      database_name?: string;
       port?: number;
       driver?: string;
+      username?: string;
+      password?: string;
       env_credential_key?: string;
     }
   }>('/', async (request) => {
@@ -44,15 +46,22 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
     const id = uuid();
     const {
       name, region, city, host, database_name,
-      port = 1433,
+      port,
       driver = 'ODBC Driver 17 for SQL Server',
-      env_credential_key = 'SQLSERVER'
+      username,
+      password,
+      env_credential_key
     } = request.body;
 
+    const isSqlite = driver === 'sqlite';
+    const finalPort = isSqlite ? 0 : (port || 1433);
+    const finalDbName = isSqlite ? 'sqlite' : (database_name || '');
+    const finalCredKey = isSqlite ? 'NONE' : (env_credential_key || 'SQLSERVER');
+
     db.prepare(`
-      INSERT INTO connections (id, name, region, city, host, database_name, port, driver, env_credential_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, name, region, city || name, host, database_name, port, driver, env_credential_key);
+      INSERT INTO connections (id, name, region, city, host, database_name, port, driver, username, password, env_credential_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, name, region, city || name, host, finalDbName, finalPort, driver, username || null, password || null, finalCredKey);
 
     const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(id);
     return { data: conn };
@@ -91,14 +100,18 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
   // Test connection
   app.post<{ Params: { id: string } }>('/:id/test', async (request, reply) => {
     const db = getDb();
-    const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
+    const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(request.params.id) as Record<string, any> | undefined;
     if (!conn) return reply.status(404).send({ error: 'Connection not found' });
 
     const startTime = Date.now();
     try {
-      const { executeMssqlQuery } = await import('../engine/mssql.js');
-      // Execute simple query to test connection
-      await executeMssqlQuery(request.params.id, 'SELECT 1 as connection_test');
+      if (conn.driver === 'sqlite') {
+        const { executeSqliteQuery } = await import('../engine/sqlite.js');
+        await executeSqliteQuery(conn.host, 'SELECT 1 as connection_test');
+      } else {
+        const { executeMssqlQuery } = await import('../engine/mssql.js');
+        await executeMssqlQuery(request.params.id, 'SELECT 1 as connection_test');
+      }
       const latency = Date.now() - startTime;
 
       db.prepare("UPDATE connections SET last_tested_at = datetime('now') WHERE id = ?").run(request.params.id);
