@@ -55,13 +55,61 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
         {node.type?.startsWith('http') && (
           <>
             <div className="space-y-1.5">
+              <label className="text-xs font-medium">Método</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent focus-visible:ring-3 focus-visible:ring-accent/70"
+                value={node.data?.method as string || 'GET'}
+                onChange={(e) => updateNodeData('method', e.target.value)}
+              >
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </div>
+            
+            <div className="space-y-1.5">
               <label className="text-xs font-medium">Endpoint URL</label>
               <Input 
                 value={node.data?.endpoint as string || ''} 
                 onChange={(e) => updateNodeData('endpoint', e.target.value)}
-                placeholder="https://api.example.com" 
+                placeholder="https://api.example.com/v1/users/{{start.data.id}}" 
               />
             </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Headers (JSON)</label>
+              <textarea 
+                className="flex w-full min-h-[60px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
+                value={node.data?.headers as string || '{\n  "Content-Type": "application/json"\n}'}
+                onChange={(e) => updateNodeData('headers', e.target.value)}
+                placeholder={'{\n  "Authorization": "Bearer token"\n}'}
+              />
+            </div>
+            
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Query Params (JSON)</label>
+              <textarea 
+                className="flex w-full min-h-[60px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
+                value={node.data?.params as string || ''}
+                onChange={(e) => updateNodeData('params', e.target.value)}
+                placeholder={'{\n  "status": "active"\n}'}
+              />
+            </div>
+
+            {['POST', 'PUT', 'PATCH'].includes((node.data?.method as string) || 'GET') && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Body / Payload (JSON)</label>
+                <textarea 
+                  className="flex w-full min-h-[100px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
+                  value={node.data?.body as string || ''}
+                  onChange={(e) => updateNodeData('body', e.target.value)}
+                  placeholder={'{\n  "id": "{{start.data.id}}"\n}'}
+                />
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <label className="text-xs font-medium">Formato de respuesta</label>
               <select 

@@ -11,8 +11,8 @@ function buildMssqlConfig(connection: any) {
   // So we check process.env[env_credential_key + '_USER'] & process.env[env_credential_key + '_PASSWORD']
   const key = connection.env_credential_key || 'SQLSERVER';
   
-  const user = process.env[`DB_USER_${key}`] || process.env.DB_USER_DEFAULT || 'sa';
-  const password = process.env[`DB_PASSWORD_${key}`] || process.env.DB_PASSWORD_DEFAULT || 'SecretPassword123!';
+  const user = connection.username || process.env[`DB_USER_${key}`] || process.env.DB_USER_DEFAULT || 'sa';
+  const password = connection.password || process.env[`DB_PASSWORD_${key}`] || process.env.DB_PASSWORD_DEFAULT || 'SecretPassword123!';
 
   return {
     user,

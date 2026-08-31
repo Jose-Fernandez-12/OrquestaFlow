@@ -3,8 +3,7 @@ import { Play, Globe, Code, FileOutput, ArrowRight } from 'lucide-react';
 
 const NODE_TEMPLATES = [
   { type: 'start', label: 'Inicio de flujo', icon: Play, desc: 'Punto de entrada' },
-  { type: 'httpGet', label: 'HTTP GET', icon: Globe, desc: 'Obtener datos JSON' },
-  { type: 'httpPost', label: 'HTTP POST', icon: Globe, desc: 'Enviar datos JSON' },
+  { type: 'httpRequest', label: 'HTTP Request', icon: Globe, desc: 'Petición HTTP personalizable' },
   { type: 'scraping', label: 'Web Scraping', icon: Code, desc: 'Extraer HTML/XML' },
   { type: 'export', label: 'Exportar CSV/Excel', icon: FileOutput, desc: 'Generar archivo' },
 ];

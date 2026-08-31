@@ -96,7 +96,7 @@ export async function initDb(): Promise<void> {
   // Seed demo data if tables are empty
   const flowCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM flows').get() as { count: number };
   if (flowCount.count === 0) {
-    seedDemoData(wrappedDb);
+    // seedDemoData(wrappedDb);
   }
 }
 
