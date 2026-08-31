@@ -1,0 +1,427 @@
+import React, { useState } from 'react';
+import { Input } from '../ui/input';
+import { Button } from '../ui/button';
+import { JsonTreeViewer } from './JsonTreeViewer';
+import { X } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import type { Node, Edge } from '@xyflow/react';
+
+interface NodeInspectorProps {
+  nodes: Node[];
+  setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
+  edges: Edge[];
+  selectedNodeId: string;
+}
+
+export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeInspectorProps) {
+
+  const node = nodes.find(n => n.id === selectedNodeId);
+  
+  const updateNodeData = (key: string, value: any) => {
+    setNodes(nds =>
+      nds.map(n => {
+        if (n.id === selectedNodeId) {
+          return { ...n, data: { ...n.data, [key]: value } };
+        }
+        return n;
+      })
+    );
+  };
+
+  if (!node) {
+    return (
+      <div className="w-[300px] bg-surface border-l border-border flex flex-col p-4 z-10 shrink-0">
+        Nodo no encontrado
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-[300px] bg-surface border-l border-border flex flex-col h-full z-10 shrink-0">
+      <div className="p-4 border-b border-border font-medium flex items-center justify-between">
+        Configuración
+        <span className="text-xs text-muted px-2 py-1 bg-bg rounded-sm font-mono">{node.type || 'unknown'}</span>
+      </div>
+      <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-4">
+        
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Etiqueta del nodo</label>
+          <Input 
+            value={node.data?.label as string || ''} 
+            onChange={(e) => updateNodeData('label', e.target.value)} 
+          />
+        </div>
+
+        {node.type?.startsWith('http') && (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Endpoint URL</label>
+              <Input 
+                value={node.data?.endpoint as string || ''} 
+                onChange={(e) => updateNodeData('endpoint', e.target.value)}
+                placeholder="https://api.example.com" 
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Formato de respuesta</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent focus-visible:ring-3 focus-visible:ring-accent/70"
+                value={node.data?.responseFormat as string || 'JSON'}
+                onChange={(e) => updateNodeData('responseFormat', e.target.value)}
+              >
+                <option value="JSON">JSON</option>
+                <option value="XML">XML</option>
+                <option value="Text">Texto plano</option>
+              </select>
+            </div>
+            
+            {/* JSON Selector Modal Trigger */}
+            <div className="pt-2 border-t border-border mt-2">
+              <JsonSelectorTrigger node={node} />
+            </div>
+          </>
+        )}
+
+        {node.type === 'scraping' && (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">URL a scrapear</label>
+              <Input 
+                value={node.data?.url as string || ''} 
+                onChange={(e) => updateNodeData('url', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Script de extracción (.py)</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent focus-visible:ring-3 focus-visible:ring-accent/70"
+                value={node.data?.script as string || ''}
+                onChange={(e) => updateNodeData('script', e.target.value)}
+              >
+                <option value="">Seleccionar script...</option>
+                <option value="1">extraer_precios.py</option>
+                <option value="2">parse_table.py</option>
+              </select>
+            </div>
+          </>
+        )}
+
+        {node.type === 'export' && (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Nombre de archivo</label>
+              <Input 
+                value={node.data?.fileName as string || 'export'} 
+                onChange={(e) => updateNodeData('fileName', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Formato</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent focus-visible:ring-3 focus-visible:ring-accent/70"
+                value={node.data?.format as string || 'CSV'}
+                onChange={(e) => updateNodeData('format', e.target.value)}
+              >
+                <option value="CSV">CSV</option>
+                <option value="Excel">Excel (.xlsx)</option>
+              </select>
+            </div>
+
+            <div className="space-y-1.5 mt-2">
+              <label className="text-xs font-medium">Ruta de Colección (Array Base)</label>
+              <Input 
+                placeholder="{{httpGet_1.data.items}}"
+                className="font-mono text-xs"
+                value={node.data?.dataSource as string || ''} 
+                onChange={(e) => updateNodeData('dataSource', e.target.value)}
+              />
+              <p className="text-[10px] text-muted leading-tight">Dejar vacío para usar todo el resultado del nodo anterior.</p>
+            </div>
+
+            <ColumnMappingEditor 
+              columns={node.data?.columns as any || []}
+              onChange={cols => updateNodeData('columns', cols)}
+            />
+
+            {/* Render JSON Viewer for upstream HTTP nodes to make mapping easier */}
+            {edges
+              .filter(e => e.target === node.id)
+              .map(e => nodes.find(n => n.id === e.source))
+              .filter(n => n && n.type?.startsWith('http'))
+              .map(upNode => (
+                <div key={upNode!.id} className="pt-2 border-t border-border mt-4">
+                  <span className="text-[10px] text-muted block mb-1">Inspeccionar datos desde: {(upNode!.data?.label as string) || upNode!.type}</span>
+                  <JsonSelectorTrigger node={upNode} forExportNode={node} updateNodeData={updateNodeData} />
+                </div>
+              ))
+            }
+          </>
+        )}
+
+        <div className="mt-8 pt-4 border-t border-border">
+          <Button 
+            variant="default" 
+            className="w-full text-danger border-danger/20 hover:bg-danger/10 hover:border-danger/30"
+            onClick={() => setNodes(nds => nds.filter(n => n.id !== selectedNodeId))}
+          >
+            Eliminar Nodo
+          </Button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+function truncateArrays(obj: any): any {
+  if (Array.isArray(obj)) {
+    if (obj.length > 0) {
+      // Mantener hasta 3 elementos como referencia para el usuario
+      return obj.slice(0, 3).map(truncateArrays);
+    }
+    return [];
+  } else if (obj !== null && typeof obj === 'object') {
+    const newObj: any = {};
+    for (const key in obj) {
+      newObj[key] = truncateArrays(obj[key]);
+    }
+    return newObj;
+  }
+  return obj;
+}
+
+function JsonSelectorTrigger({ node, forExportNode, updateNodeData }: { node: any, forExportNode?: any, updateNodeData?: (key: string, val: any) => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [selectedKey, setSelectedKey] = useState('');
+  const [jsonData, setJsonData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  // Multi-select state for column auto-mapping
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const isMultiSelect = !!forExportNode;
+
+  const handleOpen = async () => {
+    setIsOpen(true);
+    setSelectedPaths([]);
+    
+    // Si ya tenemos los datos cacheados, no volver a hacer la petición
+    if (jsonData) return;
+
+    setError('');
+    
+    let endpoint = node.data?.endpoint || '';
+    if (!endpoint) {
+      setError('No hay un endpoint configurado');
+      return;
+    }
+
+    if (endpoint.includes('storefront.com') || !endpoint.startsWith('http')) {
+       // use sample mock
+       setJsonData({
+         status: "success",
+         code: 200,
+         data: {
+           items: [
+             { id: "prod_01", name: "Laptop Pro", price: 1299.99, stock: 45 }
+           ],
+           pagination: { page: 1, total_pages: 5, total_items: 10 }
+         }
+       });
+       return;
+    }
+
+    setLoading(true);
+    try {
+      const method = node.type === 'httpPost' ? 'POST' : 'GET';
+      const options: RequestInit = { method, headers: { 'Content-Type': 'application/json' } };
+      if (method === 'POST' && node.data?.payload) {
+        options.body = JSON.stringify(node.data.payload);
+      }
+
+      const res = await fetch(endpoint, options);
+      if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+      
+      const text = await res.text();
+      try {
+        const parsed = JSON.parse(text);
+        setJsonData(truncateArrays(parsed));
+      } catch (e) {
+        setJsonData({ textResponse: text.slice(0, 500) + '...' });
+      }
+    } catch (err: any) {
+      setError(err.message || 'Error al ejecutar la petición (posible bloqueo CORS o URL inválida).');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSelectKey = (path: string) => {
+    // path already starts with nodeId (it's the currentPath)
+    const variableFormat = `{{${path}}}`;
+    setSelectedKey(variableFormat);
+    navigator.clipboard.writeText(variableFormat);
+    alert(`Copiado al portapapeles: ${variableFormat}`);
+  };
+
+  const handleTogglePath = (path: string) => {
+    setSelectedPaths(prev => 
+      prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]
+    );
+  };
+
+  const handleAutoMapColumns = () => {
+    if (!updateNodeData || !forExportNode) return;
+    
+    const currentCols = forExportNode.data?.columns || [];
+    
+    const newCols = selectedPaths.map(path => {
+      // Intentar limpiar el path para obtener solo la clave relativa
+      // ej: "response[0].name" -> "name", "response.data.items[0].price" -> "price"
+      let relativeKey = path;
+      const bracketIndex = path.lastIndexOf('].');
+      if (bracketIndex !== -1) {
+        relativeKey = path.substring(bracketIndex + 2);
+      } else {
+        const dotIndex = path.lastIndexOf('.');
+        if (dotIndex !== -1) relativeKey = path.substring(dotIndex + 1);
+      }
+
+      // El nombre por defecto puede ser la llave capitalizada
+      const headerName = relativeKey.split('.').pop() || relativeKey;
+      const capitalized = headerName.charAt(0).toUpperCase() + headerName.slice(1);
+
+      return {
+        header: capitalized,
+        key: relativeKey
+      };
+    });
+
+    updateNodeData('columns', [...currentCols, ...newCols]);
+    alert(`${newCols.length} columnas agregadas correctamente.`);
+    setIsOpen(false);
+  };
+
+  return (
+    <>
+      <Button variant="textLink" onClick={handleOpen}>
+        Visualizar Respuesta (JSON)
+      </Button>
+
+      {isOpen && createPortal(
+        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-lg p-6 relative flex flex-col gap-4">
+            <button 
+              onClick={() => setIsOpen(false)}
+              className="absolute top-4 right-4 text-muted hover:text-fg"
+            >
+              <X size={18} />
+            </button>
+
+            <div>
+              <h2 className="text-lg font-semibold">
+                {isMultiSelect ? 'Seleccionar columnas' : 'Selector de campos JSON'}
+              </h2>
+              <p className="text-xs text-muted mt-1">
+                {isMultiSelect 
+                  ? 'Marca los campos que deseas exportar. Se extraerá la llave automáticamente.'
+                  : 'Haz clic en cualquier propiedad para copiar su variable de referencia.'
+                }
+              </p>
+            </div>
+
+            {loading && <div className="text-center p-4 text-sm text-muted">Realizando petición a {node.data?.endpoint}...</div>}
+            {error && <div className="text-center p-4 text-sm text-danger border border-danger/30 bg-danger/5 rounded-md">{error}</div>}
+            {!loading && !error && jsonData && (
+              <JsonTreeViewer 
+                data={jsonData} 
+                mode={isMultiSelect ? 'select' : 'copy'}
+                onSelectKey={isMultiSelect ? undefined : handleSelectKey}
+                currentPath={node.id}
+                selectedPaths={selectedPaths}
+                onTogglePath={handleTogglePath}
+              />
+            )}
+
+            {!isMultiSelect && selectedKey && (
+              <div className="p-3 bg-bg border border-border rounded-sm">
+                <span className="text-xs text-muted block mb-1">Variable seleccionada</span>
+                <code className="text-xs text-accent font-semibold">{selectedKey}</code>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 mt-2">
+              {isMultiSelect && selectedPaths.length > 0 && (
+                <Button variant="primary" size="sm" onClick={handleAutoMapColumns}>
+                  Agregar {selectedPaths.length} seleccionadas
+                </Button>
+              )}
+              <Button variant="default" size="sm" onClick={() => setIsOpen(false)}>
+                Cerrar
+              </Button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
+function ColumnMappingEditor({ columns, onChange }: { columns: { header: string, key: string }[], onChange: (cols: any) => void }) {
+  const addColumn = () => {
+    onChange([...(columns || []), { header: '', key: '' }]);
+  };
+
+  const updateColumn = (index: number, field: 'header' | 'key', value: string) => {
+    const newCols = [...(columns || [])];
+    newCols[index] = { ...newCols[index], [field]: value };
+    onChange(newCols);
+  };
+
+  const removeColumn = (index: number) => {
+    const newCols = [...(columns || [])];
+    newCols.splice(index, 1);
+    onChange(newCols);
+  };
+
+  return (
+    <div className="space-y-2 mt-4 pt-4 border-t border-border">
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-medium">Mapeo de Columnas</label>
+        <Button variant="default" size="sm" onClick={addColumn} className="h-6 text-[10px] px-2 py-0">
+          + Agregar
+        </Button>
+      </div>
+      
+      <div className="space-y-2 max-h-[250px] overflow-y-auto pb-2">
+        {(columns || []).map((col, i) => (
+          <div key={i} className="flex gap-2 items-center bg-bg p-2 rounded-sm border border-border">
+            <div className="flex-1 space-y-1">
+              <Input 
+                placeholder="Nombre Columna (ej: Precio)" 
+                className="h-7 text-xs" 
+                value={col.header} 
+                onChange={e => updateColumn(i, 'header', e.target.value)} 
+              />
+              <Input 
+                placeholder="Llave JSON (ej: price)" 
+                className="h-7 text-xs font-mono" 
+                value={col.key} 
+                onChange={e => updateColumn(i, 'key', e.target.value)} 
+              />
+            </div>
+            <Button variant="icon" size="icon" onClick={() => removeColumn(i)} className="text-danger hover:text-danger hover:bg-danger/10 shrink-0">
+              <X size={14} />
+            </Button>
+          </div>
+        ))}
+        {(!columns || columns.length === 0) && (
+          <div className="text-[10px] text-muted text-center py-4 bg-bg rounded-sm border border-border border-dashed">
+            Sin mapeo. Se exportarán todos los campos.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
