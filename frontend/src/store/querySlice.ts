@@ -8,6 +8,7 @@ export interface Query {
   sql_text: string;
   params: string; // JSON array
   connection_ids: string; // JSON array
+  display_columns?: string; // JSON array
   last_run_at: string | null;
   last_row_count: number | null;
   created_at: string;
@@ -72,6 +73,9 @@ export const executeQuery = createAsyncThunk('queries/execute', async ({ id, con
     body: JSON.stringify({ connection_ids, params }),
   });
   const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || data.error || 'Error executing query');
+  }
   return data.data as QueryResult;
 });
 

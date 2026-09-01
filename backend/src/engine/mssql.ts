@@ -21,11 +21,11 @@ function buildMssqlConfig(connection: any) {
     database: connection.database_name,
     port: Number(connection.port || 1433),
     options: {
-      encrypt: false, // Local servers usually don't force encrypt
+      encrypt: connection.host.includes('.database.windows.net') || false, // Azure SQL requires encryption
       trustServerCertificate: true,
     },
-    connectionTimeout: 5000,
-    requestTimeout: 15000,
+    connectionTimeout: 30000,
+    requestTimeout: 300000,
   };
 }
 
@@ -45,12 +45,31 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
 
     // Map named parameters from :param to MS SQL format (@param)
     // MS SQL does not support colon parameters natively, so we replace them and inject variables.
-    let parsedSql = sqlText;
+    // Replace :param inside string literals (like '%:param%') with string concatenation
+    let parsedSql = sqlText.replace(/'(%?):([a-zA-Z0-9_]+)(%?)'/g, (match, leading, paramName, trailing) => {
+      let concatArgs = [];
+      if (leading) concatArgs.push("'%'");
+      concatArgs.push(`@${paramName}`);
+      if (trailing) concatArgs.push("'%'");
+      if (concatArgs.length === 1) return `@${paramName}`;
+      return concatArgs.join(' + ');
+    });
     
-    Object.keys(params).forEach(key => {
-      const val = params[key];
-      // Replace :param with @param
-      parsedSql = parsedSql.replace(new RegExp(`:${key}\\b`, 'g'), `@${key}`);
+    // Replace remaining normal :param with @param
+    parsedSql = parsedSql.replace(/(?<!')(:[a-zA-Z0-9_]+)\b/g, (match) => {
+      return '@' + match.substring(1);
+    });
+
+    // Extract all unique parameters from original SQL
+    const paramMatches = [...sqlText.matchAll(/:([a-zA-Z0-9_]+)\b/g)];
+    const uniqueParams = [...new Set(paramMatches.map(m => m[1]))];
+
+    uniqueParams.forEach(key => {
+      let val = params[key];
+      // Fallback to empty string if parameter is missing, so it doesn't crash execution
+      if (val === undefined || val === null) {
+        val = '';
+      }
       request.input(key, val);
     });
 

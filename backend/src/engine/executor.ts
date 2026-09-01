@@ -76,6 +76,9 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
                   case 'export':
                     output = await executeExportNode(node, context);
                     break;
+                  case 'query':
+                    output = await executeQueryNode(node, context);
+                    break;
                   default:
                     output = { warning: 'Unknown node type' };
                 }
@@ -137,17 +140,11 @@ async function executeHttpNode(node: any, context: Record<string, any>) {
     };
   }
   
-  // Substitution helper for {{nodeId.key}}
   const substitute = (str: string) => {
     if (typeof str !== 'string') return str;
     return str.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
-      const parts = pathStr.trim().split('.');
-      let val = context;
-      for (const part of parts) {
-        if (val === undefined || val === null) return '';
-        val = val[part];
-      }
-      return typeof val === 'object' ? JSON.stringify(val) : String(val || '');
+      const val = resolvePath(context, pathStr);
+      return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
     });
   };
 
@@ -402,4 +399,66 @@ async function executeExportNode(node: any, context: Record<string, any>) {
   }
 
   return { filePath, format, records: exportData.length, success: true };
+}
+
+// Query Node Handler
+async function executeQueryNode(node: any, context: Record<string, any>) {
+  const queryId = node.data?.queryId;
+  if (!queryId) throw new Error('Query ID not configured in query node');
+
+  const db = getDb();
+  const queryInfo = db.prepare('SELECT * FROM queries WHERE id = ?').get(queryId) as any;
+  if (!queryInfo) throw new Error('Query not found in database');
+
+  const sqlText = queryInfo.sql_text;
+  let connectionIds: string[] = [];
+  try {
+    connectionIds = JSON.parse(queryInfo.connection_ids || '[]');
+  } catch(e) {}
+  if (connectionIds.length === 0) throw new Error('Query has no connections configured');
+
+  const substitute = (str: string) => {
+    if (typeof str !== 'string') return str;
+    return str.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
+      const val = resolvePath(context, pathStr);
+      return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
+    });
+  };
+
+  let params: Record<string, any> = {};
+  if (node.data?.queryParams && node.data.queryParams.trim() !== '') {
+    try {
+      params = JSON.parse(substitute(node.data.queryParams));
+    } catch(e) {
+      console.error('Failed to parse query params mapping', e);
+    }
+  }
+
+  const connectionId = connectionIds[0];
+  const { executeMssqlQuery } = await import('./mssql.js');
+  const result = await executeMssqlQuery(connectionId, sqlText, params);
+
+  const extractMode = node.data?.extractMode || 'all';
+  
+  if (extractMode === 'selected_columns') {
+    const colsStr = node.data?.extractColumns || '';
+    const cols = colsStr.split(',').map((c: string) => c.trim()).filter(Boolean);
+    
+    if (cols.length > 0 && result.rows && result.rows.length > 0) {
+      if (cols.length === 1) {
+        return result.rows.map((r: any) => r[cols[0]]);
+      } else {
+        return result.rows.map((r: any) => {
+          const obj: any = {};
+          for (const col of cols) {
+            obj[col] = r[col];
+          }
+          return obj;
+        });
+      }
+    }
+    return [];
+  }
+
+  return result.rows;
 }
