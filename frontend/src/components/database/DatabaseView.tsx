@@ -2,7 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchConnections, setCurrentConnection, testConnection, createConnection } from '../../store/connectionSlice';
 import { fetchQueries, setCurrentQuery, executeQuery, updateQuery, createQuery } from '../../store/querySlice';
-import { Database, Plus, Play, RefreshCw, Save, CheckCircle2, AlertCircle } from 'lucide-react';
+import { showToast } from '../../store/uiSlice';
+import { Database, Plus, Play, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns } from 'lucide-react';
+import CodeMirror from '@uiw/react-codemirror';
+import { sql } from '@codemirror/lang-sql';
+import { format } from 'sql-formatter';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Card } from '../ui/card';
@@ -34,6 +38,13 @@ export function DatabaseView() {
   const [sqlText, setSqlText] = useState('');
   const [queryName, setQueryName] = useState('');
   const [selectedConns, setSelectedConns] = useState<string[]>([]);
+  const [displayColumns, setDisplayColumns] = useState<string[]>([]);
+  const [isColumnSelectorOpen, setIsColumnSelectorOpen] = useState(false);
+
+  // Local state for parameters
+  const [isParamModalOpen, setIsParamModalOpen] = useState(false);
+  const [detectedParams, setDetectedParams] = useState<string[]>([]);
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
   useEffect(() => {
     dispatch(fetchConnections());
@@ -51,10 +62,17 @@ export function DatabaseView() {
       } catch (e) {
         setSelectedConns([]);
       }
+      try {
+        const dCols = JSON.parse(queriesState.currentQuery.display_columns || '[]');
+        setDisplayColumns(Array.isArray(dCols) ? dCols : []);
+      } catch (e) {
+        setDisplayColumns([]);
+      }
     } else {
       setSqlText('');
       setQueryName('');
       setSelectedConns([]);
+      setDisplayColumns([]);
     }
   }, [queriesState.currentQuery]);
 
@@ -77,24 +95,88 @@ export function DatabaseView() {
         id: queriesState.currentQuery.id,
         name: queryName,
         sql_text: sqlText,
-        connection_ids: selectedConns
+        connection_ids: selectedConns,
+        display_columns: JSON.stringify(displayColumns)
       }));
     } else {
       dispatch(createQuery({
         name: queryName || 'Nueva Consulta',
         sql_text: sqlText,
-        connection_ids: selectedConns
+        connection_ids: selectedConns,
+        display_columns: JSON.stringify(displayColumns)
       }));
     }
   };
 
-  const handleExecuteQuery = () => {
+  const handleFormatSql = () => {
+    try {
+      const formatted = format(sqlText, { 
+        language: 'sql', 
+        keywordCase: 'upper',
+        linesBetweenQueries: 1
+      });
+      setSqlText(formatted);
+    } catch (e) {
+      console.error('Error formatting SQL', e);
+    }
+  };
+
+  const extractParams = (sqlString: string) => {
+    const regex = /:([a-zA-Z0-9_]+)/g;
+    const params = new Set<string>();
+    let match;
+    while ((match = regex.exec(sqlString)) !== null) {
+      params.add(match[1]);
+    }
+    return Array.from(params);
+  };
+
+  const handleExecuteClick = () => {
+    if (!queriesState.currentQuery || selectedConns.length === 0) return;
+    
+    const params = extractParams(sqlText);
+    if (params.length > 0) {
+      setDetectedParams(params);
+      const initialValues: Record<string, string> = {};
+      params.forEach(p => initialValues[p] = '');
+      setParamValues(initialValues);
+      setIsParamModalOpen(true);
+    } else {
+      doExecute({});
+    }
+  };
+
+  const doExecute = (params: Record<string, any>) => {
     if (queriesState.currentQuery && selectedConns.length > 0) {
+      // Auto-parse parameters
+      const parsedParams: Record<string, any> = {};
+      Object.keys(params).forEach(k => {
+        let val = params[k];
+        if (typeof val === 'string') {
+          val = val.trim();
+          // Quitar comillas simples o dobles si el usuario las puso manualmente
+          if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
+            val = val.substring(1, val.length - 1);
+          }
+          // Convertir a número si es un número válido
+          if (val !== '' && !isNaN(Number(val))) {
+            parsedParams[k] = Number(val);
+          } else {
+            parsedParams[k] = val;
+          }
+        } else {
+          parsedParams[k] = val;
+        }
+      });
+
       dispatch(executeQuery({
         id: queriesState.currentQuery.id,
         connection_ids: selectedConns,
-        params: {} // optional
-      }));
+        params: parsedParams
+      })).unwrap().catch((err: any) => {
+        dispatch(showToast(`Error de ejecución: ${err.message}`));
+      });
+      setIsParamModalOpen(false);
     }
   };
 
@@ -106,6 +188,17 @@ export function DatabaseView() {
 
   const selectedConn = connectionsState.currentConnection;
   const selectedQuery = queriesState.currentQuery;
+
+  const activeColumns = React.useMemo(() => {
+    if (!queriesState.results?.columns) return [];
+    const dCols = Array.isArray(displayColumns) ? displayColumns : [];
+    if (dCols.length === 0) return queriesState.results.columns;
+    
+    const filtered = queriesState.results.columns.filter(c => 
+      c && typeof c === 'string' && dCols.some(dc => dc && typeof dc === 'string' && dc.toLowerCase() === c.toLowerCase())
+    );
+    return filtered.length > 0 ? filtered : queriesState.results.columns;
+  }, [queriesState.results?.columns, displayColumns]);
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-bg p-6">
@@ -292,10 +385,13 @@ export function DatabaseView() {
                   <p className="text-sm text-muted mt-1">Escribe la consulta SQL y selecciona las bases de datos destino.</p>
                 </div>
                 <div className="flex gap-2 shrink-0">
+                  <Button variant="default" size="sm" onClick={handleFormatSql} className="gap-2" title="Formatear SQL">
+                    <AlignLeft size={14} /> Formatear
+                  </Button>
                   <Button variant="default" size="sm" onClick={handleSaveQuery} className="gap-2">
                     <Save size={14} /> Guardar
                   </Button>
-                  <Button variant="primary" size="sm" onClick={handleExecuteQuery} disabled={queriesState.executing} className="gap-2">
+                  <Button variant="primary" size="sm" onClick={handleExecuteClick} disabled={queriesState.executing} className="gap-2">
                     <Play size={14} /> Ejecutar
                   </Button>
                 </div>
@@ -329,13 +425,16 @@ export function DatabaseView() {
               {/* SQL Code Editor */}
               <div className="flex flex-col gap-2">
                 <label className="text-xs font-medium text-muted font-mono uppercase tracking-wider">Sentencia SQL</label>
-                <textarea
-                  value={sqlText}
-                  onChange={(e) => setSqlText(e.target.value)}
-                  placeholder="SELECT * FROM tabla WHERE campo = :param"
-                  className="w-full min-h-[160px] p-4 border border-border rounded-sm font-mono text-sm bg-bg text-fg focus-visible:outline-none focus-visible:border-accent resize-y"
-                  spellCheck={false}
-                />
+                <div className="border border-border rounded-sm overflow-hidden bg-bg focus-within:border-accent">
+                  <CodeMirror
+                    value={sqlText}
+                    height="300px"
+                    extensions={[sql()]}
+                    onChange={(val) => setSqlText(val)}
+                    theme="light"
+                    className="text-sm font-mono border-0"
+                  />
+                </div>
               </div>
 
               {/* Results display */}
@@ -344,18 +443,70 @@ export function DatabaseView() {
               )}
 
               {queriesState.results && (
-                <div className="border border-border rounded-md overflow-hidden bg-surface flex flex-col">
+                <div className="border border-border rounded-md bg-surface flex flex-col relative">
                   <div className="p-4 border-b border-border bg-bg/30 flex justify-between items-center">
                     <div>
                       <h4 className="text-sm font-semibold">Resultados</h4>
                       <p className="text-xs text-muted">{queriesState.results?.rowCount} registros devueltos en {queriesState.results?.duration}ms</p>
                     </div>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={() => setIsColumnSelectorOpen(!isColumnSelectorOpen)}
+                      className="gap-2"
+                    >
+                      <Columns size={14} /> Columnas visibles
+                    </Button>
                   </div>
+                  
+                  {isColumnSelectorOpen && (
+                    <div className="p-4 border-b border-border bg-bg">
+                      <div className="flex flex-wrap gap-2">
+                        {queriesState.results.columns?.map(col => {
+                          const isVisible = activeColumns.includes(col);
+                          return (
+                            <button
+                              key={col}
+                              onClick={() => {
+                                setDisplayColumns(prev => {
+                                  if (prev.length === 0) {
+                                    return (queriesState.results?.columns || []).filter(c => c !== col);
+                                  }
+                                  const exists = prev.some(c => c.toLowerCase() === col.toLowerCase());
+                                  if (exists) {
+                                    const next = prev.filter(c => c.toLowerCase() !== col.toLowerCase());
+                                    if (next.length === 0) return []; 
+                                    return next;
+                                  }
+                                  return [...prev, col];
+                                });
+                              }}
+                              className={cn(
+                                "px-2 py-1 text-[10px] font-mono border rounded-sm transition-colors",
+                                isVisible ? "bg-accent/10 border-accent/30 text-accent" : "bg-transparent border-border text-muted"
+                              )}
+                            >
+                              {col}
+                            </button>
+                          );
+                        })}
+                        {displayColumns.length > 0 && (
+                          <button 
+                            onClick={() => setDisplayColumns([])}
+                            className="px-2 py-1 text-[10px] font-mono border border-border rounded-sm hover:bg-bg ml-2"
+                          >
+                            Mostrar todas
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
                         <tr className="bg-bg border-b border-border">
-                          {queriesState.results.columns?.map(col => (
+                          {activeColumns.map(col => (
                             <th key={col} className="p-3 font-mono font-medium text-muted">{col}</th>
                           ))}
                         </tr>
@@ -363,7 +514,7 @@ export function DatabaseView() {
                       <tbody>
                         {queriesState.results.rows?.map((row, idx) => (
                           <tr key={idx} className="border-b border-border hover:bg-bg/40 last:border-0">
-                            {queriesState.results?.columns?.map(col => (
+                            {activeColumns.map(col => (
                               <td key={col} className="p-3 truncate max-w-[200px]" title={String(row[col] ?? '')}>
                                 {String(row[col] ?? '')}
                               </td>
@@ -551,6 +702,41 @@ export function DatabaseView() {
           )}
         </div>
       </div>
+
+      {/* Params Modal */}
+      {isParamModalOpen && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-surface border border-border rounded-lg shadow-xl w-full max-w-md overflow-hidden flex flex-col">
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+              <h3 className="font-semibold">Parámetros requeridos</h3>
+              <button onClick={() => setIsParamModalOpen(false)} className="text-muted hover:text-fg">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-6 flex flex-col gap-4">
+              <p className="text-sm text-muted">Ingresa los valores para los parámetros detectados en tu consulta SQL.</p>
+              {detectedParams.map(param => (
+                <div key={param} className="flex flex-col gap-1.5">
+                  <label className="text-xs font-mono font-medium text-accent">:{param}</label>
+                  <Input
+                    type="text"
+                    value={paramValues[param] || ''}
+                    onChange={(e) => setParamValues(prev => ({ ...prev, [param]: e.target.value }))}
+                    placeholder={`Valor para ${param}`}
+                    autoFocus={detectedParams[0] === param}
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t border-border bg-bg/50 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setIsParamModalOpen(false)}>Cancelar</Button>
+              <Button variant="primary" onClick={() => doExecute(paramValues)} className="gap-2">
+                <Play size={14} /> Ejecutar Consulta
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

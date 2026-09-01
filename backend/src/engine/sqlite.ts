@@ -15,7 +15,17 @@ export async function executeSqliteQuery(filePath: string, sqlText: string, para
   const db = new SQL.Database(fileBuffer);
 
   try {
-    const stmt = db.prepare(sqlText);
+    // Convert common LIKE patterns with parameters inside quotes to string concatenation
+    let parsedSql = sqlText.replace(/'(%?):([a-zA-Z0-9_]+)(%?)'/g, (match, leading, paramName, trailing) => {
+      let parts = [];
+      if (leading) parts.push("'%'");
+      parts.push(`:${paramName}`);
+      if (trailing) parts.push("'%'");
+      if (parts.length === 1) return `:${paramName}`;
+      return parts.join(' || ');
+    });
+    
+    const stmt = db.prepare(parsedSql);
     try {
       // Map params if any (SQLite supports object binding for keys starting with :, @, $)
       const binds: Record<string, any> = {};

@@ -91,14 +91,22 @@ export function JsonTreeViewer({
     const isSelected = selectedPaths.includes(path);
 
     return (
-      <div className="flex items-center gap-1.5 group py-0.5">
+      <div 
+        className={cn(
+          "flex items-center gap-1.5 group py-0.5",
+          mode === 'select' ? "cursor-pointer hover:bg-white/5 rounded px-1 -ml-1" : ""
+        )}
+        onClick={() => {
+          if (mode === 'select' && onTogglePath) onTogglePath(path);
+        }}
+      >
         <span className={cn("font-mono text-xs", valColor)}>
           {typeof val === 'string' ? `"${valStr}"` : valStr}
         </span>
         {mode === 'copy' && onSelectKey && (
           <button
             type="button"
-            onClick={() => onSelectKey(path)}
+            onClick={(e) => { e.stopPropagation(); onSelectKey(path); }}
             title={`Seleccionar ${path}`}
             className="opacity-0 group-hover:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
           >
@@ -108,14 +116,14 @@ export function JsonTreeViewer({
         {mode === 'select' && onTogglePath && (
           <button
             type="button"
-            onClick={() => onTogglePath(path)}
+            onClick={(e) => { e.stopPropagation(); onTogglePath(path); }}
             title={isSelected ? `Deseleccionar ${path}` : `Seleccionar ${path}`}
             className={cn(
-              "p-0.5 transition-opacity shrink-0",
-              isSelected ? "text-accent opacity-100" : "text-muted hover:text-accent opacity-0 group-hover:opacity-100"
+              "p-0.5 transition-opacity shrink-0 ml-2",
+              isSelected ? "text-accent opacity-100" : "text-muted opacity-60 group-hover:opacity-100 group-hover:text-accent"
             )}
           >
-            {isSelected ? <Check size={12} /> : <Plus size={12} />}
+            {isSelected ? <Check size={14} /> : <Plus size={14} />}
           </button>
         )}
       </div>

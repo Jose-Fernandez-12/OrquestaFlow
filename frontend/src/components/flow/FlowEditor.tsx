@@ -49,6 +49,7 @@ function FlowCanvas() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
   const completedNodeIds = useAppSelector(state => state.flows.completedNodeIds);
   const errorNodeIds = useAppSelector(state => state.flows.errorNodeIds);
+  const queries = useAppSelector(state => (state as any).queries.queries || []);
 
   const flowSchedules = currentFlow 
     ? schedules.filter(s => s.target_type === 'flow' && s.target_id === currentFlow.id && s.is_active === 1)
@@ -73,6 +74,10 @@ function FlowCanvas() {
     label: string;
     result: any;
     hasError: boolean;
+  } | null>(null);
+
+  const [missingParamsContext, setMissingParamsContext] = useState<{
+    nodesWithMissing: { node: Node, missing: string[], currentParams: Record<string, string> }[];
   } | null>(null);
 
   useEffect(() => {
@@ -220,23 +225,67 @@ function FlowCanvas() {
     if (!currentFlow) return;
     dispatch(resetNodeStates());
     
+    // Check for missing parameters
+    const nodesWithMissing: { node: Node, missing: string[], currentParams: Record<string, string> }[] = [];
+    nodes.forEach(node => {
+      if (node.type === 'query' && node.data?.queryId) {
+        const query = queries.find((q: any) => q.id === node.data!.queryId);
+        if (query) {
+          const sqlText = (query.sql_text as string) || '';
+          const paramMatches = [...sqlText.matchAll(/:([a-zA-Z0-9_]+)\b/g)];
+          const uniqueParams = [...new Set(paramMatches.map(m => m[1]))];
+          
+          let queryParams: Record<string, string> = {};
+          if (node.data.queryParams) {
+            try { queryParams = JSON.parse(node.data.queryParams as string); } catch(e) {}
+          }
+          
+          // Parameter is missing if it is undefined or exactly empty string
+          const missing = uniqueParams.filter(p => queryParams[p] === undefined || queryParams[p] === '');
+          if (missing.length > 0) {
+            nodesWithMissing.push({ node, missing, currentParams: queryParams });
+          }
+        }
+      }
+    });
+
+    if (nodesWithMissing.length > 0) {
+      setMissingParamsContext({ nodesWithMissing });
+      return; // Stop here and wait for the user to fill the modal
+    }
+
+    await performExecution(nodes);
+  };
+
+  const performExecution = async (nodesToExecute: Node[]) => {
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
-    const definition = JSON.stringify({ nodes, edges });
-    await dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
+    const definition = JSON.stringify({ nodes: nodesToExecute, edges });
+    await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
     
-    const result = await dispatch(executeFlow(currentFlow.id));
+    const result = await dispatch(executeFlow(currentFlow!.id));
     
     // Find export node results in the execution context
     const context = (result.payload as any)?.context as Record<string, any> | undefined;
     if (context) {
-      const exportNodes = nodes.filter(n => n.type === 'export');
+      const exportNodes = nodesToExecute.filter(n => n.type === 'export');
       exportNodes.forEach(exportNode => {
         const data = exportNode.data as any;
         const format = data?.format || 'CSV';
         const rawFileName = data?.fileName as string | undefined;
+        let dataSource = data?.dataSource;
         
-        const exportData = resolveExportData(context, data?.dataSource);
-        const columns = data?.columns || (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
+        if (!dataSource) {
+          // If empty, explicitly use the node immediately upstream
+          const incomingEdge = edges.find(e => e.target === exportNode.id);
+          if (incomingEdge) {
+            dataSource = `{{${incomingEdge.source}}}`;
+          }
+        }
+        
+        const exportData = resolveExportData(context, dataSource);
+        const columns = (data?.columns && data.columns.length > 0) 
+          ? data.columns 
+          : (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
         
         if (exportData.length > 0) {
           if (format === 'Excel') {
@@ -457,6 +506,73 @@ function FlowCanvas() {
           </div>
         )}
       </div>
+      {/* Missing Params Modal */}
+      {missingParamsContext && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-lg flex flex-col">
+            <div className="p-4 border-b border-border flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-danger">Faltan parámetros requeridos</h2>
+              <button onClick={() => setMissingParamsContext(null)} className="p-2 hover:bg-muted rounded-md text-muted-foreground">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-4 overflow-auto max-h-[60vh] space-y-4">
+              <p className="text-sm text-muted">
+                Antes de ejecutar el flujo, debes llenar los parámetros obligatorios de las siguientes consultas:
+              </p>
+              {missingParamsContext.nodesWithMissing.map((item, index) => (
+                <div key={item.node.id} className="border border-border rounded-md p-3 bg-bg">
+                  <h3 className="text-sm font-semibold mb-2">{item.node.data?.label as string || 'Nodo de Consulta'}</h3>
+                  <div className="space-y-2">
+                    {item.missing.map(param => (
+                      <div key={param} className="flex flex-col gap-1">
+                        <label className="text-[11px] font-mono text-accent">:{param}</label>
+                        <input
+                          type="text"
+                          className="flex h-8 w-full rounded-md border border-border bg-surface px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                          placeholder={`Valor para ${param}`}
+                          value={item.currentParams[param] || ''}
+                          onChange={(e) => {
+                            const newContext = { ...missingParamsContext };
+                            newContext.nodesWithMissing[index].currentParams[param] = e.target.value;
+                            setMissingParamsContext(newContext);
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="p-4 border-t border-border flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setMissingParamsContext(null)}>Cancelar</Button>
+              <Button onClick={() => {
+                const stillMissing = missingParamsContext.nodesWithMissing.some(item => 
+                  item.missing.some(p => !item.currentParams[p] || item.currentParams[p] === '')
+                );
+                if (stillMissing) {
+                  alert('Aún faltan parámetros por llenar.');
+                  return;
+                }
+                const updatedNodes = missingParamsContext.nodesWithMissing.map(n => ({
+                  ...n.node,
+                  data: {
+                    ...n.node.data,
+                    queryParams: JSON.stringify(n.currentParams)
+                  }
+                }));
+                const newNodes = nodes.map(n => {
+                  const updated = updatedNodes.find(u => u.id === n.id);
+                  return updated || n;
+                });
+                setNodes(newNodes);
+                setMissingParamsContext(null);
+                performExecution(newNodes);
+              }}>Continuar Ejecución</Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Node Result Modal */}
       {inspectNodeData && (
