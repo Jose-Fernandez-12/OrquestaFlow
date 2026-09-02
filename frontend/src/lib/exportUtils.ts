@@ -1,8 +1,11 @@
 export function downloadAsXMLSpreadsheet(
   data: any[],
   columns: { header: string; key: string }[],
-  fileName: string
+  fileName: string,
+  headerColor?: string
 ) {
+  console.log('Downloading XML Spreadsheet, headerColor:', headerColor);
+  
   let xml = `<?xml version="1.0"?>
 <?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
@@ -23,7 +26,7 @@ export function downloadAsXMLSpreadsheet(
       <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
       <Borders/>
       <Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#FFFFFF" ss:Bold="1"/>
-      <Interior ss:Color="#1E293B" ss:Pattern="Solid"/>
+      <Interior ss:Color="${headerColor ? (headerColor.startsWith('#') ? headerColor : '#' + headerColor) : '#1E293B'}" ss:Pattern="Solid"/>
     </Style>
     <Style ss:ID="Data">
       <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
@@ -110,6 +113,30 @@ function escapeXml(unsafe: string): string {
 }
 
 export function resolveExportData(context: Record<string, any>, dataSource?: string): any[] {
+  const findArrayInObject = (obj: any): any[] | null => {
+    if (!obj || typeof obj !== 'object') return null;
+    
+    // Prioritize common data array keys
+    const preferredKeys = ['rows', 'items', 'data', 'records'];
+    for (const key of preferredKeys) {
+      if (Array.isArray(obj[key])) return obj[key];
+    }
+    
+    // Fallback to finding any array that contains objects (to avoid returning metadata arrays like 'columns')
+    for (const val of Object.values(obj)) {
+      if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object') {
+        return val;
+      }
+    }
+    
+    // Absolute fallback: any array
+    for (const val of Object.values(obj)) {
+      if (Array.isArray(val)) return val;
+    }
+    
+    return null;
+  };
+
   if (dataSource) {
     const match = dataSource.match(/^\{\{(.+)\}\}$/);
     const pathStr = match ? match[1] : dataSource;
@@ -117,8 +144,8 @@ export function resolveExportData(context: Record<string, any>, dataSource?: str
     
     if (Array.isArray(resolved)) return resolved;
     if (resolved && typeof resolved === 'object') {
-      const nested = Object.values(resolved).find((v) => Array.isArray(v));
-      return nested ? (nested as any[]) : [resolved];
+      const nested = findArrayInObject(resolved);
+      return nested ? nested : [resolved];
     }
     return [];
   }
@@ -126,8 +153,8 @@ export function resolveExportData(context: Record<string, any>, dataSource?: str
   for (const val of Object.values(context)) {
     if (Array.isArray(val) && val.length > 0) return val;
     if (val && typeof val === 'object') {
-      const nested = Object.values(val).find((v) => Array.isArray(v));
-      if (nested) return nested as any[];
+      const nested = findArrayInObject(val);
+      if (nested) return nested;
     }
   }
   return Object.values(context);

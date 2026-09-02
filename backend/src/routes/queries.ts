@@ -19,10 +19,10 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Create query
-  app.post<{ Body: { name: string; sql_text: string; connection_ids?: string[] } }>('/', async (request) => {
+  app.post<{ Body: { name: string; sql_text: string; connection_ids?: string[]; display_columns?: string[] } }>('/', async (request) => {
     const db = getDb();
     const id = uuid();
-    const { name, sql_text, connection_ids = [] } = request.body;
+    const { name, sql_text, connection_ids = [], display_columns = [] } = request.body;
 
     // Auto-detect named params (:param_name)
     const paramRegex = /:([a-zA-Z_][a-zA-Z0-9_]*)/g;
@@ -33,23 +33,23 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
     }
 
     db.prepare(`
-      INSERT INTO queries (id, name, sql_text, params, connection_ids)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, name, sql_text, JSON.stringify(params), JSON.stringify(connection_ids));
+      INSERT INTO queries (id, name, sql_text, params, connection_ids, display_columns)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, name, sql_text, JSON.stringify(params), JSON.stringify(connection_ids), JSON.stringify(display_columns));
 
     const query = db.prepare('SELECT * FROM queries WHERE id = ?').get(id);
     return { data: query };
   });
 
   // Update query
-  app.put<{ Params: { id: string }; Body: { name?: string; sql_text?: string; connection_ids?: string[] } }>(
+  app.put<{ Params: { id: string }; Body: { name?: string; sql_text?: string; connection_ids?: string[]; display_columns?: string[] } }>(
     '/:id',
     async (request, reply) => {
       const db = getDb();
       const existing = db.prepare('SELECT * FROM queries WHERE id = ?').get(request.params.id);
       if (!existing) return reply.status(404).send({ error: 'Query not found' });
 
-      const { name, sql_text, connection_ids } = request.body;
+      const { name, sql_text, connection_ids, display_columns } = request.body;
       const updates: string[] = [];
       const values: unknown[] = [];
 
@@ -70,6 +70,10 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
       if (connection_ids !== undefined) {
         updates.push('connection_ids = ?');
         values.push(JSON.stringify(connection_ids));
+      }
+      if (display_columns !== undefined) {
+        updates.push('display_columns = ?');
+        values.push(JSON.stringify(display_columns));
       }
       updates.push("updated_at = datetime('now')");
 
@@ -120,7 +124,15 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
     const query = db.prepare('SELECT * FROM queries WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
     if (!query) return reply.status(404).send({ error: 'Query not found' });
 
-    const { connection_ids, params = {} } = request.body;
+    let { connection_ids, params = {} } = request.body;
+    
+    // Si no se envían conexiones, intentar usar las asociadas a la consulta
+    if (!connection_ids || connection_ids.length === 0) {
+      try {
+        connection_ids = JSON.parse(query.connection_ids as string || '[]');
+      } catch (e) {}
+    }
+
     if (!connection_ids || connection_ids.length === 0) {
       return reply.status(400).send({ error: 'Debe seleccionar al menos una conexión de base de datos' });
     }
@@ -136,8 +148,8 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
       let combinedRows: any[] = [];
       let columns: string[] = [];
 
-      // Execute on each selected connection
-      for (const connId of connection_ids) {
+      // Execute on each selected connection in parallel
+      const executionPromises = connection_ids.map(async (connId) => {
         const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(connId) as Record<string, any> | undefined;
         if (!conn) throw new Error(`Conexión no encontrada: ${connId}`);
 
@@ -149,7 +161,12 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
           const { executeMssqlQuery } = await import('../engine/mssql.js');
           result = await executeMssqlQuery(connId, query.sql_text as string, params);
         }
+        return result;
+      });
 
+      const results = await Promise.all(executionPromises);
+      
+      for (const result of results) {
         if (columns.length === 0) columns = result.columns;
         combinedRows = [...combinedRows, ...result.rows];
       }
@@ -183,11 +200,21 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
       const duration = Date.now() - startTime;
       db.prepare(`
         UPDATE execution_logs
-        SET status = 'error', duration_ms = ?, completed_at = datetime('now'), result = ?
+        SET status = 'error', duration_ms = ?, record_count = ?, completed_at = datetime('now'), result = ?
         WHERE id = ?
       `).run(duration, 0, JSON.stringify({ error: err.message }), logId);
 
       return reply.status(500).send({ error: 'Query execution failed', message: err.message });
     }
+  });
+
+  // Delete query
+  app.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM queries WHERE id = ?').get(request.params.id);
+    if (!existing) return reply.status(404).send({ error: 'Query not found' });
+
+    db.prepare('DELETE FROM queries WHERE id = ?').run(request.params.id);
+    return { data: { deleted: true } };
   });
 }

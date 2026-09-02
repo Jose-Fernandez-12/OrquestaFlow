@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
-import { X } from 'lucide-react';
+import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
+import { useAppSelector } from '../../store/hooks';
 
 interface NodeInspectorProps {
   nodes: Node[];
@@ -14,8 +15,29 @@ interface NodeInspectorProps {
 }
 
 export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeInspectorProps) {
-
+  const queries = useAppSelector(state => state.queries.queries);
   const node = nodes.find(n => n.id === selectedNodeId);
+  
+  const selectedQuery = queries.find(q => q.id === (node?.data?.queryId as string));
+  
+  const detectedParams = React.useMemo(() => {
+    if (!selectedQuery?.sql_text) return [];
+    const regex = /:([a-zA-Z0-9_]+)/g;
+    const params = new Set<string>();
+    let match;
+    while ((match = regex.exec(selectedQuery.sql_text)) !== null) {
+      params.add(match[1]);
+    }
+    return Array.from(params);
+  }, [selectedQuery]);
+
+  const currentParamsObj = React.useMemo(() => {
+    try {
+      return JSON.parse((node?.data?.queryParams as string) || '{}');
+    } catch {
+      return {};
+    }
+  }, [node?.data?.queryParams]);
   
   const updateNodeData = (key: string, value: any) => {
     setNodes(nds =>
@@ -130,6 +152,109 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
           </>
         )}
 
+        {node.type === 'query' && (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Seleccionar Consulta</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
+                value={node.data?.queryId as string || ''}
+                onChange={(e) => updateNodeData('queryId', e.target.value)}
+              >
+                <option value="">Seleccionar consulta...</option>
+                {queries.map(q => (
+                  <option key={q.id} value={q.id}>{q.name}</option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Modo de extracción</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
+                value={node.data?.extractMode as string || 'all'}
+                onChange={(e) => updateNodeData('extractMode', e.target.value)}
+              >
+                <option value="all">Todas las filas (Array)</option>
+                <option value="selected_columns">Solo columnas específicas</option>
+              </select>
+            </div>
+            
+            {node.data?.extractMode === 'selected_columns' && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Columnas (separadas por coma)</label>
+                <Input 
+                  placeholder="ej. codigo_eds, nombre_eds"
+                  value={node.data?.extractColumns as string || ''}
+                  onChange={(e) => updateNodeData('extractColumns', e.target.value)}
+                />
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Mapeo de Parámetros</label>
+              {detectedParams.length > 0 ? (
+                <div className="space-y-2 border border-border rounded-sm p-3 bg-bg/50">
+                  {detectedParams.map(param => (
+                    <div key={param} className="flex flex-col gap-1">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-mono font-medium text-accent">:{param}</label>
+                        <div className="flex gap-1">
+                          {edges
+                            .filter(e => e.target === node.id)
+                            .map(e => nodes.find(n => n.id === e.source))
+                            .filter(n => n && (n.type?.startsWith('http') || n.type === 'query'))
+                            .map(upNode => (
+                              <JsonSelectorTrigger 
+                                key={upNode!.id}
+                                node={upNode} 
+                                customLabel={`Mapear desde ${upNode!.data?.label || upNode!.type}`}
+                                onSelectValue={(val) => {
+                                  const newParams = { ...currentParamsObj, [param]: val };
+                                  updateNodeData('queryParams', JSON.stringify(newParams, null, 2));
+                                }}
+                              />
+                            ))
+                          }
+                        </div>
+                      </div>
+                      <Input 
+                        className="h-7 text-xs font-mono"
+                        placeholder="Valor fijo o {{ruta}}"
+                        value={currentParamsObj[param] || ''}
+                        onChange={(e) => {
+                          const newParams = { ...currentParamsObj, [param]: e.target.value };
+                          updateNodeData('queryParams', JSON.stringify(newParams, null, 2));
+                        }}
+                      />
+                    </div>
+                  ))}
+                  <p className="text-[10px] text-muted leading-tight mt-2">
+                    Escribe un valor fijo para pruebas, o mapea a variables de forma dinámica (ej. <code>{`{{start.data.codigo}}`}</code>).
+                  </p>
+                </div>
+              ) : (
+                <div className="text-[10px] text-muted p-3 bg-bg border border-border rounded-sm border-dashed text-center">
+                  La consulta no requiere parámetros (:param).
+                </div>
+              )}
+            </div>
+
+            {/* Render JSON Viewer for upstream HTTP/Query nodes to make mapping easier */}
+            {edges
+              .filter(e => e.target === node.id)
+              .map(e => nodes.find(n => n.id === e.source))
+              .filter(n => n && (n.type?.startsWith('http') || n.type === 'query'))
+              .map(upNode => (
+                <div key={upNode!.id} className="pt-2 border-t border-border mt-4">
+                  <span className="text-[10px] text-muted block mb-1">Inspeccionar datos desde: {(upNode!.data?.label as string) || upNode!.type}</span>
+                  <JsonSelectorTrigger node={upNode} updateNodeData={updateNodeData} />
+                </div>
+              ))
+            }
+          </>
+        )}
+
         {node.type === 'scraping' && (
           <>
             <div className="space-y-1.5">
@@ -186,16 +311,46 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               <p className="text-[10px] text-muted leading-tight">Dejar vacío para usar todo el resultado del nodo anterior.</p>
             </div>
 
+            {node.data?.format === 'Excel' && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Color de encabezados</label>
+                <div className="flex items-center gap-2">
+                  <div
+                    className="w-7 h-7 rounded-sm border border-border shrink-0 transition-colors"
+                    style={{
+                      backgroundColor: (() => {
+                        const raw = (node.data?.headerColor as string) || '';
+                        const normalized = raw.startsWith('#') ? raw : `#${raw}`;
+                        return /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(normalized) ? normalized : 'transparent';
+                      })()
+                    }}
+                  />
+                  <Input
+                    placeholder="#FF5733"
+                    className="font-mono text-xs"
+                    maxLength={7}
+                    value={node.data?.headerColor as string || ''}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const normalized = raw && !raw.startsWith('#') ? `#${raw}` : raw;
+                      updateNodeData('headerColor', normalized);
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-muted leading-tight">Color de fondo en formato hex para la fila de encabezados del reporte.</p>
+              </div>
+            )}
+
             <ColumnMappingEditor 
               columns={node.data?.columns as any || []}
               onChange={cols => updateNodeData('columns', cols)}
             />
 
-            {/* Render JSON Viewer for upstream HTTP nodes to make mapping easier */}
+            {/* Render JSON Viewer for upstream HTTP/Query nodes to make mapping easier */}
             {edges
               .filter(e => e.target === node.id)
               .map(e => nodes.find(n => n.id === e.source))
-              .filter(n => n && n.type?.startsWith('http'))
+              .filter(n => n && (n.type?.startsWith('http') || n.type === 'query'))
               .map(upNode => (
                 <div key={upNode!.id} className="pt-2 border-t border-border mt-4">
                   <span className="text-[10px] text-muted block mb-1">Inspeccionar datos desde: {(upNode!.data?.label as string) || upNode!.type}</span>
@@ -238,12 +393,14 @@ function truncateArrays(obj: any): any {
   return obj;
 }
 
-function JsonSelectorTrigger({ node, forExportNode, updateNodeData }: { node: any, forExportNode?: any, updateNodeData?: (key: string, val: any) => void }) {
+function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValue, customLabel }: { node: any, forExportNode?: any, updateNodeData?: (key: string, val: any) => void, onSelectValue?: (val: string) => void, customLabel?: string }) {
   const [isOpen, setIsOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState('');
   const [jsonData, setJsonData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  
+  const cachedResult = useAppSelector(state => (state as any).flows?.nodeResults?.[node.id]);
 
   // Multi-select state for column auto-mapping
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
@@ -258,13 +415,33 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData }: { node: an
 
     setError('');
     
+    // 1. Usar resultado en caché de Redux (si el flujo ya se ejecutó recientemente)
+    if (cachedResult) {
+      if (node.type === 'query') {
+        setJsonData(truncateArrays(cachedResult.rows || cachedResult.data?.rows || cachedResult));
+      } else {
+        setJsonData(truncateArrays(cachedResult));
+      }
+      return;
+    }
+    
+    // 2. Si no hay caché, intentar hacer una petición en vivo
     let endpoint = node.data?.endpoint || '';
+    if (node.type === 'query') {
+      const queryId = node.data?.queryId;
+      if (!queryId) {
+        setError('No hay una consulta seleccionada en el nodo.');
+        return;
+      }
+      endpoint = `http://localhost:3001/api/queries/${queryId}/execute`;
+    }
+
     if (!endpoint) {
       setError('No hay un endpoint configurado');
       return;
     }
 
-    if (endpoint.includes('storefront.com') || !endpoint.startsWith('http')) {
+    if (endpoint.includes('storefront.com') || (!endpoint.startsWith('http') && node.type !== 'query')) {
        // use sample mock
        setJsonData({
          status: "success",
@@ -281,24 +458,56 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData }: { node: an
 
     setLoading(true);
     try {
-      const method = node.type === 'httpPost' ? 'POST' : 'GET';
-      const options: RequestInit = { method, headers: { 'Content-Type': 'application/json' } };
-      if (method === 'POST' && node.data?.payload) {
-        options.body = JSON.stringify(node.data.payload);
+      let res;
+      if (node.type === 'query') {
+        let parsedParams = {};
+        if (node.data?.queryParams) {
+          try {
+            parsedParams = JSON.parse(node.data.queryParams);
+          } catch(e) {
+            console.error('Error parsing queryParams JSON for preview', e);
+          }
+        }
+        res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connection_ids: [], params: parsedParams })
+        });
+      } else {
+        const method = node.type === 'httpPost' ? 'POST' : 'GET';
+        const options: RequestInit = { method, headers: { 'Content-Type': 'application/json' } };
+        if (method === 'POST' && node.data?.payload) {
+          options.body = JSON.stringify(node.data.payload);
+        }
+        res = await fetch(endpoint, options);
       }
 
-      const res = await fetch(endpoint, options);
-      if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+      if (!res.ok) {
+        let errorMsg = `HTTP Error: ${res.status}`;
+        try {
+          const errData = await res.clone().json();
+          if (errData.error) errorMsg = errData.error;
+        } catch (e) {}
+        throw new Error(errorMsg);
+      }
       
       const text = await res.text();
       try {
         const parsed = JSON.parse(text);
-        setJsonData(truncateArrays(parsed));
+        if (node.type === 'query') {
+          setJsonData(truncateArrays(parsed.data?.rows || []));
+        } else {
+          setJsonData(truncateArrays(parsed));
+        }
       } catch (e) {
         setJsonData({ textResponse: text.slice(0, 500) + '...' });
       }
     } catch (err: any) {
-      setError(err.message || 'Error al ejecutar la petición (posible bloqueo CORS o URL inválida).');
+      setError(
+        err.message?.includes('Timeout') || err.message?.includes('Query execution failed')
+          ? 'La consulta falló (¿Faltan parámetros dinámicos?). Ejecuta el flujo completo primero para visualizar los resultados aquí.'
+          : err.message || 'Error al ejecutar la petición.'
+      );
     } finally {
       setLoading(false);
     }
@@ -308,8 +517,14 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData }: { node: an
     // path already starts with nodeId (it's the currentPath)
     const variableFormat = `{{${path}}}`;
     setSelectedKey(variableFormat);
-    navigator.clipboard.writeText(variableFormat);
-    alert(`Copiado al portapapeles: ${variableFormat}`);
+    
+    if (onSelectValue) {
+      onSelectValue(variableFormat);
+      setIsOpen(false);
+    } else {
+      navigator.clipboard.writeText(variableFormat);
+      alert(`Copiado al portapapeles: ${variableFormat}`);
+    }
   };
 
   const handleTogglePath = (path: string) => {
@@ -353,7 +568,7 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData }: { node: an
   return (
     <>
       <Button variant="textLink" onClick={handleOpen}>
-        Visualizar Respuesta (JSON)
+        {customLabel || 'Visualizar Respuesta (JSON)'}
       </Button>
 
       {isOpen && createPortal(
@@ -417,6 +632,8 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData }: { node: an
 }
 
 function ColumnMappingEditor({ columns, onChange }: { columns: { header: string, key: string }[], onChange: (cols: any) => void }) {
+  const [collapsed, setCollapsed] = useState(false);
+
   const addColumn = () => {
     onChange([...(columns || []), { header: '', key: '' }]);
   };
@@ -433,43 +650,61 @@ function ColumnMappingEditor({ columns, onChange }: { columns: { header: string,
     onChange(newCols);
   };
 
+  const count = (columns || []).length;
+
   return (
     <div className="space-y-2 mt-4 pt-4 border-t border-border">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium">Mapeo de Columnas</label>
-        <Button variant="default" size="sm" onClick={addColumn} className="h-6 text-[10px] px-2 py-0">
-          + Agregar
-        </Button>
-      </div>
-      
-      <div className="space-y-2 max-h-[250px] overflow-y-auto pb-2">
-        {(columns || []).map((col, i) => (
-          <div key={i} className="flex gap-2 items-center bg-bg p-2 rounded-sm border border-border">
-            <div className="flex-1 space-y-1">
-              <Input 
-                placeholder="Nombre Columna (ej: Precio)" 
-                className="h-7 text-xs" 
-                value={col.header} 
-                onChange={e => updateColumn(i, 'header', e.target.value)} 
-              />
-              <Input 
-                placeholder="Llave JSON (ej: price)" 
-                className="h-7 text-xs font-mono" 
-                value={col.key} 
-                onChange={e => updateColumn(i, 'key', e.target.value)} 
-              />
-            </div>
-            <Button variant="icon" size="icon" onClick={() => removeColumn(i)} className="text-danger hover:text-danger hover:bg-danger/10 shrink-0">
-              <X size={14} />
-            </Button>
-          </div>
-        ))}
-        {(!columns || columns.length === 0) && (
-          <div className="text-[10px] text-muted text-center py-4 bg-bg rounded-sm border border-border border-dashed">
-            Sin mapeo. Se exportarán todos los campos.
-          </div>
+        <button
+          type="button"
+          onClick={() => setCollapsed(prev => !prev)}
+          className="flex items-center gap-1.5 text-xs font-medium hover:text-accent transition-colors"
+        >
+          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+          Mapeo de Columnas
+          {count > 0 && (
+            <span className="ml-1 px-1.5 py-0.5 rounded-full bg-accent/15 text-accent text-[10px] font-mono leading-none">
+              {count}
+            </span>
+          )}
+        </button>
+        {!collapsed && (
+          <Button variant="default" size="sm" onClick={addColumn} className="h-6 text-[10px] px-2 py-0">
+            + Agregar
+          </Button>
         )}
       </div>
+
+      {!collapsed && (
+        <div className="space-y-2 max-h-[300px] overflow-y-auto pb-2">
+          {(columns || []).map((col, i) => (
+            <div key={i} className="flex gap-2 items-start bg-bg p-2 rounded-sm border border-border">
+              <div className="flex-1 space-y-1.5">
+                <Input
+                  placeholder="Nombre Columna (ej: Precio)"
+                  className="h-7 text-xs"
+                  value={col.header}
+                  onChange={e => updateColumn(i, 'header', e.target.value)}
+                />
+                <Input
+                  placeholder="Llave JSON (ej: price)"
+                  className="h-7 text-xs font-mono"
+                  value={col.key}
+                  onChange={e => updateColumn(i, 'key', e.target.value)}
+                />
+              </div>
+              <Button variant="icon" size="icon" onClick={() => removeColumn(i)} className="text-danger hover:text-danger hover:bg-danger/10 shrink-0 mt-0.5">
+                <X size={14} />
+              </Button>
+            </div>
+          ))}
+          {(!columns || columns.length === 0) && (
+            <div className="text-[10px] text-muted text-center py-4 bg-bg rounded-sm border border-border border-dashed">
+              Sin mapeo. Se exportarán todos los campos.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

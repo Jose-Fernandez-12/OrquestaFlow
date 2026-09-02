@@ -8,12 +8,16 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const connections = db.prepare('SELECT * FROM connections ORDER BY region, name').all() as Array<Record<string, unknown>>;
 
-    // Group by region
-    const grouped: Record<string, typeof connections> = {};
+    // Group by group_name -> region
+    const grouped: Record<string, Record<string, typeof connections>> = {};
     for (const conn of connections) {
+      const groupName = (conn.group_name as string) || '';
       const region = conn.region as string;
-      if (!grouped[region]) grouped[region] = [];
-      grouped[region].push(conn);
+      
+      if (!grouped[groupName]) grouped[groupName] = {};
+      if (!grouped[groupName][region]) grouped[groupName][region] = [];
+      
+      grouped[groupName][region].push(conn);
     }
 
     return { data: connections, grouped };
@@ -31,6 +35,7 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
   app.post<{
     Body: {
       name: string;
+      group_name?: string;
       region: string;
       city?: string;
       host: string;
@@ -45,7 +50,7 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const id = uuid();
     const {
-      name, region, city, host, database_name,
+      name, group_name, region, city, host, database_name,
       port,
       driver = 'ODBC Driver 17 for SQL Server',
       username,
@@ -59,9 +64,9 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
     const finalCredKey = isSqlite ? 'NONE' : (env_credential_key || 'SQLSERVER');
 
     db.prepare(`
-      INSERT INTO connections (id, name, region, city, host, database_name, port, driver, username, password, env_credential_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, name, region, city || name, host, finalDbName, finalPort, driver, username || null, password || null, finalCredKey);
+      INSERT INTO connections (id, name, group_name, region, city, host, database_name, port, driver, username, password, env_credential_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, name, group_name || null, region, city || name, host, finalDbName, finalPort, driver, username || null, password || null, finalCredKey);
 
     const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(id);
     return { data: conn };
@@ -70,17 +75,18 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
   // Update connection
   app.put<{
     Params: { id: string };
-    Body: { name?: string; region?: string; city?: string; host?: string; database_name?: string; port?: number; is_active?: number }
+    Body: { name?: string; group_name?: string; region?: string; city?: string; host?: string; database_name?: string; port?: number; is_active?: number }
   }>('/:id', async (request, reply) => {
     const db = getDb();
     const existing = db.prepare('SELECT * FROM connections WHERE id = ?').get(request.params.id);
     if (!existing) return reply.status(404).send({ error: 'Connection not found' });
 
-    const { name, region, city, host, database_name, port, is_active } = request.body;
+    const { name, group_name, region, city, host, database_name, port, is_active } = request.body;
     const updates: string[] = [];
     const values: unknown[] = [];
 
     if (name !== undefined) { updates.push('name = ?'); values.push(name); }
+    if (group_name !== undefined) { updates.push('group_name = ?'); values.push(group_name); }
     if (region !== undefined) { updates.push('region = ?'); values.push(region); }
     if (city !== undefined) { updates.push('city = ?'); values.push(city); }
     if (host !== undefined) { updates.push('host = ?'); values.push(host); }

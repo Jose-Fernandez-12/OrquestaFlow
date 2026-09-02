@@ -76,6 +76,9 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
                   case 'export':
                     output = await executeExportNode(node, context);
                     break;
+                  case 'query':
+                    output = await executeQueryNode(node, context);
+                    break;
                   default:
                     output = { warning: 'Unknown node type' };
                 }
@@ -137,17 +140,11 @@ async function executeHttpNode(node: any, context: Record<string, any>) {
     };
   }
   
-  // Substitution helper for {{nodeId.key}}
   const substitute = (str: string) => {
     if (typeof str !== 'string') return str;
     return str.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
-      const parts = pathStr.trim().split('.');
-      let val = context;
-      for (const part of parts) {
-        if (val === undefined || val === null) return '';
-        val = val[part];
-      }
-      return typeof val === 'object' ? JSON.stringify(val) : String(val || '');
+      const val = resolvePath(context, pathStr);
+      return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
     });
   };
 
@@ -355,24 +352,35 @@ async function executeExportNode(node: any, context: Record<string, any>) {
     if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
       const headers = Object.keys(exportData[0]);
 
+      // Parse the header color early so we can apply it to the header row
+      const headerColStr = node.data?.headerColor as string;
+      const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
+        ? headerColStr.replace('#', '').toUpperCase() 
+        : null;
+
       // Add styled header row - per cell to avoid coloring the entire row
       sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
       const headerRow = sheet.getRow(1);
       headerRow.height = 24;
-      headerRow.eachCell({ includeEmpty: false }, cell => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+      headerRow.eachCell({ includeEmpty: false }, (cell) => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
         cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
         cell.alignment = { vertical: 'middle', horizontal: 'left' };
         cell.border = { bottom: { style: 'medium', color: { argb: 'FF6366F1' } } };
       });
 
-      // Add data rows - plain, no background color
+      // Add data rows - plain, no background color (except first column if specified)
       exportData.forEach(row => {
         const dataRow = sheet.addRow(headers.map(h => {
           const v = row[h];
           return (v === null || v === undefined) ? '' : v;
         }));
         dataRow.height = 18;
+        
+        if (parsedColor) {
+          const firstCell = dataRow.getCell(1);
+          firstCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` } };
+        }
       });
     }
 
@@ -402,4 +410,66 @@ async function executeExportNode(node: any, context: Record<string, any>) {
   }
 
   return { filePath, format, records: exportData.length, success: true };
+}
+
+// Query Node Handler
+async function executeQueryNode(node: any, context: Record<string, any>) {
+  const queryId = node.data?.queryId;
+  if (!queryId) throw new Error('Query ID not configured in query node');
+
+  const db = getDb();
+  const queryInfo = db.prepare('SELECT * FROM queries WHERE id = ?').get(queryId) as any;
+  if (!queryInfo) throw new Error('Query not found in database');
+
+  const sqlText = queryInfo.sql_text;
+  let connectionIds: string[] = [];
+  try {
+    connectionIds = JSON.parse(queryInfo.connection_ids || '[]');
+  } catch(e) {}
+  if (connectionIds.length === 0) throw new Error('Query has no connections configured');
+
+  const substitute = (str: string) => {
+    if (typeof str !== 'string') return str;
+    return str.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
+      const val = resolvePath(context, pathStr);
+      return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
+    });
+  };
+
+  let params: Record<string, any> = {};
+  if (node.data?.queryParams && node.data.queryParams.trim() !== '') {
+    try {
+      params = JSON.parse(substitute(node.data.queryParams));
+    } catch(e) {
+      console.error('Failed to parse query params mapping', e);
+    }
+  }
+
+  const connectionId = connectionIds[0];
+  const { executeMssqlQuery } = await import('./mssql.js');
+  const result = await executeMssqlQuery(connectionId, sqlText, params);
+
+  const extractMode = node.data?.extractMode || 'all';
+  
+  if (extractMode === 'selected_columns') {
+    const colsStr = node.data?.extractColumns || '';
+    const cols = colsStr.split(',').map((c: string) => c.trim()).filter(Boolean);
+    
+    if (cols.length > 0 && result.rows && result.rows.length > 0) {
+      if (cols.length === 1) {
+        return result.rows.map((r: any) => r[cols[0]]);
+      } else {
+        return result.rows.map((r: any) => {
+          const obj: any = {};
+          for (const col of cols) {
+            obj[col] = r[col];
+          }
+          return obj;
+        });
+      }
+    }
+    return [];
+  }
+
+  return result.rows;
 }

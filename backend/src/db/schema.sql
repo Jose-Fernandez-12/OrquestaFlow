@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS queries (
   sql_text TEXT NOT NULL,
   params TEXT DEFAULT '[]',
   connection_ids TEXT DEFAULT '[]',
+  display_columns TEXT DEFAULT '[]',
   last_run_at TEXT,
   last_row_count INTEGER,
   created_at TEXT DEFAULT (datetime('now')),
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS queries (
 CREATE TABLE IF NOT EXISTS connections (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  group_name TEXT,
   region TEXT NOT NULL,
   city TEXT,
   host TEXT NOT NULL,
