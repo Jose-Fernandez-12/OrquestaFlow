@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS queries (
 CREATE TABLE IF NOT EXISTS connections (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  group_name TEXT,
   region TEXT NOT NULL,
   city TEXT,
   host TEXT NOT NULL,

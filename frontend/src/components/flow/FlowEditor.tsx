@@ -32,6 +32,7 @@ import {
   resetNodeStates
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
+import { fetchQueries } from '../../store/querySlice';
 import { Button } from '../ui/button';
 import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
@@ -79,6 +80,8 @@ function FlowCanvas() {
   const [missingParamsContext, setMissingParamsContext] = useState<{
     nodesWithMissing: { node: Node, missing: string[], currentParams: Record<string, string> }[];
   } | null>(null);
+  
+  const [showSaveNotification, setShowSaveNotification] = useState(false);
 
   useEffect(() => {
     const handleInspect = (e: any) => {
@@ -114,7 +117,13 @@ function FlowCanvas() {
 
     socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string; filePath?: string }) => {
       if (data.flowId === flowId) {
-        setExportNotification(prev => [...prev, { ...data, id: Date.now() + Math.random() }]);
+        const id = Date.now() + Math.random();
+        setExportNotification(prev => [...prev, { ...data, id }]);
+        
+        // Auto-dismiss after 5 seconds
+        setTimeout(() => {
+          setExportNotification(prev => prev.filter(n => n.id !== id));
+        }, 5000);
       }
     });
 
@@ -215,6 +224,11 @@ function FlowCanvas() {
     if (!currentFlow) return;
     const definition = JSON.stringify({ nodes, edges });
     dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
+    
+    setShowSaveNotification(true);
+    setTimeout(() => {
+      setShowSaveNotification(false);
+    }, 3000);
   };
 
   const handleNewFlow = () => {
@@ -289,7 +303,7 @@ function FlowCanvas() {
         
         if (exportData.length > 0) {
           if (format === 'Excel') {
-            downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export');
+            downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export', data?.headerColor as string | undefined);
           } else {
             downloadAsCSV(exportData, columns, rawFileName || 'export');
           }
@@ -425,8 +439,17 @@ function FlowCanvas() {
           )}
         </div>
 
-        {/* Export success notification toasts */}
+        {/* Notifications */}
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2">
+          {showSaveNotification && (
+            <div className="animate-fade-in bg-surface border border-success/40 rounded-md shadow-raised px-5 py-3 flex items-center gap-3 min-w-[280px]">
+              <div className="w-6 h-6 rounded-full bg-success/10 flex items-center justify-center shrink-0">
+                <Save size={14} className="text-success" />
+              </div>
+              <span className="text-sm font-medium text-fg">Flujo guardado exitosamente</span>
+            </div>
+          )}
+          
           {exportNotification.map((notif) => (
             <div key={notif.id} className="animate-fade-in bg-surface border border-success/40 rounded-md shadow-raised px-5 py-4 flex items-start gap-4 min-w-[380px] max-w-[520px]">
               <div className="w-9 h-9 rounded-full bg-success/10 flex items-center justify-center shrink-0 mt-0.5">
@@ -615,6 +638,7 @@ export function FlowEditor() {
   useEffect(() => {
     dispatch(fetchFlows());
     dispatch(fetchSchedules());
+    dispatch(fetchQueries());
   }, [dispatch]);
 
   return (

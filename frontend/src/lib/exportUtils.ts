@@ -1,8 +1,11 @@
 export function downloadAsXMLSpreadsheet(
   data: any[],
   columns: { header: string; key: string }[],
-  fileName: string
+  fileName: string,
+  headerColor?: string
 ) {
+  console.log('Downloading XML Spreadsheet, headerColor:', headerColor);
+  
   let xml = `<?xml version="1.0"?>
 <?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
@@ -23,7 +26,7 @@ export function downloadAsXMLSpreadsheet(
       <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
       <Borders/>
       <Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#FFFFFF" ss:Bold="1"/>
-      <Interior ss:Color="#1E293B" ss:Pattern="Solid"/>
+      <Interior ss:Color="${headerColor ? (headerColor.startsWith('#') ? headerColor : '#' + headerColor) : '#1E293B'}" ss:Pattern="Solid"/>
     </Style>
     <Style ss:ID="Data">
       <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>

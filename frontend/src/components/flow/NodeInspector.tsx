@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
-import { X } from 'lucide-react';
+import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
 import { useAppSelector } from '../../store/hooks';
@@ -311,6 +311,36 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               <p className="text-[10px] text-muted leading-tight">Dejar vacío para usar todo el resultado del nodo anterior.</p>
             </div>
 
+            {node.data?.format === 'Excel' && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Color de encabezados</label>
+                <div className="flex items-center gap-2">
+                  <div
+                    className="w-7 h-7 rounded-sm border border-border shrink-0 transition-colors"
+                    style={{
+                      backgroundColor: (() => {
+                        const raw = (node.data?.headerColor as string) || '';
+                        const normalized = raw.startsWith('#') ? raw : `#${raw}`;
+                        return /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(normalized) ? normalized : 'transparent';
+                      })()
+                    }}
+                  />
+                  <Input
+                    placeholder="#FF5733"
+                    className="font-mono text-xs"
+                    maxLength={7}
+                    value={node.data?.headerColor as string || ''}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const normalized = raw && !raw.startsWith('#') ? `#${raw}` : raw;
+                      updateNodeData('headerColor', normalized);
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-muted leading-tight">Color de fondo en formato hex para la fila de encabezados del reporte.</p>
+              </div>
+            )}
+
             <ColumnMappingEditor 
               columns={node.data?.columns as any || []}
               onChange={cols => updateNodeData('columns', cols)}
@@ -602,6 +632,8 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValu
 }
 
 function ColumnMappingEditor({ columns, onChange }: { columns: { header: string, key: string }[], onChange: (cols: any) => void }) {
+  const [collapsed, setCollapsed] = useState(false);
+
   const addColumn = () => {
     onChange([...(columns || []), { header: '', key: '' }]);
   };
@@ -618,43 +650,61 @@ function ColumnMappingEditor({ columns, onChange }: { columns: { header: string,
     onChange(newCols);
   };
 
+  const count = (columns || []).length;
+
   return (
     <div className="space-y-2 mt-4 pt-4 border-t border-border">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium">Mapeo de Columnas</label>
-        <Button variant="default" size="sm" onClick={addColumn} className="h-6 text-[10px] px-2 py-0">
-          + Agregar
-        </Button>
-      </div>
-      
-      <div className="space-y-2 max-h-[250px] overflow-y-auto pb-2">
-        {(columns || []).map((col, i) => (
-          <div key={i} className="flex gap-2 items-center bg-bg p-2 rounded-sm border border-border">
-            <div className="flex-1 space-y-1">
-              <Input 
-                placeholder="Nombre Columna (ej: Precio)" 
-                className="h-7 text-xs" 
-                value={col.header} 
-                onChange={e => updateColumn(i, 'header', e.target.value)} 
-              />
-              <Input 
-                placeholder="Llave JSON (ej: price)" 
-                className="h-7 text-xs font-mono" 
-                value={col.key} 
-                onChange={e => updateColumn(i, 'key', e.target.value)} 
-              />
-            </div>
-            <Button variant="icon" size="icon" onClick={() => removeColumn(i)} className="text-danger hover:text-danger hover:bg-danger/10 shrink-0">
-              <X size={14} />
-            </Button>
-          </div>
-        ))}
-        {(!columns || columns.length === 0) && (
-          <div className="text-[10px] text-muted text-center py-4 bg-bg rounded-sm border border-border border-dashed">
-            Sin mapeo. Se exportarán todos los campos.
-          </div>
+        <button
+          type="button"
+          onClick={() => setCollapsed(prev => !prev)}
+          className="flex items-center gap-1.5 text-xs font-medium hover:text-accent transition-colors"
+        >
+          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+          Mapeo de Columnas
+          {count > 0 && (
+            <span className="ml-1 px-1.5 py-0.5 rounded-full bg-accent/15 text-accent text-[10px] font-mono leading-none">
+              {count}
+            </span>
+          )}
+        </button>
+        {!collapsed && (
+          <Button variant="default" size="sm" onClick={addColumn} className="h-6 text-[10px] px-2 py-0">
+            + Agregar
+          </Button>
         )}
       </div>
+
+      {!collapsed && (
+        <div className="space-y-2 max-h-[300px] overflow-y-auto pb-2">
+          {(columns || []).map((col, i) => (
+            <div key={i} className="flex gap-2 items-start bg-bg p-2 rounded-sm border border-border">
+              <div className="flex-1 space-y-1.5">
+                <Input
+                  placeholder="Nombre Columna (ej: Precio)"
+                  className="h-7 text-xs"
+                  value={col.header}
+                  onChange={e => updateColumn(i, 'header', e.target.value)}
+                />
+                <Input
+                  placeholder="Llave JSON (ej: price)"
+                  className="h-7 text-xs font-mono"
+                  value={col.key}
+                  onChange={e => updateColumn(i, 'key', e.target.value)}
+                />
+              </div>
+              <Button variant="icon" size="icon" onClick={() => removeColumn(i)} className="text-danger hover:text-danger hover:bg-danger/10 shrink-0 mt-0.5">
+                <X size={14} />
+              </Button>
+            </div>
+          ))}
+          {(!columns || columns.length === 0) && (
+            <div className="text-[10px] text-muted text-center py-4 bg-bg rounded-sm border border-border border-dashed">
+              Sin mapeo. Se exportarán todos los campos.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

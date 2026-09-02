@@ -352,24 +352,35 @@ async function executeExportNode(node: any, context: Record<string, any>) {
     if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
       const headers = Object.keys(exportData[0]);
 
+      // Parse the header color early so we can apply it to the header row
+      const headerColStr = node.data?.headerColor as string;
+      const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
+        ? headerColStr.replace('#', '').toUpperCase() 
+        : null;
+
       // Add styled header row - per cell to avoid coloring the entire row
       sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
       const headerRow = sheet.getRow(1);
       headerRow.height = 24;
-      headerRow.eachCell({ includeEmpty: false }, cell => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+      headerRow.eachCell({ includeEmpty: false }, (cell) => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
         cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
         cell.alignment = { vertical: 'middle', horizontal: 'left' };
         cell.border = { bottom: { style: 'medium', color: { argb: 'FF6366F1' } } };
       });
 
-      // Add data rows - plain, no background color
+      // Add data rows - plain, no background color (except first column if specified)
       exportData.forEach(row => {
         const dataRow = sheet.addRow(headers.map(h => {
           const v = row[h];
           return (v === null || v === undefined) ? '' : v;
         }));
         dataRow.height = 18;
+        
+        if (parsedColor) {
+          const firstCell = dataRow.getCell(1);
+          firstCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` } };
+        }
       });
     }
 

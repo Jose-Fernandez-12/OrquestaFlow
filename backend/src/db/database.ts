@@ -149,8 +149,8 @@ function seedDemoData(db: SqlJsWrapper): void {
   ];
 
   const insertConn = db.prepare(`
-    INSERT INTO connections (id, name, region, city, host, database_name, port, env_credential_key)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO connections (id, name, group_name, region, city, host, database_name, port, env_credential_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   for (const group of regions) {
@@ -158,10 +158,11 @@ function seedDemoData(db: SqlJsWrapper): void {
       insertConn.run(
         uuid(),
         city,
+        'Demo Group',
         group.region,
         city,
         'db.operaciones.local',
-        `orquesta_${city.toLowerCase().replace(/\\s+/g, '_')}`,
+        `orquesta_${city.toLowerCase().replace(/\s+/g, '_')}`,
         1433,
         'SQLSERVER'
       );

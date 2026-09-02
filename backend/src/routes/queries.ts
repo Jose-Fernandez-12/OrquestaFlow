@@ -148,8 +148,8 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
       let combinedRows: any[] = [];
       let columns: string[] = [];
 
-      // Execute on each selected connection
-      for (const connId of connection_ids) {
+      // Execute on each selected connection in parallel
+      const executionPromises = connection_ids.map(async (connId) => {
         const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(connId) as Record<string, any> | undefined;
         if (!conn) throw new Error(`Conexión no encontrada: ${connId}`);
 
@@ -161,7 +161,12 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
           const { executeMssqlQuery } = await import('../engine/mssql.js');
           result = await executeMssqlQuery(connId, query.sql_text as string, params);
         }
+        return result;
+      });
 
+      const results = await Promise.all(executionPromises);
+      
+      for (const result of results) {
         if (columns.length === 0) columns = result.columns;
         combinedRows = [...combinedRows, ...result.rows];
       }
@@ -201,5 +206,15 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
 
       return reply.status(500).send({ error: 'Query execution failed', message: err.message });
     }
+  });
+
+  // Delete query
+  app.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM queries WHERE id = ?').get(request.params.id);
+    if (!existing) return reply.status(404).send({ error: 'Query not found' });
+
+    db.prepare('DELETE FROM queries WHERE id = ?').run(request.params.id);
+    return { data: { deleted: true } };
   });
 }

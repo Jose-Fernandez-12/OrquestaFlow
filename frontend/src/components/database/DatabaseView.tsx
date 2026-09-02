@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { fetchConnections, setCurrentConnection, testConnection, createConnection } from '../../store/connectionSlice';
-import { fetchQueries, setCurrentQuery, executeQuery, updateQuery, createQuery } from '../../store/querySlice';
+import { fetchConnections, setCurrentConnection, testConnection, createConnection, updateConnection, deleteConnection } from '../../store/connectionSlice';
+import { fetchQueries, setCurrentQuery, executeQuery, updateQuery, createQuery, deleteQuery } from '../../store/querySlice';
 import { showToast } from '../../store/uiSlice';
-import { Database, Plus, Play, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns } from 'lucide-react';
+import { Database, Plus, Play, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns, Trash2, Edit } from 'lucide-react';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql } from '@codemirror/lang-sql';
 import { format } from 'sql-formatter';
@@ -24,6 +24,7 @@ export function DatabaseView() {
   // Local state for creating connection
   const [isCreating, setIsCreating] = useState(false);
   const [formName, setFormName] = useState('');
+  const [formGroupName, setFormGroupName] = useState('');
   const [formRegion, setFormRegion] = useState('');
   const [formCity, setFormCity] = useState('');
   const [formHost, setFormHost] = useState('');
@@ -38,6 +39,7 @@ export function DatabaseView() {
   const [sqlText, setSqlText] = useState('');
   const [queryName, setQueryName] = useState('');
   const [selectedConns, setSelectedConns] = useState<string[]>([]);
+  const [showQueryEditor, setShowQueryEditor] = useState(true);
   const [displayColumns, setDisplayColumns] = useState<string[]>([]);
   const [isColumnSelectorOpen, setIsColumnSelectorOpen] = useState(false);
 
@@ -45,6 +47,10 @@ export function DatabaseView() {
   const [isParamModalOpen, setIsParamModalOpen] = useState(false);
   const [detectedParams, setDetectedParams] = useState<string[]>([]);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
+
+  // Derived state for autocomplete
+  const uniqueGroups = Array.from(new Set(connectionsState.connections.map(c => c.group_name).filter(Boolean))) as string[];
+  const uniqueRegions = Array.from(new Set(connectionsState.connections.map(c => c.region).filter(Boolean))) as string[];
 
   useEffect(() => {
     dispatch(fetchConnections());
@@ -57,8 +63,16 @@ export function DatabaseView() {
       setSqlText(queriesState.currentQuery.sql_text);
       setQueryName(queriesState.currentQuery.name);
       try {
-        const ids = JSON.parse(queriesState.currentQuery.connection_ids || '[]');
-        setSelectedConns(ids);
+        let rawIds = queriesState.currentQuery.connection_ids;
+        // If it's already an array, use it. Otherwise, parse it.
+        if (Array.isArray(rawIds)) {
+          setSelectedConns(rawIds);
+        } else if (typeof rawIds === 'string') {
+          const ids = JSON.parse(rawIds || '[]');
+          setSelectedConns(Array.isArray(ids) ? ids : []);
+        } else {
+          setSelectedConns([]);
+        }
       } catch (e) {
         setSelectedConns([]);
       }
@@ -89,22 +103,28 @@ export function DatabaseView() {
     }
   };
 
-  const handleSaveQuery = () => {
-    if (queriesState.currentQuery) {
-      dispatch(updateQuery({
-        id: queriesState.currentQuery.id,
-        name: queryName,
-        sql_text: sqlText,
-        connection_ids: selectedConns,
-        display_columns: JSON.stringify(displayColumns)
-      }));
-    } else {
-      dispatch(createQuery({
-        name: queryName || 'Nueva Consulta',
-        sql_text: sqlText,
-        connection_ids: selectedConns,
-        display_columns: JSON.stringify(displayColumns)
-      }));
+  const handleSaveQuery = async () => {
+    try {
+      if (queriesState.currentQuery) {
+        await dispatch(updateQuery({
+          id: queriesState.currentQuery.id,
+          name: queryName,
+          sql_text: sqlText,
+          connection_ids: selectedConns,
+          display_columns: JSON.stringify(displayColumns)
+        })).unwrap();
+        dispatch(showToast('Consulta guardada exitosamente'));
+      } else {
+        await dispatch(createQuery({
+          name: queryName || 'Nueva Consulta',
+          sql_text: sqlText,
+          connection_ids: selectedConns,
+          display_columns: JSON.stringify(displayColumns)
+        })).unwrap();
+        dispatch(showToast('Consulta creada exitosamente'));
+      }
+    } catch (err: any) {
+      dispatch(showToast(`Error al guardar consulta: ${err.message}`));
     }
   };
 
@@ -177,6 +197,7 @@ export function DatabaseView() {
         dispatch(showToast(`Error de ejecución: ${err.message}`));
       });
       setIsParamModalOpen(false);
+      setShowQueryEditor(false);
     }
   };
 
@@ -255,29 +276,39 @@ export function DatabaseView() {
                     <Plus size={14} />
                   </Button>
                 </div>
-                {connectionsState.connections.map(conn => (
-                  <button
-                    key={conn.id}
-                    onClick={() => {
-                      dispatch(setCurrentConnection(conn));
-                      setIsCreating(false);
-                      setTestResult(null);
-                    }}
-                    className={cn(
-                      "w-full text-left p-3 border rounded-sm flex items-center gap-3 transition-all",
-                      selectedConn?.id === conn.id 
-                        ? "border-accent bg-accent-light text-fg" 
-                        : "border-border hover:border-muted hover:bg-bg"
-                    )}
-                  >
-                    <div className="w-8 h-8 rounded-sm bg-bg border border-border flex items-center justify-center font-semibold text-accent text-xs shrink-0">
-                      DB
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{conn.name}</div>
-                      <div className="text-xs text-muted truncate">{conn.region} • {conn.database_name}</div>
-                    </div>
-                  </button>
+                {Object.entries(connectionsState.grouped).map(([groupName, regions]) => (
+                  <div key={groupName} className="mb-4">
+                    {groupName && <div className="text-[11px] font-bold text-fg uppercase tracking-widest px-1 mb-2 border-b border-border/50 pb-1">{groupName}</div>}
+                    {Object.entries(regions).map(([region, conns]) => (
+                      <div key={region} className="flex flex-col gap-1 mb-2">
+                        <span className="text-[10px] font-semibold text-muted uppercase tracking-wider px-1">{region}</span>
+                        {conns.map(conn => (
+                          <button
+                            key={conn.id}
+                            onClick={() => {
+                              dispatch(setCurrentConnection(conn));
+                              setIsCreating(false);
+                              setTestResult(null);
+                            }}
+                            className={cn(
+                              "w-full text-left p-3 border rounded-sm flex items-center gap-3 transition-all",
+                              selectedConn?.id === conn.id 
+                                ? "border-accent bg-accent-light text-fg" 
+                                : "border-border hover:border-muted hover:bg-bg"
+                            )}
+                          >
+                            <div className="w-8 h-8 rounded-sm bg-bg border border-border flex items-center justify-center font-semibold text-accent text-xs shrink-0">
+                              DB
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium truncate">{conn.name}</div>
+                              <div className="text-xs text-muted truncate">{conn.region} • {conn.database_name}</div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
                 ))}
               </>
             ) : (
@@ -323,6 +354,45 @@ export function DatabaseView() {
                   <p className="text-sm text-muted">Configuración de servidor e información de autenticación regional.</p>
                 </div>
                 <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      if (window.confirm('¿Estás seguro de eliminar esta conexión?')) {
+                        try {
+                          await dispatch(deleteConnection(selectedConn.id)).unwrap();
+                          dispatch(showToast('Conexión eliminada exitosamente'));
+                        } catch (err: any) {
+                          dispatch(showToast(`Error al eliminar: ${err.message}`));
+                        }
+                      }
+                    }}
+                    className="gap-2 text-danger hover:bg-danger/10 hover:border-danger/30"
+                  >
+                    <Trash2 size={14} /> Eliminar
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setFormName(selectedConn.name);
+                      setFormGroupName(selectedConn.group_name || '');
+                      setFormRegion(selectedConn.region);
+                      setFormCity(selectedConn.city || '');
+                      setFormHost(selectedConn.host);
+                      setFormDatabaseName(selectedConn.database_name);
+                      setFormPort(selectedConn.port);
+                      setFormDriver(selectedConn.driver);
+                      setFormUsername(selectedConn.username || '');
+                      setFormPassword('');
+                      setFormEnvCredentialKey(selectedConn.env_credential_key || 'SQLSERVER');
+                      setIsCreating(true);
+                      setTestResult(null);
+                    }}
+                    className="gap-2"
+                  >
+                    <Edit size={14} /> Editar
+                  </Button>
                   <Button 
                     variant="primary" 
                     size="sm" 
@@ -368,6 +438,50 @@ export function DatabaseView() {
                   {selectedConn.username && <div><span className="text-muted">Usuario:</span> {selectedConn.username}</div>}
                 </div>
               </div>
+
+              {/* Associated Queries */}
+              <div className="flex flex-col gap-3 mt-2">
+                <h3 className="text-sm font-semibold">Consultas asociadas a esta conexión</h3>
+                <div className="flex flex-col gap-2">
+                  {(() => {
+                    const associatedQueries = queriesState.queries.filter(q => {
+                      try {
+                        const ids = typeof q.connection_ids === 'string' ? JSON.parse(q.connection_ids) : (q.connection_ids || []);
+                        return Array.isArray(ids) && ids.includes(selectedConn.id);
+                      } catch(e) { return false; }
+                    });
+                    
+                    if (associatedQueries.length === 0) {
+                      return <div className="text-sm text-muted italic">No hay consultas asociadas a esta conexión.</div>;
+                    }
+                    
+                    return associatedQueries.map(q => (
+                      <div key={q.id} className="p-3 border border-border rounded-sm flex items-center justify-between hover:bg-bg/50 transition-colors">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-sm bg-bg border border-border flex items-center justify-center font-mono text-accent text-xs shrink-0">
+                            SQL
+                          </div>
+                          <div>
+                            <div className="text-sm font-medium">{q.name}</div>
+                            <div className="text-xs text-muted">Última ejecución: {q.last_run_at ? new Date(q.last_run_at).toLocaleDateString() : 'Nunca'}</div>
+                          </div>
+                        </div>
+                        <Button 
+                          variant="ghost" 
+                          size="sm" 
+                          onClick={() => {
+                            setActiveTab('queries');
+                            dispatch(setCurrentQuery(q));
+                          }}
+                          className="text-xs"
+                        >
+                          Ver consulta
+                        </Button>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
             </div>
           )}
 
@@ -385,6 +499,24 @@ export function DatabaseView() {
                   <p className="text-sm text-muted mt-1">Escribe la consulta SQL y selecciona las bases de datos destino.</p>
                 </div>
                 <div className="flex gap-2 shrink-0">
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={async () => {
+                      if (window.confirm('¿Estás seguro de eliminar esta consulta?')) {
+                        try {
+                          await dispatch(deleteQuery(queriesState.currentQuery!.id)).unwrap();
+                          dispatch(showToast('Consulta eliminada exitosamente'));
+                        } catch (err: any) {
+                          dispatch(showToast(`Error al eliminar: ${err.message}`));
+                        }
+                      }
+                    }} 
+                    className="gap-2 text-danger hover:bg-danger/10 hover:border-danger/30"
+                    title="Eliminar consulta"
+                  >
+                    <Trash2 size={14} /> Eliminar
+                  </Button>
                   <Button variant="default" size="sm" onClick={handleFormatSql} className="gap-2" title="Formatear SQL">
                     <AlignLeft size={14} /> Formatear
                   </Button>
@@ -399,42 +531,101 @@ export function DatabaseView() {
 
               {/* Database destinations board */}
               <div className="p-4 border border-border rounded-md bg-bg/50">
-                <h3 className="text-sm font-semibold mb-3">Bases de datos asociadas</h3>
-                <div className="flex flex-wrap gap-2">
-                  {connectionsState.connections.map(conn => {
-                    const isChecked = selectedConns.includes(conn.id);
+                <div className="flex flex-col gap-4">
+                  {(() => {
+                    const firstSelectedConn = selectedConns.length > 0 
+                      ? connectionsState.connections.find(c => c.id === selectedConns[0]) 
+                      : null;
+                    const activeGroup = firstSelectedConn ? (firstSelectedConn.group_name || '') : null;
+                    
                     return (
-                      <button
-                        key={conn.id}
-                        onClick={() => handleToggleConn(conn.id)}
-                        className={cn(
-                          "px-3 py-1.5 border rounded-full text-xs font-medium transition-colors flex items-center gap-2",
-                          isChecked 
-                            ? "border-accent bg-accent-light text-accent" 
-                            : "border-border bg-surface text-fg hover:border-muted"
-                        )}
-                      >
-                        <span className={cn("w-2 h-2 rounded-full", isChecked ? "bg-accent" : "bg-muted")}></span>
-                        {conn.name} ({conn.region})
-                      </button>
+                      <>
+                        <div className="flex items-center justify-between mb-1">
+                          <h3 className="text-sm font-semibold">Bases de datos asociadas</h3>
+                          {activeGroup !== null && (
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              onClick={() => setSelectedConns([])}
+                              className="text-xs h-6 text-muted hover:text-fg gap-1 px-2"
+                              title="Limpiar selección para elegir otra carpeta o grupo"
+                            >
+                              <RefreshCw size={12} /> Cambiar grupo/carpeta
+                            </Button>
+                          )}
+                        </div>
+                        {(() => {
+                          const filteredGroups = Object.entries(connectionsState.grouped)
+                            .filter(([groupName]) => activeGroup === null || groupName === activeGroup);
+
+                          if (filteredGroups.length === 0) {
+                            return <div className="text-xs text-muted">No hay conexiones disponibles.</div>;
+                          }
+
+                          return filteredGroups.map(([groupName, regions]) => (
+                            <div key={groupName} className="mb-4">
+                              {groupName && <div className="text-[12px] font-bold text-fg uppercase tracking-widest px-1 mb-2 border-b border-border/50 pb-1">{groupName}</div>}
+                              <div className="flex flex-col gap-3">
+                                {Object.entries(regions).map(([region, conns]) => (
+                                  <div key={region} className="flex flex-col gap-1.5">
+                                    <span className="text-[11px] font-semibold text-muted uppercase tracking-wider ml-1">{region}</span>
+                                    <div className="flex flex-wrap gap-2">
+                                      {conns.map(conn => {
+                                        const isChecked = selectedConns.includes(conn.id);
+                                        return (
+                                          <button
+                                            key={conn.id}
+                                            onClick={() => handleToggleConn(conn.id)}
+                                            className={cn(
+                                              "px-3 py-1.5 border rounded-full text-xs font-medium transition-colors flex items-center gap-2",
+                                              isChecked 
+                                                ? "border-accent bg-accent-light text-accent" 
+                                                : "border-border bg-surface text-fg hover:border-muted"
+                                            )}
+                                          >
+                                            <span className={cn("w-2 h-2 rounded-full", isChecked ? "bg-accent" : "bg-muted")}></span>
+                                            {conn.name}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ));
+                        })()}
+                      </>
                     );
-                  })}
+                  })()}
                 </div>
               </div>
 
               {/* SQL Code Editor */}
               <div className="flex flex-col gap-2">
-                <label className="text-xs font-medium text-muted font-mono uppercase tracking-wider">Sentencia SQL</label>
-                <div className="border border-border rounded-sm overflow-hidden bg-bg focus-within:border-accent">
-                  <CodeMirror
-                    value={sqlText}
-                    height="300px"
-                    extensions={[sql()]}
-                    onChange={(val) => setSqlText(val)}
-                    theme="light"
-                    className="text-sm font-mono border-0"
-                  />
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-muted font-mono uppercase tracking-wider">Sentencia SQL</label>
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className="h-6 px-2 text-[10px] uppercase font-mono text-muted-foreground hover:text-fg"
+                    onClick={() => setShowQueryEditor(!showQueryEditor)}
+                  >
+                    {showQueryEditor ? 'Ocultar' : 'Mostrar'} Editor
+                  </Button>
                 </div>
+                {showQueryEditor && (
+                  <div className="border border-border rounded-sm overflow-hidden bg-bg focus-within:border-accent">
+                    <CodeMirror
+                      value={sqlText}
+                      height="600px"
+                      extensions={[sql()]}
+                      onChange={(val) => setSqlText(val)}
+                      theme="light"
+                      className="text-sm font-mono border-0"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Results display */}
@@ -543,7 +734,7 @@ export function DatabaseView() {
               </div>
 
               <div className="flex flex-col gap-4">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-3 gap-4">
                   <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-medium text-muted">Nombre de la conexión</label>
                     <Input
@@ -554,13 +745,30 @@ export function DatabaseView() {
                     />
                   </div>
                   <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium text-muted">Grupo / Carpeta (Opcional)</label>
+                    <Input
+                      type="text"
+                      list="group-names"
+                      value={formGroupName}
+                      onChange={(e) => setFormGroupName(e.target.value)}
+                      placeholder="Ej. Operaciones"
+                    />
+                    <datalist id="group-names">
+                      {uniqueGroups.map(group => <option key={group} value={group} />)}
+                    </datalist>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-medium text-muted">Región</label>
                     <Input
                       type="text"
+                      list="region-names"
                       value={formRegion}
                       onChange={(e) => setFormRegion(e.target.value)}
                       placeholder="Ej. Colombia, México, Local"
                     />
+                    <datalist id="region-names">
+                      {uniqueRegions.map(region => <option key={region} value={region} />)}
+                    </datalist>
                   </div>
                 </div>
 
@@ -649,11 +857,12 @@ export function DatabaseView() {
                     variant="primary"
                     onClick={async () => {
                       if (!formName || !formRegion || !formHost) {
-                        alert('Por favor complete los campos obligatorios: Nombre, Región y Host/Ruta');
+                        dispatch(showToast('Por favor complete los campos obligatorios: Nombre, Región y Host/Ruta'));
                         return;
                       }
                       const connData = {
                         name: formName,
+                        group_name: formGroupName || null,
                         region: formRegion,
                         city: formCity || null,
                         host: formHost,
@@ -665,11 +874,19 @@ export function DatabaseView() {
                         env_credential_key: formDriver === 'sqlite' ? null : formEnvCredentialKey
                       };
                       try {
-                        const resultAction = await dispatch(createConnection(connData));
-                        if (createConnection.fulfilled.match(resultAction)) {
+                        let resultAction;
+                        if (selectedConn) {
+                          resultAction = await dispatch(updateConnection({ id: selectedConn.id, ...connData }));
+                        } else {
+                          resultAction = await dispatch(createConnection(connData));
+                        }
+                        
+                        if (createConnection.fulfilled.match(resultAction) || updateConnection.fulfilled.match(resultAction)) {
                           setIsCreating(false);
+                          dispatch(showToast(selectedConn ? 'Conexión actualizada exitosamente' : 'Conexión creada exitosamente'));
                           // Reset form fields
                           setFormName('');
+                          setFormGroupName('');
                           setFormRegion('');
                           setFormCity('');
                           setFormHost('');
@@ -679,12 +896,11 @@ export function DatabaseView() {
                           setFormUsername('');
                           setFormPassword('');
                           setFormEnvCredentialKey('SQLSERVER');
-                          dispatch(setCurrentConnection(resultAction.payload.data));
                         } else {
-                          alert('Error al crear la conexión');
+                          dispatch(showToast(selectedConn ? 'Error al actualizar la conexión' : 'Error al crear la conexión'));
                         }
                       } catch (err) {
-                        alert('Error al crear la conexión');
+                        dispatch(showToast('Error de red al guardar la conexión'));
                       }
                     }}
                   >

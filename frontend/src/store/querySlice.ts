@@ -66,6 +66,12 @@ export const updateQuery = createAsyncThunk('queries/update', async ({ id, ...bo
   return data.data as Query;
 });
 
+export const deleteQuery = createAsyncThunk('queries/delete', async (id: string) => {
+  const res = await fetch(`${API_URL}/queries/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Error deleting query');
+  return id;
+});
+
 export const executeQuery = createAsyncThunk('queries/execute', async ({ id, connection_ids, params }: { id: string; connection_ids: string[]; params?: Record<string, string> }) => {
   const res = await fetch(`${API_URL}/queries/${id}/execute`, {
     method: 'POST',
@@ -110,6 +116,12 @@ const querySlice = createSlice({
         const idx = state.queries.findIndex(q => q.id === action.payload.id);
         if (idx >= 0) state.queries[idx] = action.payload;
         if (state.currentQuery?.id === action.payload.id) state.currentQuery = action.payload;
+      })
+      .addCase(deleteQuery.fulfilled, (state, action) => {
+        state.queries = state.queries.filter(q => q.id !== action.payload);
+        if (state.currentQuery?.id === action.payload) {
+          state.currentQuery = null;
+        }
       })
       .addCase(executeQuery.pending, (state) => { state.executing = true; })
       .addCase(executeQuery.fulfilled, (state, action) => {
