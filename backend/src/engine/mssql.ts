@@ -70,8 +70,27 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
       if (val === undefined || val === null) {
         val = '';
       }
+      
+      // Handle comma-separated lists for IN clauses (e.g. 'A','B')
+      if (typeof val === 'string' && val.includes(',') && (val.includes("'") || val.includes('"'))) {
+        const elements = val.split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''));
+        const tokenRegex = new RegExp(`@${key}\\b`, 'g');
+        if (parsedSql.match(tokenRegex)) {
+          const replacementTokens = elements.map((_, i) => `@${key}_${i}`);
+          parsedSql = parsedSql.replace(tokenRegex, replacementTokens.join(', '));
+          
+          elements.forEach((el, i) => {
+            request.input(`${key}_${i}`, el);
+          });
+          return;
+        }
+      }
+
       request.input(key, val);
     });
+
+    console.log("EXECUTING SQL:", parsedSql);
+    console.log("PARAMETERS:", request.parameters);
 
     const result = await request.query(parsedSql);
     return {
