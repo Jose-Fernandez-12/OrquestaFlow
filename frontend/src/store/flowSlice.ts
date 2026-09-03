@@ -36,6 +36,7 @@ interface FlowState {
   completedNodeIds: string[];
   errorNodeIds: string[];
   nodeResults: Record<string, any>;
+  nodeProgress: Record<string, { current: number; total: number }>;
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
   loading: boolean;
@@ -50,6 +51,7 @@ const initialState: FlowState = {
   completedNodeIds: [],
   errorNodeIds: [],
   nodeResults: {},
+  nodeProgress: {},
   canvasExpanded: false,
   nodeLibraryExpanded: true,
   loading: false,
@@ -129,11 +131,16 @@ const flowSlice = createSlice({
         state.nodeResults[nodeId] = error;
       }
     },
+    setNodeProgress(state, action: PayloadAction<{ nodeId: string; current: number; total: number }>) {
+      const { nodeId, current, total } = action.payload;
+      state.nodeProgress[nodeId] = { current, total };
+    },
     resetNodeStates(state) {
       state.executingNodeIds = [];
       state.completedNodeIds = [];
       state.errorNodeIds = [];
       state.nodeResults = {};
+      state.nodeProgress = {};
     },
     toggleCanvasExpanded(state) {
       state.canvasExpanded = !state.canvasExpanded;
@@ -180,6 +187,7 @@ export const {
   setNodeExecuting,
   setNodeCompleted,
   setNodeError,
+  setNodeProgress,
   resetNodeStates,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,
