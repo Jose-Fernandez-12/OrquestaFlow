@@ -7,7 +7,7 @@ import mssql from 'mssql';
 import ExcelJS from 'exceljs';
 
 // Global execution wrapper with parallel dependency resolution
-export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error', result?: any) => void) {
+export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void) {
   const db = getDb();
   const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
   if (!flow) throw new Error('Flow not found');
@@ -68,7 +68,7 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
                   case 'httpGet':
                   case 'httpPost':
                   case 'httpRequest':
-                    output = await executeHttpNode(node, context);
+                    output = await executeHttpNode(node, context, onNodeProgress);
                     break;
                   case 'scraping':
                     output = await executeScrapingNode(node, context);
@@ -122,87 +122,123 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
 }
 
 // Http Node Handler
-async function executeHttpNode(node: any, context: Record<string, any>) {
-  let endpoint = node.data?.endpoint || '';
+async function executeHttpNode(node: any, context: Record<string, any>, onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void) {
+  const iterateOver = node.data?.iterateOver;
+  const iterateMode = node.data?.iterateMode;
+  let itemsToIterate: any[] = [null]; // By default, run once with no item
 
-  // Intercept mock storefront URLs to prevent DNS failures and return actual data
-  if (endpoint.includes('storefront.com') || !endpoint.startsWith('http')) {
-    return {
-      status: "success",
-      code: 200,
-      data: {
-        items: [
-          { id: "prod_01", name: "Laptop Pro", price: 1299.99, stock: 45 },
-          { id: "prod_02", name: "Mouse Inalámbrico", price: 49.99, stock: 120 }
-        ],
-        pagination: { page: 1, total_pages: 5, total_items: 10 }
-      }
-    };
+  if (iterateOver && iterateOver.trim() !== '' && iterateOver.trim() !== '{{ID_NODO}}') {
+    const resolved = resolveTemplate(context, iterateOver);
+    if (Array.isArray(resolved)) {
+      itemsToIterate = resolved;
+    }
   }
+
+  // Auto-detect: if iterateMode is enabled but array wasn't resolved, grab first array from context
+  if (iterateMode && (itemsToIterate.length === 1 && itemsToIterate[0] === null)) {
+    for (const ctxVal of Object.values(context)) {
+      if (Array.isArray(ctxVal) && ctxVal.length > 0) {
+        itemsToIterate = ctxVal;
+        break;
+      }
+    }
+  }
+
+  const results = [];
   
-  const substitute = (str: string) => {
-    if (typeof str !== 'string') return str;
-    return str.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
-      const val = resolvePath(context, pathStr);
-      return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
-    });
-  };
+  for (let i = 0; i < itemsToIterate.length; i++) {
+    const item = itemsToIterate[i];
+    
+    // Create a localized context for this iteration
+    const localContext = { ...context };
+    if (item !== null) {
+      localContext['_item'] = item;
+    }
+    
+    let endpoint = node.data?.endpoint || '';
+    if (endpoint.includes('storefront.com') || !endpoint.startsWith('http')) {
+      results.push({
+        status: "success",
+        code: 200,
+        data: { items: [{ id: "prod_01", name: "Laptop Pro", price: 1299.99, stock: 45 }] }
+      });
+      continue;
+    }
+    
+    endpoint = resolveTemplate(localContext, endpoint) as string;
 
-  endpoint = substitute(endpoint);
-
-  // Apply query params
-  if (node.data?.params && node.data.params.trim() !== '') {
-    try {
-      const paramsObj = JSON.parse(substitute(node.data.params));
-      const url = new URL(endpoint);
-      for (const [k, v] of Object.entries(paramsObj)) {
-        url.searchParams.append(k, String(v));
+    if (node.data?.params && node.data.params.trim() !== '') {
+      try {
+        const parsed = JSON.parse(node.data.params);
+        const paramsObj = resolveTemplate(localContext, parsed);
+        const url = new URL(endpoint);
+        for (const [k, v] of Object.entries(paramsObj)) {
+          url.searchParams.append(k, String(v));
+        }
+        endpoint = url.toString();
+      } catch (e) {
+        console.error('Failed to parse query params', e);
       }
-      endpoint = url.toString();
-    } catch (e) {
-      console.error('Failed to parse query params', e);
     }
-  }
 
-  // Determine method
-  let method = node.data?.method || 'GET';
-  if (node.type === 'httpPost') method = 'POST'; // Backwards compatibility
+    let method = node.data?.method || 'GET';
+    if (node.type === 'httpPost') method = 'POST';
 
-  // Determine headers
-  let headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (node.data?.headers && node.data.headers.trim() !== '') {
+    let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (node.data?.headers && node.data.headers.trim() !== '') {
+      try {
+        const parsedHeaders = JSON.parse(node.data.headers);
+        headers = { ...headers, ...resolveTemplate(localContext, parsedHeaders) };
+      } catch(e) {
+        console.error('Failed to parse headers', e);
+      }
+    }
+
+    const options: RequestInit = { method, headers };
+
+    if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      if (node.data?.body && node.data.body.trim() !== '') {
+        const bodyContent = node.data.body;
+        const resolvedBody = resolveTemplate(localContext, bodyContent);
+        if (resolvedBody === undefined || resolvedBody === null || resolvedBody === '') {
+          // skip - no body
+        } else if (typeof resolvedBody === 'object') {
+          options.body = JSON.stringify(resolvedBody);
+        } else {
+          // It's a string - try to parse as JSON to validate/normalize it
+          const strBody = String(resolvedBody);
+          try {
+            const parsed = JSON.parse(strBody);
+            options.body = JSON.stringify(parsed);
+          } catch {
+            options.body = strBody;
+          }
+        }
+      } else if (node.data?.payload) {
+        options.body = JSON.stringify(resolveTemplate(localContext, node.data.payload) || {});
+      }
+    }
+
+    const response = await fetch(endpoint, options);
+    if (!response.ok) {
+      throw new Error(`HTTP Request failed with status ${response.status}`);
+    }
+
+    const text = await response.text();
     try {
-      const parsedHeaders = JSON.parse(substitute(node.data.headers));
-      headers = { ...headers, ...parsedHeaders };
-    } catch(e) {
-      console.error('Failed to parse headers', e);
+      results.push(JSON.parse(text));
+    } catch {
+      results.push({ text });
+    }
+    
+    // Report progress
+    if (itemsToIterate.length > 1 && onNodeProgress) {
+      onNodeProgress(node.id, 'progress', { current: i + 1, total: itemsToIterate.length });
     }
   }
 
-  const options: RequestInit = {
-    method,
-    headers,
-  };
-
-  if (['POST', 'PUT', 'PATCH'].includes(method)) {
-    if (node.data?.body && node.data.body.trim() !== '') {
-      options.body = substitute(node.data.body);
-    } else if (node.data?.payload) {
-      options.body = JSON.stringify(node.data.payload || {}); // Backwards compatibility
-    }
-  }
-
-  const response = await fetch(endpoint, options);
-  if (!response.ok) {
-    throw new Error(`HTTP Request failed with status ${response.status}`);
-  }
-
-  const text = await response.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { text };
-  }
+  // Return single response if not iterating, or array if iterating
+  return itemsToIterate.length > 1 || iterateOver ? results : results[0];
 }
 
 // Scraping Node Handler (spawns Python script if configured)
@@ -242,28 +278,68 @@ async function executeScrapingNode(node: any, context: Record<string, any>) {
 
 // Helper: resolve a path like "nodeId[0].name" or "nodeId.data.items" from context
 function resolvePath(context: Record<string, any>, pathStr: string): any {
-  // Tokenize path: split on '.' but keep bracket groups as part of previous token
-  // e.g. "abc[0].name" -> ["abc[0]", "name"]
   const tokens = pathStr.trim().split('.');
   let val: any = context;
 
-  for (const token of tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
     if (val === undefined || val === null) break;
 
-    // Check for bracket notation: e.g. "abc[0]" or just "[0]"
-    const bracketRe = /^([^\[]*?)\[(\d+)\]$/;
+    const bracketRe = /^([^\[]*?)\[(\d+|\*)\]$/;
     const bracketMatch = token.match(bracketRe);
+    
     if (bracketMatch) {
       const key = bracketMatch[1];
-      const idx = parseInt(bracketMatch[2], 10);
+      const idxOrStar = bracketMatch[2];
+      
       if (key) val = val[key];
-      if (val !== undefined && val !== null) val = val[idx];
+      
+      if (val !== undefined && val !== null) {
+        if (idxOrStar === '*') {
+          if (Array.isArray(val)) {
+            const remainingTokens = tokens.slice(i + 1);
+            if (remainingTokens.length === 0) return val;
+            return val.map(item => resolvePath({ item }, ['item', ...remainingTokens].join('.')));
+          }
+          break;
+        } else {
+          val = val[parseInt(idxOrStar, 10)];
+        }
+      }
     } else {
       val = val[token];
     }
   }
 
   return val;
+}
+
+function resolveTemplate(context: Record<string, any>, value: any): any {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    const exactMatch = trimmed.match(/^\{\{([^}]+)\}\}$/);
+    if (exactMatch) {
+      return resolvePath(context, exactMatch[1]);
+    }
+    return value.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
+      const val = resolvePath(context, pathStr);
+      return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
+    });
+  }
+  
+  if (Array.isArray(value)) {
+    return value.map(v => resolveTemplate(context, v));
+  }
+  
+  if (value !== null && typeof value === 'object') {
+    const result: any = {};
+    for (const key of Object.keys(value)) {
+      result[key] = resolveTemplate(context, value[key]);
+    }
+    return result;
+  }
+  
+  return value;
 }
 
 // Export Node Handler
@@ -428,18 +504,11 @@ async function executeQueryNode(node: any, context: Record<string, any>) {
   } catch(e) {}
   if (connectionIds.length === 0) throw new Error('Query has no connections configured');
 
-  const substitute = (str: string) => {
-    if (typeof str !== 'string') return str;
-    return str.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
-      const val = resolvePath(context, pathStr);
-      return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
-    });
-  };
-
   let params: Record<string, any> = {};
   if (node.data?.queryParams && node.data.queryParams.trim() !== '') {
     try {
-      params = JSON.parse(substitute(node.data.queryParams));
+      const parsed = JSON.parse(node.data.queryParams);
+      params = resolveTemplate(context, parsed);
     } catch(e) {
       console.error('Failed to parse query params mapping', e);
     }

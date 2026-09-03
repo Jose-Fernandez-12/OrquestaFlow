@@ -20,6 +20,7 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
   const completed = useAppSelector(state => state.flows.completedNodeIds.includes(id));
   const hasError = useAppSelector(state => state.flows.errorNodeIds.includes(id));
   const nodeResult = useAppSelector(state => state.flows.nodeResults[id]);
+  const progress = useAppSelector(state => state.flows.nodeProgress[id]);
   
   const Icon = data.icon;
   
@@ -95,6 +96,14 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
             type === 'httpPost' ? 'HTTP Request' : 
             type
           }</div>
+          {executing && progress && (
+            <div className="mt-1 flex items-center justify-between text-[10px] font-medium text-blue-500">
+              <div className="flex-1 mr-2 bg-blue-100 rounded-full h-1.5 overflow-hidden">
+                <div className="bg-blue-500 h-full transition-all duration-300" style={{ width: `${(progress.current / progress.total) * 100}%` }} />
+              </div>
+              <span>{progress.current}/{progress.total}</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -29,6 +29,7 @@ import {
   setNodeExecuting,
   setNodeCompleted,
   setNodeError,
+  setNodeProgress,
   resetNodeStates
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
@@ -103,7 +104,7 @@ function FlowCanvas() {
     
     const socket = io('http://localhost:3001');
 
-    socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error', result?: any }) => {
+    socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error' | 'progress', result?: any, current?: number, total?: number }) => {
       if (data.flowId === flowId) {
         if (data.status === 'running') {
           dispatch(setNodeExecuting(data.nodeId));
@@ -111,6 +112,8 @@ function FlowCanvas() {
           dispatch(setNodeCompleted({ nodeId: data.nodeId, result: data.result }));
         } else if (data.status === 'error') {
           dispatch(setNodeError({ nodeId: data.nodeId, error: data.result }));
+        } else if (data.status === 'progress' && data.current && data.total) {
+          dispatch(setNodeProgress({ nodeId: data.nodeId, current: data.current, total: data.total }));
         }
       }
     });
@@ -246,7 +249,7 @@ function FlowCanvas() {
         const query = queries.find((q: any) => q.id === node.data!.queryId);
         if (query) {
           const sqlText = (query.sql_text as string) || '';
-          const paramMatches = [...sqlText.matchAll(/:([a-zA-Z0-9_]+)\b/g)];
+          const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
           const uniqueParams = [...new Set(paramMatches.map(m => m[1]))];
           
           let queryParams: Record<string, string> = {};

@@ -22,7 +22,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
   
   const detectedParams = React.useMemo(() => {
     if (!selectedQuery?.sql_text) return [];
-    const regex = /:([a-zA-Z0-9_]+)/g;
+    const regex = /(?:^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
     const params = new Set<string>();
     let match;
     while ((match = regex.exec(selectedQuery.sql_text)) !== null) {
@@ -90,18 +90,63 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                 <option value="DELETE">DELETE</option>
               </select>
             </div>
-            
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium">Endpoint URL</label>
+
+            <div className="space-y-1.5 pt-2 border-t border-border mt-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="iterateMode"
+                  className="w-3.5 h-3.5 accent-accent"
+                  checked={node.data?.iterateMode as boolean || false}
+                  onChange={(e) => updateNodeData('iterateMode', e.target.checked)}
+                />
+                <label htmlFor="iterateMode" className="text-xs font-medium cursor-pointer">
+                  Modo Iteración (Batch)
+                </label>
+              </div>
+              {node.data?.iterateMode && (
+                <div className="mt-2 pl-5 space-y-1">
+                  <label className="text-[10px] font-medium text-muted-foreground block">Array base a iterar</label>
+                  <div className="flex gap-1">
+                    <Input 
+                      className="h-8 text-xs font-mono"
+                      value={node.data?.iterateOver as string || ''}
+                      onChange={(e) => updateNodeData('iterateOver', e.target.value)}
+                      placeholder="{{ID_NODO}}"
+                    />
+                    {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                      <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('iterateOver', val)} />
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-muted">Extrae la lista completa con [*] y luego usa {'{{_item.propiedad}}'} en los demás campos.</p>
+                </div>
+              )}
+            </div>
+                        <div className="space-y-1.5">
+              <div className="flex justify-between items-center">
+                <label className="text-xs font-medium">Endpoint URL</label>
+                <div className="flex gap-1">
+                  {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                    <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('endpoint', ((node.data?.endpoint as string) || '') + val)} />
+                  ))}
+                </div>
+              </div>
               <Input 
                 value={node.data?.endpoint as string || ''} 
                 onChange={(e) => updateNodeData('endpoint', e.target.value)}
-                placeholder="https://api.example.com/v1/users/{{start.data.id}}" 
+                placeholder="https://api.example.com/v1/users/{{start.data.id}}"
               />
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium">Headers (JSON)</label>
+              <div className="flex justify-between items-center">
+                <label className="text-xs font-medium">Headers (JSON)</label>
+                <div className="flex gap-1">
+                  {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                    <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('headers', ((node.data?.headers as string) || '') + val)} />
+                  ))}
+                </div>
+              </div>
               <textarea 
                 className="flex w-full min-h-[60px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
                 value={node.data?.headers as string || '{\n  "Content-Type": "application/json"\n}'}
@@ -111,7 +156,14 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
             </div>
             
             <div className="space-y-1.5">
-              <label className="text-xs font-medium">Query Params (JSON)</label>
+              <div className="flex justify-between items-center">
+                <label className="text-xs font-medium">Query Params (JSON)</label>
+                <div className="flex gap-1">
+                  {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                    <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('params', ((node.data?.params as string) || '') + val)} />
+                  ))}
+                </div>
+              </div>
               <textarea 
                 className="flex w-full min-h-[60px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
                 value={node.data?.params as string || ''}
@@ -122,7 +174,14 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
 
             {['POST', 'PUT', 'PATCH'].includes((node.data?.method as string) || 'GET') && (
               <div className="space-y-1.5">
-                <label className="text-xs font-medium">Body / Payload (JSON)</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium">Body / Payload (JSON)</label>
+                  <div className="flex gap-1">
+                    {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                      <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('body', ((node.data?.body as string) || '') + val)} />
+                    ))}
+                  </div>
+                </div>
                 <textarea 
                   className="flex w-full min-h-[100px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
                   value={node.data?.body as string || ''}
@@ -147,8 +206,21 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
             
             {/* JSON Selector Modal Trigger */}
             <div className="pt-2 border-t border-border mt-2">
-              <JsonSelectorTrigger node={node} />
+              <JsonSelectorTrigger node={node} customLabel="Probar Petición HTTP (Ejecutar)" />
             </div>
+
+            {/* Render JSON Viewer for upstream HTTP/Query nodes to make mapping easier */}
+            {edges
+              .filter(e => e.target === node.id)
+              .map(e => nodes.find(n => n.id === e.source))
+              .filter(n => n && (n.type?.startsWith('http') || n.type === 'query'))
+              .map(upNode => (
+                <div key={upNode!.id} className="pt-2 border-t border-border mt-4">
+                  <span className="text-[10px] text-muted block mb-1">Inspeccionar datos desde: {(upNode!.data?.label as string) || upNode!.type}</span>
+                  <JsonSelectorTrigger node={upNode} customLabel={`Ver JSON de ${upNode!.data?.label as string || 'nodo anterior'}`} updateNodeData={updateNodeData} />
+                </div>
+              ))
+            }
           </>
         )}
 
@@ -248,7 +320,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               .map(upNode => (
                 <div key={upNode!.id} className="pt-2 border-t border-border mt-4">
                   <span className="text-[10px] text-muted block mb-1">Inspeccionar datos desde: {(upNode!.data?.label as string) || upNode!.type}</span>
-                  <JsonSelectorTrigger node={upNode} updateNodeData={updateNodeData} />
+                  <JsonSelectorTrigger node={upNode} customLabel={`Ver JSON de ${upNode!.data?.label as string || 'nodo anterior'}`} updateNodeData={updateNodeData} />
                 </div>
               ))
             }
@@ -354,7 +426,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               .map(upNode => (
                 <div key={upNode!.id} className="pt-2 border-t border-border mt-4">
                   <span className="text-[10px] text-muted block mb-1">Inspeccionar datos desde: {(upNode!.data?.label as string) || upNode!.type}</span>
-                  <JsonSelectorTrigger node={upNode} forExportNode={node} updateNodeData={updateNodeData} />
+                  <JsonSelectorTrigger node={upNode} forExportNode={node} customLabel={`Ver JSON de ${upNode!.data?.label as string || 'nodo anterior'}`} updateNodeData={updateNodeData} />
                 </div>
               ))
             }
@@ -399,6 +471,8 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValu
   const [jsonData, setJsonData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [extractArray, setExtractArray] = useState(false);
+  const [extractIterate, setExtractIterate] = useState(false);
   
   const cachedResult = useAppSelector(state => (state as any).flows?.nodeResults?.[node.id]);
 
@@ -474,10 +548,18 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValu
           body: JSON.stringify({ connection_ids: [], params: parsedParams })
         });
       } else {
-        const method = node.type === 'httpPost' ? 'POST' : 'GET';
+        const method = (node.data?.method as string) || (node.type === 'httpPost' ? 'POST' : 'GET');
         const options: RequestInit = { method, headers: { 'Content-Type': 'application/json' } };
-        if (method === 'POST' && node.data?.payload) {
-          options.body = JSON.stringify(node.data.payload);
+        
+        let payloadStr = '';
+        if (node.data?.body) {
+          payloadStr = node.data.body;
+        } else if (node.data?.payload) {
+          payloadStr = JSON.stringify(node.data.payload);
+        }
+        
+        if (['POST', 'PUT', 'PATCH'].includes(method) && payloadStr) {
+          options.body = payloadStr;
         }
         res = await fetch(endpoint, options);
       }
@@ -515,7 +597,29 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValu
 
   const handleSelectKey = (path: string) => {
     // path already starts with nodeId (it's the currentPath)
-    const variableFormat = `{{${path}}}`;
+    let formattedPath = path;
+    if (extractIterate) {
+      const lastBracket = path.lastIndexOf('].');
+      if (lastBracket !== -1) {
+        formattedPath = '_item.' + path.substring(lastBracket + 2);
+      } else {
+        const lastDot = path.lastIndexOf('.');
+        if (lastDot !== -1) {
+          formattedPath = '_item.' + path.substring(lastDot + 1);
+        } else {
+          formattedPath = '_item';
+        }
+      }
+    } else if (extractArray) {
+      // Reemplaza el primer o último índice de array con [*]
+      const lastBracket = path.lastIndexOf('[');
+      if (lastBracket !== -1) {
+        formattedPath = path.substring(0, lastBracket) + '[*]' + path.substring(path.indexOf(']', lastBracket) + 1);
+      } else {
+        formattedPath = path.replace(/\[\d+\]/g, '[*]');
+      }
+    }
+    const variableFormat = `{{${formattedPath}}}`;
     setSelectedKey(variableFormat);
     
     if (onSelectValue) {
@@ -591,6 +695,40 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValu
                   : 'Haz clic en cualquier propiedad para copiar su variable de referencia.'
                 }
               </p>
+              {!isMultiSelect && (
+                <div className="flex flex-col gap-2 mt-3 pt-3 border-t border-border">
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="checkbox" 
+                      id="extractArray"
+                      className="w-3.5 h-3.5 accent-accent"
+                      checked={extractArray}
+                      onChange={(e) => {
+                        setExtractArray(e.target.checked);
+                        if (e.target.checked) setExtractIterate(false);
+                      }}
+                    />
+                    <label htmlFor="extractArray" className="text-xs font-medium text-muted-foreground select-none cursor-pointer">
+                      Extraer como lista completa (Array map [*])
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="checkbox" 
+                      id="extractIterate"
+                      className="w-3.5 h-3.5 accent-accent"
+                      checked={extractIterate}
+                      onChange={(e) => {
+                        setExtractIterate(e.target.checked);
+                        if (e.target.checked) setExtractArray(false);
+                      }}
+                    />
+                    <label htmlFor="extractIterate" className="text-xs font-medium text-muted-foreground select-none cursor-pointer">
+                      Extraer para Modo Iteración (usa _item)
+                    </label>
+                  </div>
+                </div>
+              )}
             </div>
 
             {loading && <div className="text-center p-4 text-sm text-muted">Realizando petición a {node.data?.endpoint}...</div>}

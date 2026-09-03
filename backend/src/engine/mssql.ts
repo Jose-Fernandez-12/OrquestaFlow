@@ -56,12 +56,12 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
     });
     
     // Replace remaining normal :param with @param
-    parsedSql = parsedSql.replace(/(?<!')(:[a-zA-Z0-9_]+)\b/g, (match) => {
-      return '@' + match.substring(1);
+    parsedSql = parsedSql.replace(/(^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (match, prefix, paramName) => {
+      return prefix + '@' + paramName;
     });
 
     // Extract all unique parameters from original SQL
-    const paramMatches = [...sqlText.matchAll(/:([a-zA-Z0-9_]+)\b/g)];
+    const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
     const uniqueParams = [...new Set(paramMatches.map(m => m[1]))];
 
     uniqueParams.forEach(key => {
@@ -70,8 +70,34 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
       if (val === undefined || val === null) {
         val = '';
       }
+      
+      let isArray = Array.isArray(val);
+      let elements = [];
+      if (isArray) {
+        elements = val;
+      } else if (typeof val === 'string' && val.includes(',') && (val.includes("'") || val.includes('"'))) {
+        isArray = true;
+        elements = val.split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''));
+      }
+
+      if (isArray) {
+        const tokenRegex = new RegExp(`@${key}\\b`, 'g');
+        if (parsedSql.match(tokenRegex)) {
+          const replacementTokens = elements.map((_, i) => `@${key}_${i}`);
+          parsedSql = parsedSql.replace(tokenRegex, replacementTokens.join(', '));
+          
+          elements.forEach((el, i) => {
+            request.input(`${key}_${i}`, el);
+          });
+          return;
+        }
+      }
+
       request.input(key, val);
     });
+
+    console.log("EXECUTING SQL:", parsedSql);
+    console.log("PARAMETERS:", request.parameters);
 
     const result = await request.query(parsedSql);
     return {

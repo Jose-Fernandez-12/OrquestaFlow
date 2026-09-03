@@ -25,16 +25,32 @@ export async function executeSqliteQuery(filePath: string, sqlText: string, para
       return parts.join(' || ');
     });
     
+    // Map params and expand list parameters for IN clauses
+    const binds: Record<string, any> = {};
+    Object.keys(params).forEach(k => {
+      let val = params[k];
+      
+      // Handle comma-separated lists for IN clauses (e.g. 'A','B')
+      if (typeof val === 'string' && val.includes(',') && (val.includes("'") || val.includes('"'))) {
+        const elements = val.split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''));
+        const tokenRegex = new RegExp(`:${k}\\b`, 'g');
+        if (parsedSql.match(tokenRegex)) {
+          const replacementTokens = elements.map((_, i) => `:${k}_${i}`);
+          parsedSql = parsedSql.replace(tokenRegex, replacementTokens.join(', '));
+          elements.forEach((el, i) => {
+            binds[`:${k}_${i}`] = el;
+          });
+          return;
+        }
+      }
+      
+      binds[`:${k}`] = val;
+      binds[`@${k}`] = val;
+      binds[`$${k}`] = val;
+    });
+
     const stmt = db.prepare(parsedSql);
     try {
-      // Map params if any (SQLite supports object binding for keys starting with :, @, $)
-      const binds: Record<string, any> = {};
-      Object.keys(params).forEach(k => {
-        binds[`:${k}`] = params[k];
-        binds[`@${k}`] = params[k];
-        binds[`$${k}`] = params[k];
-      });
-
       stmt.bind(binds);
 
       const rows: any[] = [];
