@@ -59,18 +59,43 @@ function startCronJob(schedule: any) {
 
     const startTime = Date.now();
     try {
+      let recordCount = 0;
+      let exportedFiles: string[] = [];
+
       if (schedule.target_type === 'flow') {
-        await executeFlowEngine(schedule.target_id);
+        const context = await executeFlowEngine(schedule.target_id);
+        
+        const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
+        exportResults.forEach((exportResult: any) => {
+          const fileName = exportResult.filePath.split(/[/\\]/).pop();
+          exportedFiles.push(fileName);
+          recordCount += (exportResult.records || 0);
+
+          try {
+            const { getIo } = require('./socket.js');
+            const io = getIo();
+            io.emit('flow-export-ready', {
+              flowId: schedule.target_id,
+              fileName,
+              downloadUrl: `/api/files/${fileName}`,
+              records: exportResult.records,
+              format: exportResult.format,
+              filePath: exportResult.filePath
+            });
+          } catch (e) {}
+        });
       } else if (schedule.target_type === 'script') {
         await runScriptById(schedule.target_id);
       }
       
       const duration = Date.now() - startTime;
+      const resultJson = exportedFiles.length > 0 ? JSON.stringify({ exportedFiles }) : null;
+
       db.prepare(`
         UPDATE execution_logs
-        SET status = 'completed', duration_ms = ?, completed_at = datetime('now')
+        SET status = 'completed', duration_ms = ?, record_count = ?, result = ?, completed_at = datetime('now')
         WHERE id = ?
-      `).run(duration, logId);
+      `).run(duration, recordCount, resultJson, logId);
       
       // Update database status for the next run
       const nextNextRun = getNextRunAt(schedule.cron_expression);

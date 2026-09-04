@@ -105,7 +105,7 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) return reply.status(404).send({ error: 'Schedule not found' });
 
     const logs = db.prepare(`
-      SELECT id, status, error_message, duration_ms, record_count, started_at, completed_at
+      SELECT id, status, error_message, duration_ms, record_count, result, started_at, completed_at
       FROM execution_logs 
       WHERE schedule_id = ?
       ORDER BY started_at DESC

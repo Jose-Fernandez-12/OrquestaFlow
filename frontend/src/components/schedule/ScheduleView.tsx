@@ -3,7 +3,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchSchedules, createSchedule, updateSchedule } from '../../store/scheduleSlice';
 import { fetchFlows } from '../../store/flowSlice';
 import { fetchScripts } from '../../store/scriptSlice';
-import { Calendar, Plus, Clock, ToggleLeft, ToggleRight, X, Play, Loader2, History, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Calendar, Plus, Clock, ToggleLeft, ToggleRight, X, Play, Loader2, History, AlertCircle, CheckCircle2, FileSpreadsheet } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { Button } from '../ui/button';
@@ -39,6 +39,7 @@ export function ScheduleView() {
   }, [cronExpr]);
 
   const [now, setNow] = useState(Date.now());
+  const [exportNotification, setExportNotification] = useState<any[]>([]);
 
   // Fetch schedules on mount and set up auto-refresh
   useEffect(() => {
@@ -56,9 +57,22 @@ export function ScheduleView() {
       setNow(Date.now());
     }, 10000);
 
+    const { io } = require('socket.io-client');
+    const socket = io('http://localhost:3001');
+
+    socket.on('flow-export-ready', (data: any) => {
+      const id = Date.now() + Math.random();
+      setExportNotification(prev => [...prev, { ...data, id }]);
+      
+      setTimeout(() => {
+        setExportNotification(prev => prev.filter(n => n.id !== id));
+      }, 5000);
+    });
+
     return () => {
       clearInterval(fetchInterval);
       clearInterval(tickInterval);
+      socket.disconnect();
     };
   }, [dispatch]);
 
@@ -389,6 +403,23 @@ export function ScheduleView() {
                           {log.error_message}
                         </div>
                       )}
+
+                      {log.result && (
+                        <div className="mt-2 p-2 bg-accent-light border border-accent/20 rounded text-fg text-xs">
+                          <span className="font-semibold block mb-1 text-accent">Resultado:</span>
+                          {(() => {
+                            try {
+                              const parsed = JSON.parse(log.result);
+                              if (parsed.exportedFiles && parsed.exportedFiles.length > 0) {
+                                return <span>Archivos exportados: {parsed.exportedFiles.join(', ')}</span>;
+                              }
+                              return <span>Ejecutado con éxito.</span>;
+                            } catch (e) {
+                              return <span>{log.result}</span>;
+                            }
+                          })()}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -397,6 +428,36 @@ export function ScheduleView() {
           </div>
         </div>
       )}
+
+      {/* Export Notifications (Global to the Schedule View) */}
+      <div className="fixed bottom-6 right-6 flex flex-col gap-3 z-50">
+        {exportNotification.map((notif) => (
+          <div key={notif.id} className="animate-fade-in bg-surface border border-success/40 rounded-md shadow-raised px-5 py-4 flex items-start gap-4 min-w-[380px] max-w-[520px]">
+            <div className="w-9 h-9 rounded-full bg-success/10 flex items-center justify-center shrink-0 mt-0.5">
+              <CheckCircle2 size={18} className="text-success" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <FileSpreadsheet size={14} className="text-muted shrink-0" />
+                <span className="text-sm font-semibold">{notif.fileName}</span>
+                <span className="text-[10px] bg-success/10 text-success px-1.5 py-0.5 rounded-sm font-mono">{notif.format}</span>
+              </div>
+              <p className="text-xs text-muted mb-2">
+                {notif.records?.toLocaleString() || 0} registros exportados exitosamente por una tarea programada
+              </p>
+              <p className="text-[10px] font-mono text-muted/70 break-all bg-bg px-2 py-1.5 rounded-sm border border-border">
+                {notif.filePath || `backend/data/${notif.fileName}`}
+              </p>
+            </div>
+            <button
+              onClick={() => setExportNotification(prev => prev.filter(n => n.id !== notif.id))}
+              className="text-muted hover:text-fg shrink-0 mt-0.5"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
