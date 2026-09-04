@@ -38,18 +38,42 @@ export function ScheduleView() {
     }
   }, [cronExpr]);
 
-  // Fetch schedules on mount and set up auto-refresh every 30 seconds
+  const [now, setNow] = useState(Date.now());
+
+  // Fetch schedules on mount and set up auto-refresh
   useEffect(() => {
     dispatch(fetchSchedules());
     dispatch(fetchFlows());
     dispatch(fetchScripts());
 
-    const intervalId = setInterval(() => {
+    // Sync from server every 30 seconds
+    const fetchInterval = setInterval(() => {
       dispatch(fetchSchedules());
-    }, 30000); // 30 seconds
+    }, 30000);
 
-    return () => clearInterval(intervalId);
+    // Tick local timer every 10 seconds for the countdown UI
+    const tickInterval = setInterval(() => {
+      setNow(Date.now());
+    }, 10000);
+
+    return () => {
+      clearInterval(fetchInterval);
+      clearInterval(tickInterval);
+    };
   }, [dispatch]);
+
+  const getPreciseTimeLeft = (targetDate: string) => {
+    const diff = new Date(targetDate).getTime() - now;
+    if (diff <= 0) return 'Ejecutando pronto...';
+    
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
+    const minutes = Math.floor((diff / 1000 / 60) % 60);
+    
+    if (days > 0) return `En ${days} d y ${hours} h`;
+    if (hours > 0) return `En ${hours} h y ${minutes} m`;
+    return `En ${minutes} minutos`;
+  };
 
   // Set default target ID when tab changes or lists load
   useEffect(() => {
@@ -159,7 +183,7 @@ export function ScheduleView() {
                     <span className="text-muted">Próxima ejecución:</span>
                     <span className="font-medium text-fg">
                       {job.next_run_at 
-                        ? `En ${formatDistanceToNow(new Date(job.next_run_at), { locale: es })}`
+                        ? getPreciseTimeLeft(job.next_run_at)
                         : 'Pendiente'}
                     </span>
                   </div>
