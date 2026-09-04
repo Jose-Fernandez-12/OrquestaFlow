@@ -14,16 +14,45 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { v4 as uuid } from 'uuid';
-import { Play, Save, Maximize2, Minimize2, MoreHorizontal, Clock, PanelLeft, Plus, CheckCircle2, FileSpreadsheet, X } from 'lucide-react';
+import { useParams, useNavigate } from 'react-router-dom';
+import {
+  Play,
+  Save,
+  Maximize2,
+  Minimize2,
+  MoreHorizontal,
+  Clock,
+  PanelLeft,
+  Plus,
+  CheckCircle2,
+  FileSpreadsheet,
+  X,
+  ChevronLeft,
+  Lock,
+  Unlock,
+  Copy,
+  Download,
+  Trash2,
+  AlertTriangle,
+  Loader2,
+  History,
+  Square
+} from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { showToast } from '../../store/uiSlice';
+import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
 import { 
   fetchFlows, 
+  fetchFlow,
   setCurrentFlow, 
   createFlow,
   saveFlow, 
+  deleteFlow,
+  duplicateFlow,
   selectNode, 
-  executeFlow, 
+  executeFlow,
+  stopFlow,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,
   setNodeExecuting,
@@ -39,7 +68,7 @@ import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
 import { NodeInspector } from './NodeInspector';
 import { cn } from '../../lib/utils';
-import { downloadAsXMLSpreadsheet, downloadAsCSV, resolveExportData } from '../../lib/exportUtils';
+import { downloadAsXMLSpreadsheet, downloadAsCSV, resolveExportData, triggerBrowserDownload } from '../../lib/exportUtils';
 
 function FlowCanvas() {
   const dispatch = useAppDispatch();
@@ -58,10 +87,17 @@ function FlowCanvas() {
     : [];
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   
+  const { id: routeFlowId } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
   const [editingName, setEditingName] = useState(currentFlow?.name || '');
+  const [showOptionsMenu, setShowOptionsMenu] = useState(false);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   const [exportNotification, setExportNotification] = useState<{
     fileName: string;
     downloadUrl: string;
@@ -83,6 +119,32 @@ function FlowCanvas() {
   } | null>(null);
   
   const [showSaveNotification, setShowSaveNotification] = useState(false);
+  const [isLiveExecuting, setIsLiveExecuting] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const downloadedUrlsRef = useRef(new Set<string>());
+
+  const autoDownloadFile = (downloadUrl: string, fileName: string) => {
+    if (downloadedUrlsRef.current.has(downloadUrl)) return;
+    downloadedUrlsRef.current.add(downloadUrl);
+    triggerBrowserDownload(downloadUrl, fileName);
+    setTimeout(() => {
+      downloadedUrlsRef.current.delete(downloadUrl);
+    }, 15000);
+  };
+
+  // Sync flow from route parameter
+  useEffect(() => {
+    if (routeFlowId && (!currentFlow || currentFlow.id !== routeFlowId)) {
+      const match = flows.find(f => f.id === routeFlowId);
+      if (match) {
+        dispatch(setCurrentFlow(match));
+      } else {
+        dispatch(fetchFlow(routeFlowId));
+      }
+    }
+  }, [routeFlowId, flows, currentFlow, dispatch]);
+
+  const isLocked = currentFlow?.is_locked === 1;
 
   useEffect(() => {
     const handleInspect = (e: any) => {
@@ -94,19 +156,48 @@ function FlowCanvas() {
 
   useEffect(() => {
     if (currentFlow) setEditingName(currentFlow.name);
-  }, [currentFlow?.id]);
+  }, [currentFlow?.id, currentFlow?.name]);
 
   const flowId = currentFlow?.id;
 
-  // Connect socket.io for real-time progress
+  // Connect socket.io for real-time progress and synchronize active execution state
   useEffect(() => {
     if (!flowId) return;
-    
+
+    // Query active execution state on mount (syncs if execution started from catalog or earlier)
+    fetch(`http://localhost:3001/api/flows/${flowId}/execution-state`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data?.data) {
+          const state = data.data;
+          const isRunning = state.isRunning || state.status === 'running';
+          setIsLiveExecuting(isRunning);
+
+          if (state.nodes) {
+            Object.entries(state.nodes).forEach(([nodeId, nodeInfo]: [string, any]) => {
+              if (nodeInfo.status === 'completed') {
+                dispatch(setNodeCompleted({ nodeId, result: nodeInfo.result }));
+              } else if (nodeInfo.status === 'running') {
+                dispatch(setNodeExecuting(nodeId));
+              } else if (nodeInfo.status === 'error') {
+                dispatch(setNodeError({ nodeId, error: nodeInfo.result }));
+              } else if (nodeInfo.status === 'progress' && nodeInfo.current && nodeInfo.total) {
+                dispatch(setNodeProgress({ nodeId, current: nodeInfo.current, total: nodeInfo.total }));
+              }
+            });
+          }
+        }
+      })
+      .catch(err => {
+        console.error('Failed to sync flow execution state', err);
+      });
+
     const socket = io('http://localhost:3001');
 
     socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error' | 'progress', result?: any, current?: number, total?: number }) => {
       if (data.flowId === flowId) {
         if (data.status === 'running') {
+          setIsLiveExecuting(true);
           dispatch(setNodeExecuting(data.nodeId));
         } else if (data.status === 'completed') {
           dispatch(setNodeCompleted({ nodeId: data.nodeId, result: data.result }));
@@ -118,11 +209,32 @@ function FlowCanvas() {
       }
     });
 
+    socket.on('flow-completed', (data: { flowId: string }) => {
+      if (data.flowId === flowId) {
+        setIsLiveExecuting(false);
+      }
+    });
+
+    socket.on('flow-failed', (data: { flowId: string }) => {
+      if (data.flowId === flowId) {
+        setIsLiveExecuting(false);
+      }
+    });
+
+    socket.on('flow-stopped', (data: { flowId: string }) => {
+      if (data.flowId === flowId) {
+        setIsLiveExecuting(false);
+      }
+    });
+
     socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string; filePath?: string }) => {
       if (data.flowId === flowId) {
         const id = Date.now() + Math.random();
         setExportNotification(prev => [...prev, { ...data, id }]);
         
+        // Auto-download file
+        autoDownloadFile(data.downloadUrl, data.fileName);
+
         // Auto-dismiss after 5 seconds
         setTimeout(() => {
           setExportNotification(prev => prev.filter(n => n.id !== id));
@@ -178,7 +290,13 @@ function FlowCanvas() {
   }, [currentFlow, setNodes, setEdges]);
 
   const onConnect = useCallback(
-    (params: Connection | Edge) => setEdges((eds) => addEdge(params, eds)),
+    (params: Connection | Edge) => setEdges((eds) => {
+      // Prevent duplicate edges between the same source and target
+      if (eds.some(e => e.source === params.source && e.target === params.target)) {
+        return eds;
+      }
+      return addEdge(params, eds);
+    }),
     [setEdges]
   );
 
@@ -224,8 +342,15 @@ function FlowCanvas() {
   }, [dispatch]);
 
   const handleSave = () => {
-    if (!currentFlow) return;
-    const definition = JSON.stringify({ nodes, edges });
+    if (!currentFlow || isLocked) return;
+    
+    // Purge zombie edges that point to non-existent nodes
+    const validEdges = edges.filter(edge => 
+      nodes.some(n => n.id === edge.source) && 
+      nodes.some(n => n.id === edge.target)
+    );
+    
+    const definition = JSON.stringify({ nodes, edges: validEdges });
     dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
     
     setShowSaveNotification(true);
@@ -234,8 +359,49 @@ function FlowCanvas() {
     }, 3000);
   };
 
-  const handleNewFlow = () => {
-    dispatch(createFlow({ name: 'Nuevo Flujo' }));
+  const handleToggleLock = async () => {
+    if (!currentFlow) return;
+    const newLock = currentFlow.is_locked === 1 ? 0 : 1;
+    await dispatch(saveFlow({
+      id: currentFlow.id,
+      is_locked: newLock
+    }));
+    setShowOptionsMenu(false);
+  };
+
+  const handleDuplicateCurrentFlow = async () => {
+    if (!currentFlow) return;
+    const res = await dispatch(duplicateFlow(currentFlow)).unwrap();
+    navigate(`/flujos/${res.id}`);
+    setShowOptionsMenu(false);
+  };
+
+  const handleExportJSON = () => {
+    if (!currentFlow) return;
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({
+      name: currentFlow.name,
+      description: currentFlow.description,
+      definition: currentFlow.definition
+    }, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `${currentFlow.name.toLowerCase().replace(/\s+/g, '_')}_flow.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    setShowOptionsMenu(false);
+  };
+
+  const handleDeleteCurrentFlowConfirm = async () => {
+    if (!currentFlow) return;
+    setIsDeleting(true);
+    try {
+      await dispatch(deleteFlow(currentFlow.id));
+      setIsDeleteModalOpen(false);
+      navigate('/flujos');
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handleExecute = async () => {
@@ -281,64 +447,69 @@ function FlowCanvas() {
     
     const result = await dispatch(executeFlow(currentFlow!.id));
     
-    // Find export node results in the execution context
-    const context = (result.payload as any)?.context as Record<string, any> | undefined;
-    if (context) {
-      const exportNodes = nodesToExecute.filter(n => n.type === 'export');
-      exportNodes.forEach(exportNode => {
-        const data = exportNode.data as any;
-        const format = data?.format || 'CSV';
-        const rawFileName = data?.fileName as string | undefined;
-        let dataSource = data?.dataSource;
-        
-        if (!dataSource) {
-          // If empty, explicitly use the node immediately upstream
-          const incomingEdge = edges.find(e => e.target === exportNode.id);
-          if (incomingEdge) {
-            dataSource = `{{${incomingEdge.source}}}`;
-          }
-        }
-        
-        const exportData = resolveExportData(context, dataSource);
-        const columns = (data?.columns && data.columns.length > 0) 
-          ? data.columns 
-          : (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
-        
-        if (exportData.length > 0) {
-          if (format === 'Excel') {
-            downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export', data?.headerColor as string | undefined);
-          } else {
-            downloadAsCSV(exportData, columns, rawFileName || 'export');
-          }
-        }
+    // Check for exported files returned by backend execution
+    const payload = (result as any)?.payload;
+    const exportedFiles = payload?.exportedFiles || [];
+    if (exportedFiles.length > 0) {
+      exportedFiles.forEach((file: any, index: number) => {
+        setTimeout(() => {
+          autoDownloadFile(file.downloadUrl, file.fileName);
+        }, index * 400);
       });
+    } else {
+      // Find export node results in the execution context as client-side fallback
+      const context = payload?.context as Record<string, any> | undefined;
+      if (context) {
+        const exportNodes = nodesToExecute.filter(n => n.type === 'export');
+        exportNodes.forEach(exportNode => {
+          const data = exportNode.data as any;
+          const format = data?.format || 'CSV';
+          const rawFileName = data?.fileName as string | undefined;
+          let dataSource = data?.dataSource;
+          
+          if (!dataSource) {
+            // If empty, explicitly use the node immediately upstream
+            const incomingEdge = edges.find(e => e.target === exportNode.id);
+            if (incomingEdge) {
+              dataSource = `{{${incomingEdge.source}}}`;
+            }
+          }
+          
+          const exportData = resolveExportData(context, dataSource);
+          const columns = (data?.columns && data.columns.length > 0) 
+            ? data.columns 
+            : (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
+          
+          if (exportData.length > 0) {
+            if (format === 'Excel') {
+              downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export', data?.headerColor as string | undefined);
+            } else {
+              downloadAsCSV(exportData, columns, rawFileName || 'export');
+            }
+          }
+        });
+      }
+    }
+  };
+
+  const handleStopExecution = async () => {
+    if (!currentFlow) return;
+    try {
+      await dispatch(stopFlow(currentFlow.id)).unwrap();
+      setIsLiveExecuting(false);
+      dispatch(showToast(`Ejecución de «${currentFlow.name}» detenida.`));
+    } catch (err: any) {
+      dispatch(showToast(`No se pudo detener el flujo: ${err.message}`));
     }
   };
 
   if (!currentFlow) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4 text-muted bg-bg p-8">
-        <p className="text-sm">Selecciona o crea un flujo para comenzar</p>
-        <div className="flex gap-2 items-center">
-          {flows.length > 0 && (
-            <select
-              className="bg-surface border border-border rounded-md px-3 py-1.5 text-sm focus-visible:outline-none max-w-[200px]"
-              value=""
-              onChange={(e) => {
-                const selected = flows.find(f => f.id === e.target.value);
-                if (selected) dispatch(setCurrentFlow(selected));
-              }}
-            >
-              <option value="" disabled>Seleccionar flujo...</option>
-              {flows.map(f => (
-                <option key={f.id} value={f.id}>{f.name}</option>
-              ))}
-            </select>
-          )}
-          <Button variant="primary" size="sm" onClick={handleNewFlow} className="gap-2">
-            <Plus size={16} /> Crear nuevo flujo
-          </Button>
-        </div>
+        <p className="text-sm">No se encontró el flujo especificado o está cargando...</p>
+        <Button variant="primary" size="sm" onClick={() => navigate('/flujos')} className="gap-2">
+          <ChevronLeft size={16} /> Volver al catálogo de flujos
+        </Button>
       </div>
     );
   }
@@ -348,55 +519,191 @@ function FlowCanvas() {
       {/* Topbar inside editor */}
       <div className="h-14 border-b border-border bg-surface flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-3">
-          <Button variant="icon" size="icon" onClick={() => dispatch(toggleNodeLibraryExpanded())} title={nodeLibraryExpanded ? "Ocultar Librería" : "Mostrar Librería"}>
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => navigate('/flujos')}
+            className="gap-1.5 h-8 text-xs font-medium"
+            title="Volver al catálogo de flujos"
+          >
+            <ChevronLeft size={16} />
+            <span>Volver a flujos</span>
+          </Button>
+
+          <div className="w-px h-6 bg-border"></div>
+
+          <Button
+            variant="icon"
+            size="icon"
+            onClick={() => dispatch(toggleNodeLibraryExpanded())}
+            title={nodeLibraryExpanded ? "Ocultar Librería" : "Mostrar Librería"}
+          >
             <PanelLeft size={18} />
           </Button>
+
           <div className="w-px h-6 bg-border"></div>
-          
-          <select 
-            className="bg-bg border border-border rounded-sm px-2 py-1 text-sm focus-visible:outline-none max-w-[200px]"
-            value={currentFlow.id}
-            onChange={(e) => {
-              const selected = flows.find(f => f.id === e.target.value);
-              if (selected) dispatch(setCurrentFlow(selected));
-            }}
-          >
-            {flows.map(f => (
-              <option key={f.id} value={f.id}>{f.name}</option>
-            ))}
-          </select>
 
-          <input 
-            type="text"
-            className="font-medium bg-transparent border-b border-transparent hover:border-border focus:border-accent focus:outline-none px-1 py-0.5 text-sm w-[200px]"
-            value={editingName}
-            onChange={(e) => setEditingName(e.target.value)}
-            placeholder="Nombre del flujo"
-          />
-
-          <Button variant="default" size="sm" onClick={handleNewFlow} className="h-7 text-xs px-2">
-            <Plus size={14} className="mr-1" /> Nuevo
-          </Button>
-
-          {currentFlow.status === 'draft' && (
-            <span className="text-xs bg-warn/20 text-warn px-2 py-0.5 rounded-sm ml-2">Borrador</span>
+          {isLocked ? (
+            <div className="flex items-center gap-2">
+              <h2 className="font-semibold text-sm px-1 py-0.5 text-fg truncate max-w-[280px]" title={currentFlow.name}>
+                {currentFlow.name}
+              </h2>
+              <span className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-300">
+                <Lock size={11} /> Protegido
+              </span>
+              <button
+                onClick={handleToggleLock}
+                className="text-xs text-accent hover:underline font-medium ml-1 cursor-pointer"
+              >
+                Desbloquear
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                className="font-medium bg-transparent border-b border-border hover:border-accent focus:border-accent focus:outline-none px-1 py-0.5 text-sm w-[260px]"
+                value={editingName}
+                onChange={(e) => setEditingName(e.target.value)}
+                placeholder="Nombre del flujo"
+              />
+              {currentFlow.status === 'draft' ? (
+                <span className="text-[10px] bg-warn/15 text-warn px-2 py-0.5 rounded border border-warn/20 font-medium">Borrador</span>
+              ) : (
+                <span className="text-[10px] bg-success/15 text-success px-2 py-0.5 rounded border border-success/20 font-medium">Guardado</span>
+              )}
+            </div>
           )}
         </div>
         
         <div className="flex items-center gap-2">
-          <Button variant="default" size="sm" onClick={handleSave} className="gap-2">
-            <Save size={16} /> Guardar
-          </Button>
-          <Button variant="primary" size="sm" onClick={handleExecute} className="gap-2" disabled={nodes.length === 0}>
-            <Play size={16} /> Ejecutar Flujo
-          </Button>
+          {isLiveExecuting && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 bg-accent/15 border border-accent/30 rounded text-accent text-xs font-semibold animate-pulse">
+              <Loader2 size={13} className="animate-spin" />
+              <span>Ejecución en vivo...</span>
+            </div>
+          )}
+          {!isLocked && (
+            <Button variant="default" size="sm" onClick={handleSave} className="gap-2">
+              <Save size={16} /> Guardar
+            </Button>
+          )}
+          {isLiveExecuting ? (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleStopExecution}
+              className="gap-1.5 bg-danger text-white hover:bg-danger/90 border-danger animate-pulse"
+              title="Detener ejecución actual"
+            >
+              <Square size={12} className="fill-white" />
+              <span>Detener Flujo</span>
+            </Button>
+          ) : (
+            <Button variant="primary" size="sm" onClick={handleExecute} className="gap-2" disabled={nodes.length === 0}>
+              <Play size={16} /> Ejecutar Flujo
+            </Button>
+          )}
           <div className="w-px h-6 bg-border mx-1"></div>
           <Button variant="icon" size="icon" onClick={() => dispatch(toggleCanvasExpanded())} title={canvasExpanded ? "Restaurar layout" : "Expandir canvas"}>
             {canvasExpanded ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
           </Button>
-          <Button variant="icon" size="icon">
-            <MoreHorizontal size={18} />
+
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setShowHistoryModal(true)}
+            className="gap-1.5 h-8 text-xs font-medium"
+            title="Ver historial de ejecuciones"
+          >
+            <History size={14} className="text-muted" />
+            <span className="hidden sm:inline">Historial</span>
           </Button>
+
+          {/* Options Menu Button (...) */}
+          <div className="relative">
+            <Button
+              variant="icon"
+              size="icon"
+              onClick={() => setShowOptionsMenu(prev => !prev)}
+              title="Opciones del flujo"
+              className={showOptionsMenu ? "bg-bg text-fg" : ""}
+            >
+              <MoreHorizontal size={18} />
+            </Button>
+
+            {showOptionsMenu && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setShowOptionsMenu(false)}
+                />
+                <div className="absolute right-0 mt-2 w-52 bg-surface border border-border rounded-md shadow-raised py-1 z-50 animate-in fade-in zoom-in-95 duration-fast text-xs">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      handleToggleLock();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    {isLocked ? <Unlock size={14} className="text-slate-600" /> : <Lock size={14} className="text-slate-600" />}
+                    <span>{isLocked ? 'Desbloquear edición' : 'Bloquear edición'}</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      setShowHistoryModal(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <History size={14} className="text-muted" />
+                    <span>Historial de ejecuciones</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      handleDuplicateCurrentFlow();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <Copy size={14} className="text-muted" />
+                    <span>Duplicar este flujo</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      handleExportJSON();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <Download size={14} className="text-muted" />
+                    <span>Exportar JSON</span>
+                  </button>
+
+                  <div className="h-px bg-border my-1"></div>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      setIsDeleteModalOpen(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-danger/10 flex items-center gap-2 text-danger transition-colors"
+                  >
+                    <Trash2 size={14} />
+                    <span>Eliminar flujo</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -409,15 +716,18 @@ function FlowCanvas() {
             <ReactFlow
               nodes={nodes}
               edges={edges}
-              onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={onConnect}
+              onNodesChange={isLocked ? undefined : onNodesChange}
+              onEdgesChange={isLocked ? undefined : onEdgesChange}
+              onConnect={isLocked ? undefined : onConnect}
               onInit={setReactFlowInstance}
-              onDrop={onDrop}
-              onDragOver={onDragOver}
+              onDrop={isLocked ? undefined : onDrop}
+              onDragOver={isLocked ? undefined : onDragOver}
               onSelectionChange={onSelectionChange}
               nodeTypes={nodeTypes}
-              deleteKeyCode={['Backspace', 'Delete']}
+              deleteKeyCode={isLocked ? null : ['Backspace', 'Delete']}
+              nodesDraggable={!isLocked}
+              nodesConnectable={!isLocked}
+              elementsSelectable={!isLocked}
               fitView
               className="bg-bg"
               proOptions={{ hideAttribution: true }}
@@ -571,7 +881,7 @@ function FlowCanvas() {
               ))}
             </div>
             <div className="p-4 border-t border-border flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setMissingParamsContext(null)}>Cancelar</Button>
+              <Button variant="default" onClick={() => setMissingParamsContext(null)}>Cancelar</Button>
               <Button onClick={() => {
                 const stillMissing = missingParamsContext.nodesWithMissing.some(item => 
                   item.missing.some(p => !item.currentParams[p] || item.currentParams[p] === '')
@@ -628,6 +938,55 @@ function FlowCanvas() {
           </div>
         </div>
       )}
+
+      {/* Delete Confirmation Modal */}
+      {isDeleteModalOpen && currentFlow && (
+        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+          <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-sm p-5 flex flex-col gap-4 animate-in zoom-in-95 duration-fast">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-full bg-danger/10 text-danger flex items-center justify-center shrink-0 mt-0.5">
+                <AlertTriangle size={18} />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-fg">¿Eliminar este flujo?</h3>
+                <p className="text-xs text-muted mt-1 leading-relaxed">
+                  ¿Estás seguro de que deseas eliminar permanentemente <strong>«{currentFlow.name}»</strong>? Esta acción borrará todos sus nodos y cancelará las programaciones vinculadas.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                onClick={() => setIsDeleteModalOpen(false)}
+                disabled={isDeleting}
+              >
+                Cancelar
+              </Button>
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                onClick={handleDeleteCurrentFlowConfirm}
+                disabled={isDeleting}
+                className="bg-danger text-white hover:bg-danger/90 gap-1.5"
+              >
+                {isDeleting && <Loader2 size={13} className="animate-spin" />}
+                Eliminar flujo
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Execution History Modal */}
+      <FlowExecutionHistoryModal
+        flow={currentFlow}
+        isOpen={showHistoryModal}
+        onClose={() => setShowHistoryModal(false)}
+      />
 
     </div>
   );

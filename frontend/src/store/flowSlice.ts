@@ -21,6 +21,7 @@ export interface Flow {
   description: string;
   definition: string; // JSON string of { nodes, edges }
   status: string;
+  is_locked?: number;
   last_run_at: string | null;
   last_run_duration_ms: number | null;
   last_run_record_count: number | null;
@@ -70,7 +71,7 @@ export const fetchFlow = createAsyncThunk('flows/fetchOne', async (id: string) =
   return data.data as Flow;
 });
 
-export const createFlow = createAsyncThunk('flows/create', async (flowData: { name: string; description?: string; definition?: string }) => {
+export const createFlow = createAsyncThunk('flows/create', async (flowData: { name: string; description?: string; definition?: string; is_locked?: number }) => {
   const res = await fetch(`${API_URL}/flows`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -80,18 +81,60 @@ export const createFlow = createAsyncThunk('flows/create', async (flowData: { na
   return data.data as Flow;
 });
 
-export const saveFlow = createAsyncThunk('flows/save', async (flow: { id: string; definition?: string; name?: string; description?: string }) => {
+export const saveFlow = createAsyncThunk('flows/save', async (flow: { id: string; definition?: string; name?: string; description?: string; status?: string; is_locked?: number }) => {
+  const body: Record<string, any> = { status: flow.status || 'saved' };
+  if (flow.definition !== undefined) body.definition = flow.definition;
+  if (flow.name !== undefined) body.name = flow.name;
+  if (flow.description !== undefined) body.description = flow.description;
+  if (flow.is_locked !== undefined) body.is_locked = flow.is_locked;
+
   const res = await fetch(`${API_URL}/flows/${flow.id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ definition: flow.definition, name: flow.name, description: flow.description, status: 'saved' }),
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  return data.data as Flow;
+});
+
+export const deleteFlow = createAsyncThunk('flows/delete', async (id: string) => {
+  await fetch(`${API_URL}/flows/${id}`, {
+    method: 'DELETE',
+  });
+  return id;
+});
+
+export const duplicateFlow = createAsyncThunk('flows/duplicate', async (flow: Flow) => {
+  const res = await fetch(`${API_URL}/flows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `${flow.name} (copia)`,
+      description: flow.description || '',
+      definition: flow.definition,
+      is_locked: 0
+    }),
   });
   const data = await res.json();
   return data.data as Flow;
 });
 
 export const executeFlow = createAsyncThunk('flows/execute', async (id: string) => {
-  const res = await fetch(`${API_URL}/flows/${id}/execute`, { method: 'POST' });
+  const res = await fetch(`${API_URL}/flows/${id}/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  });
+  const data = await res.json();
+  return data.data;
+});
+
+export const stopFlow = createAsyncThunk('flows/stop', async (id: string) => {
+  const res = await fetch(`${API_URL}/flows/${id}/stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  });
   const data = await res.json();
   return data.data;
 });
@@ -177,6 +220,18 @@ const flowSlice = createSlice({
       })
       .addCase(executeFlow.fulfilled, (state) => {
         state.executingNodeIds = [];
+      })
+      .addCase(stopFlow.fulfilled, (state) => {
+        state.executingNodeIds = [];
+      })
+      .addCase(deleteFlow.fulfilled, (state, action) => {
+        state.flows = state.flows.filter(f => f.id !== action.payload);
+        if (state.currentFlow?.id === action.payload) {
+          state.currentFlow = state.flows[0] || null;
+        }
+      })
+      .addCase(duplicateFlow.fulfilled, (state, action) => {
+        state.flows.unshift(action.payload);
       });
   },
 });

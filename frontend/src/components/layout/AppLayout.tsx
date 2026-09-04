@@ -33,7 +33,7 @@ export function AppLayout() {
           const isError = toastMessage?.toLowerCase().includes('error') || toastMessage?.toLowerCase().includes('por favor');
           return (
             <div className={cn(
-              "fixed bottom-4 right-4 z-50 flex items-start gap-3 bg-surface p-4 rounded-md shadow-[0_4px_12px_rgba(0,0,0,0.1)] animate-in slide-in-from-bottom-5 max-w-md border-l-4 border",
+              "fixed bottom-4 right-4 z-50 flex items-start gap-3 bg-surface p-4 rounded-md shadow-raised animate-in slide-in-from-bottom-5 max-w-sm w-full border-l-4 border",
               isError ? "border-l-danger border-border" : "border-l-accent border-border"
             )}>
               {isError ? (

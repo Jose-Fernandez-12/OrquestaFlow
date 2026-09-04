@@ -104,7 +104,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                   Modo Iteración (Batch)
                 </label>
               </div>
-              {node.data?.iterateMode && (
+              {Boolean(node.data?.iterateMode) && (
                 <div className="mt-2 pl-5 space-y-1">
                   <label className="text-[10px] font-medium text-muted-foreground block">Array base a iterar</label>
                   <div className="flex gap-1">

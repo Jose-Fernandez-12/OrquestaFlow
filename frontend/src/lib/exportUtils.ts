@@ -192,3 +192,38 @@ export function downloadAsCSV(
   link.click();
   document.body.removeChild(link);
 }
+
+export async function triggerBrowserDownload(downloadUrl: string, fileName?: string) {
+  const fullUrl = downloadUrl.startsWith('http') ? downloadUrl : `http://localhost:3001${downloadUrl}`;
+  try {
+    const res = await fetch(fullUrl);
+    if (!res.ok) throw new Error('Download failed');
+    const blob = await res.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    if (fileName) {
+      link.download = fileName;
+    }
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      if (document.body.contains(link)) {
+        document.body.removeChild(link);
+      }
+      window.URL.revokeObjectURL(blobUrl);
+    }, 1500);
+  } catch (err) {
+    const link = document.createElement('a');
+    link.href = fullUrl;
+    if (fileName) link.download = fileName;
+    link.target = '_blank';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      if (document.body.contains(link)) document.body.removeChild(link);
+    }, 1500);
+  }
+}
