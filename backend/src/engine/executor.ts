@@ -6,11 +6,61 @@ import { v4 as uuid } from 'uuid';
 import mssql from 'mssql';
 import ExcelJS from 'exceljs';
 
+export interface ActiveExecutionState {
+  flowId: string;
+  startTime: number;
+  status: 'running' | 'completed' | 'error' | 'cancelled';
+  nodes: Record<string, { status: 'running' | 'completed' | 'error' | 'progress'; result?: any }>;
+  abortController: AbortController;
+  cancelReason?: string;
+}
+
+export const activeFlowExecutions = new Map<string, ActiveExecutionState>();
+
+// Stop flow execution
+export function stopFlowEngine(flowId: string, reason = 'Ejecución detenida por el usuario'): boolean {
+  const current = activeFlowExecutions.get(flowId);
+  if (!current || current.status !== 'running') {
+    return false;
+  }
+  current.status = 'cancelled';
+  current.cancelReason = reason;
+  current.abortController.abort(reason);
+  setTimeout(() => {
+    activeFlowExecutions.delete(flowId);
+  }, 30000);
+  return true;
+}
+
 // Global execution wrapper with parallel dependency resolution
-export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void) {
+export async function executeFlowEngine(
+  flowId: string,
+  onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void
+): Promise<Record<string, any>> {
   const db = getDb();
   const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
   if (!flow) throw new Error('Flow not found');
+
+  const abortController = new AbortController();
+
+  // Track active execution in memory
+  activeFlowExecutions.set(flowId, {
+    flowId,
+    startTime: Date.now(),
+    status: 'running',
+    nodes: {},
+    abortController
+  });
+
+  const notifyProgress = (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => {
+    const current = activeFlowExecutions.get(flowId);
+    if (current) {
+      current.nodes[nodeId] = { status, result };
+    }
+    if (onNodeProgress) {
+      onNodeProgress(nodeId, status, result);
+    }
+  };
 
   const definition = JSON.parse(flow.definition || '{"nodes":[],"edges":[]}');
   const nodes: any[] = definition.nodes || [];
@@ -39,8 +89,19 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
   return new Promise((resolve, reject) => {
     let hasError = false;
 
+    abortController.signal.addEventListener('abort', () => {
+      hasError = true;
+      for (const nodeId of runningPromises.keys()) {
+        notifyProgress(nodeId, 'error', { error: 'Nodo detenido' });
+      }
+      reject(new Error(activeFlowExecutions.get(flowId)?.cancelReason || 'Ejecución detenida por el usuario'));
+    });
+
     const checkAndRun = () => {
-      if (hasError) return; // Stop triggering new nodes if flow failed
+      const current = activeFlowExecutions.get(flowId);
+      if (hasError || current?.status === 'cancelled' || abortController.signal.aborted) {
+        return; // Stop triggering new nodes if flow failed or cancelled
+      }
       
       let allDone = true;
 
@@ -51,13 +112,17 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
           if (inDegree[node.id] === 0 && !runningPromises.has(node.id)) {
             // Node is ready to run
             const p = (async () => {
-              if (onNodeProgress) onNodeProgress(node.id, 'running');
+              if (abortController.signal.aborted) {
+                throw new Error('Ejecución detenida por el usuario');
+              }
+              notifyProgress(node.id, 'running');
               
-              // Añadimos un pequeño retraso artificial (150ms para inicio, 800ms para el resto)
-              // Esto es solo para que en el frontend dé tiempo a verse la animación de "ejecutando" (azul)
-              // a "completado" (verde), especialmente en endpoints muy rápidos.
               const delayMs = node.type === 'start' ? 150 : 800;
               await new Promise(r => setTimeout(r, delayMs));
+
+              if (abortController.signal.aborted) {
+                throw new Error('Ejecución detenida por el usuario');
+              }
               
               try {
                 let output: any = {};
@@ -68,16 +133,16 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
                   case 'httpGet':
                   case 'httpPost':
                   case 'httpRequest':
-                    output = await executeHttpNode(node, context, onNodeProgress);
+                    output = await executeHttpNode(node, context, notifyProgress, abortController.signal);
                     break;
                   case 'scraping':
-                    output = await executeScrapingNode(node, context);
+                    output = await executeScrapingNode(node, context, abortController.signal);
                     break;
                   case 'export':
                     output = await executeExportNode(node, context);
                     break;
                   case 'query':
-                    output = await executeQueryNode(node, context);
+                    output = await executeQueryNode(node, context, abortController.signal);
                     break;
                   default:
                     output = { warning: 'Unknown node type' };
@@ -85,16 +150,18 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
 
                 context[node.id] = output;
                 completedNodes.add(node.id);
-                if (onNodeProgress) onNodeProgress(node.id, 'completed', output);
+                notifyProgress(node.id, 'completed', output);
 
                 // Unlock dependents
-                (adjList[node.id] || []).forEach(neighborId => {
-                  inDegree[neighborId]--;
-                });
+                if (adjList[node.id]) {
+                  adjList[node.id].forEach(depId => {
+                    inDegree[depId]--;
+                  });
+                }
               } catch (err: any) {
-                errorNodes.add(node.id);
                 hasError = true;
-                if (onNodeProgress) onNodeProgress(node.id, 'error', { error: err.message || 'Error executing node' });
+                errorNodes.add(node.id);
+                notifyProgress(node.id, 'error', { error: err.message });
                 throw err;
               }
             })();
@@ -106,6 +173,13 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
               checkAndRun();
             }).catch(err => {
               runningPromises.delete(node.id);
+              const current = activeFlowExecutions.get(flowId);
+              if (current && current.status !== 'cancelled') {
+                current.status = 'error';
+              }
+              setTimeout(() => {
+                activeFlowExecutions.delete(flowId);
+              }, 30000);
               reject(err);
             });
           }
@@ -113,6 +187,13 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
       });
 
       if (allDone && runningPromises.size === 0) {
+        const current = activeFlowExecutions.get(flowId);
+        if (current && current.status !== 'cancelled') {
+          current.status = 'completed';
+        }
+        setTimeout(() => {
+          activeFlowExecutions.delete(flowId);
+        }, 30000);
         resolve(context);
       }
     };
@@ -122,7 +203,12 @@ export async function executeFlowEngine(flowId: string, onNodeProgress?: (nodeId
 }
 
 // Http Node Handler
-async function executeHttpNode(node: any, context: Record<string, any>, onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void) {
+async function executeHttpNode(
+  node: any,
+  context: Record<string, any>,
+  onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void,
+  signal?: AbortSignal
+) {
   const iterateOver = node.data?.iterateOver;
   const iterateMode = node.data?.iterateMode;
   let itemsToIterate: any[] = [null]; // By default, run once with no item
@@ -147,6 +233,9 @@ async function executeHttpNode(node: any, context: Record<string, any>, onNodePr
   const results = [];
   
   for (let i = 0; i < itemsToIterate.length; i++) {
+    if (signal?.aborted) {
+      throw new Error('Ejecución detenida por el usuario');
+    }
     const item = itemsToIterate[i];
     
     // Create a localized context for this iteration
@@ -194,7 +283,7 @@ async function executeHttpNode(node: any, context: Record<string, any>, onNodePr
       }
     }
 
-    const options: RequestInit = { method, headers };
+    const options: RequestInit = { method, headers, signal };
 
     if (['POST', 'PUT', 'PATCH'].includes(method)) {
       if (node.data?.body && node.data.body.trim() !== '') {
@@ -242,7 +331,7 @@ async function executeHttpNode(node: any, context: Record<string, any>, onNodePr
 }
 
 // Scraping Node Handler (spawns Python script if configured)
-async function executeScrapingNode(node: any, context: Record<string, any>) {
+async function executeScrapingNode(node: any, context: Record<string, any>, signal?: AbortSignal) {
   const scriptName = node.data?.script;
   if (!scriptName) {
     return { data: 'Simulated web scraping result' };
@@ -255,9 +344,22 @@ async function executeScrapingNode(node: any, context: Record<string, any>) {
   }
 
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('Ejecución detenida por el usuario'));
+    }
+
     const py = spawn('python', [scriptPath]);
     let stdout = '';
     let stderr = '';
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        try {
+          py.kill('SIGTERM');
+        } catch {}
+        reject(new Error('Ejecución detenida por el usuario'));
+      });
+    }
 
     py.stdout.on('data', data => stdout += data.toString());
     py.stderr.on('data', data => stderr += data.toString());
@@ -489,7 +591,9 @@ async function executeExportNode(node: any, context: Record<string, any>) {
 }
 
 // Query Node Handler
-async function executeQueryNode(node: any, context: Record<string, any>) {
+async function executeQueryNode(node: any, context: Record<string, any>, signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
+
   const queryId = node.data?.queryId;
   if (!queryId) throw new Error('Query ID not configured in query node');
 
@@ -517,6 +621,7 @@ async function executeQueryNode(node: any, context: Record<string, any>) {
   const connectionId = connectionIds[0];
   const { executeMssqlQuery } = await import('./mssql.js');
   const result = await executeMssqlQuery(connectionId, sqlText, params);
+  if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
 
   const extractMode = node.data?.extractMode || 'all';
   

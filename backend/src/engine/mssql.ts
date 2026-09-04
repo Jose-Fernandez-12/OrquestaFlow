@@ -83,10 +83,10 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
       if (isArray) {
         const tokenRegex = new RegExp(`@${key}\\b`, 'g');
         if (parsedSql.match(tokenRegex)) {
-          const replacementTokens = elements.map((_, i) => `@${key}_${i}`);
+          const replacementTokens = elements.map((_: any, i: number) => `@${key}_${i}`);
           parsedSql = parsedSql.replace(tokenRegex, replacementTokens.join(', '));
           
-          elements.forEach((el, i) => {
+          elements.forEach((el: any, i: number) => {
             request.input(`${key}_${i}`, el);
           });
           return;

@@ -93,6 +93,12 @@ export async function initDb(): Promise<void> {
   const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf-8');
   wrappedDb.exec(schema);
 
+  try {
+    wrappedDb.exec('ALTER TABLE flows ADD COLUMN is_locked INTEGER DEFAULT 0;');
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
   // Seed demo data if tables are empty
   const flowCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM flows').get() as { count: number };
   if (flowCount.count === 0) {

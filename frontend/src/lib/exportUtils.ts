@@ -192,3 +192,20 @@ export function downloadAsCSV(
   link.click();
   document.body.removeChild(link);
 }
+
+export function triggerBrowserDownload(downloadUrl: string, fileName?: string) {
+  const fullUrl = downloadUrl.startsWith('http') ? downloadUrl : `http://localhost:3001${downloadUrl}`;
+  const link = document.createElement('a');
+  link.href = fullUrl;
+  if (fileName) {
+    link.download = fileName;
+  }
+  link.setAttribute('target', '_blank');
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => {
+    if (document.body.contains(link)) {
+      document.body.removeChild(link);
+    }
+  }, 300);
+}
