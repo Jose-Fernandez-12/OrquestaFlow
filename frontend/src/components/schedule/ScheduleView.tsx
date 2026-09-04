@@ -6,6 +6,7 @@ import { fetchScripts } from '../../store/scriptSlice';
 import { Calendar, Plus, Clock, ToggleLeft, ToggleRight, X, Play, Loader2, History, AlertCircle, CheckCircle2, FileSpreadsheet } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 import { es } from 'date-fns/locale';
+import { io } from 'socket.io-client';
 import { Button } from '../ui/button';
 import { Card } from '../ui/card';
 import { Input } from '../ui/input';
@@ -57,7 +58,6 @@ export function ScheduleView() {
       setNow(Date.now());
     }, 10000);
 
-    const { io } = require('socket.io-client');
     const socket = io('http://localhost:3001');
 
     socket.on('flow-export-ready', (data: any) => {
