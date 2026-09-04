@@ -41,7 +41,7 @@ export const createSchedule = createAsyncThunk('schedules/create', async (body: 
   return data.data as Schedule;
 });
 
-export const updateSchedule = createAsyncThunk('schedules/update', async ({ id, ...body }: { id: string; name?: string; cron_expression?: string; is_active?: number }) => {
+export const updateSchedule = createAsyncThunk('schedules/update', async ({ id, ...body }: { id: string; name?: string; cron_expression?: string; is_active?: number; target_type?: 'flow' | 'script' | 'query'; target_id?: string }) => {
   const res = await fetch(`${API_URL}/schedules/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -49,6 +49,13 @@ export const updateSchedule = createAsyncThunk('schedules/update', async ({ id, 
   });
   const data = await res.json();
   return data.data as Schedule;
+});
+
+export const deleteSchedule = createAsyncThunk('schedules/delete', async (id: string) => {
+  await fetch(`${API_URL}/schedules/${id}`, {
+    method: 'DELETE',
+  });
+  return id;
 });
 
 const scheduleSlice = createSlice({
@@ -68,6 +75,9 @@ const scheduleSlice = createSlice({
       .addCase(updateSchedule.fulfilled, (state, action) => {
         const idx = state.schedules.findIndex(s => s.id === action.payload.id);
         if (idx >= 0) state.schedules[idx] = action.payload;
+      })
+      .addCase(deleteSchedule.fulfilled, (state, action) => {
+        state.schedules = state.schedules.filter(s => s.id !== action.payload);
       });
   },
 });
