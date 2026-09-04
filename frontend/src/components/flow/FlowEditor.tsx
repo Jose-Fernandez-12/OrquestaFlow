@@ -290,7 +290,13 @@ function FlowCanvas() {
   }, [currentFlow, setNodes, setEdges]);
 
   const onConnect = useCallback(
-    (params: Connection | Edge) => setEdges((eds) => addEdge(params, eds)),
+    (params: Connection | Edge) => setEdges((eds) => {
+      // Prevent duplicate edges between the same source and target
+      if (eds.some(e => e.source === params.source && e.target === params.target)) {
+        return eds;
+      }
+      return addEdge(params, eds);
+    }),
     [setEdges]
   );
 
@@ -337,7 +343,14 @@ function FlowCanvas() {
 
   const handleSave = () => {
     if (!currentFlow || isLocked) return;
-    const definition = JSON.stringify({ nodes, edges });
+    
+    // Purge zombie edges that point to non-existent nodes
+    const validEdges = edges.filter(edge => 
+      nodes.some(n => n.id === edge.source) && 
+      nodes.some(n => n.id === edge.target)
+    );
+    
+    const definition = JSON.stringify({ nodes, edges: validEdges });
     dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
     
     setShowSaveNotification(true);
@@ -596,6 +609,17 @@ function FlowCanvas() {
             {canvasExpanded ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
           </Button>
 
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setShowHistoryModal(true)}
+            className="gap-1.5 h-8 text-xs font-medium"
+            title="Ver historial de ejecuciones"
+          >
+            <History size={14} className="text-muted" />
+            <span className="hidden sm:inline">Historial</span>
+          </Button>
+
           {/* Options Menu Button (...) */}
           <div className="relative">
             <Button
@@ -609,55 +633,75 @@ function FlowCanvas() {
             </Button>
 
             {showOptionsMenu && (
-              <div className="absolute right-0 mt-2 w-52 bg-surface border border-border rounded-md shadow-raised py-1 z-50 animate-in fade-in zoom-in-95 duration-fast text-xs">
-                <button
-                  onClick={handleToggleLock}
-                  className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
-                >
-                  {isLocked ? <Unlock size={14} className="text-slate-600" /> : <Lock size={14} className="text-slate-600" />}
-                  <span>{isLocked ? 'Desbloquear edición' : 'Bloquear edición'}</span>
-                </button>
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setShowOptionsMenu(false)}
+                />
+                <div className="absolute right-0 mt-2 w-52 bg-surface border border-border rounded-md shadow-raised py-1 z-50 animate-in fade-in zoom-in-95 duration-fast text-xs">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      handleToggleLock();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    {isLocked ? <Unlock size={14} className="text-slate-600" /> : <Lock size={14} className="text-slate-600" />}
+                    <span>{isLocked ? 'Desbloquear edición' : 'Bloquear edición'}</span>
+                  </button>
 
-                <button
-                  onClick={() => {
-                    setShowOptionsMenu(false);
-                    setShowHistoryModal(true);
-                  }}
-                  className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
-                >
-                  <History size={14} className="text-muted" />
-                  <span>Historial de ejecuciones</span>
-                </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      setShowHistoryModal(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <History size={14} className="text-muted" />
+                    <span>Historial de ejecuciones</span>
+                  </button>
 
-                <button
-                  onClick={handleDuplicateCurrentFlow}
-                  className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
-                >
-                  <Copy size={14} className="text-muted" />
-                  <span>Duplicar este flujo</span>
-                </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      handleDuplicateCurrentFlow();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <Copy size={14} className="text-muted" />
+                    <span>Duplicar este flujo</span>
+                  </button>
 
-                <button
-                  onClick={handleExportJSON}
-                  className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
-                >
-                  <Download size={14} className="text-muted" />
-                  <span>Exportar JSON</span>
-                </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      handleExportJSON();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <Download size={14} className="text-muted" />
+                    <span>Exportar JSON</span>
+                  </button>
 
-                <div className="h-px bg-border my-1"></div>
+                  <div className="h-px bg-border my-1"></div>
 
-                <button
-                  onClick={() => {
-                    setShowOptionsMenu(false);
-                    setIsDeleteModalOpen(true);
-                  }}
-                  className="w-full text-left px-3 py-2 hover:bg-danger/10 flex items-center gap-2 text-danger transition-colors"
-                >
-                  <Trash2 size={14} />
-                  <span>Eliminar flujo</span>
-                </button>
-              </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      setIsDeleteModalOpen(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-danger/10 flex items-center gap-2 text-danger transition-colors"
+                  >
+                    <Trash2 size={14} />
+                    <span>Eliminar flujo</span>
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </div>

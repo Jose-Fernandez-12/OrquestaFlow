@@ -43,7 +43,7 @@ export function FlowListView() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'saved' | 'draft' | 'locked'>('all');
   const [executingFlowId, setExecutingFlowId] = useState<string | null>(null);
   const [historyModalFlow, setHistoryModalFlow] = useState<Flow | null>(null);
-  const [recentExport, setRecentExport] = useState<{ fileName: string; downloadUrl: string; records?: number; format?: string } | null>(null);
+  const [exportNotifications, setExportNotifications] = useState<Array<{ id: number; fileName: string; downloadUrl: string; records?: number; format?: string }>>([]);
   const downloadedUrlsRef = useRef(new Set<string>());
 
   const autoDownloadFile = (downloadUrl: string, fileName: string) => {
@@ -52,7 +52,7 @@ export function FlowListView() {
     triggerBrowserDownload(downloadUrl, fileName);
     setTimeout(() => {
       downloadedUrlsRef.current.delete(downloadUrl);
-    }, 15000);
+    }, 3000);
   };
 
   // New flow modal state
@@ -71,9 +71,16 @@ export function FlowListView() {
   useEffect(() => {
     const socket = io('http://localhost:3001');
     socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string }) => {
-      setRecentExport(data);
+      const id = Date.now() + Math.random();
+      setExportNotifications(prev => {
+        if (prev.some(n => n.fileName === data.fileName)) return prev;
+        return [...prev, { ...data, id }];
+      });
       autoDownloadFile(data.downloadUrl, data.fileName);
-      dispatch(showToast(`Archivo exportado: ${data.fileName} (${data.records} registros)`));
+
+      setTimeout(() => {
+        setExportNotifications(prev => prev.filter(n => n.id !== id));
+      }, 10000);
     });
     socket.on('flow-stopped', (data: { flowId: string }) => {
       setExecutingFlowId(prev => (prev === data.flowId ? null : prev));
@@ -176,9 +183,18 @@ export function FlowListView() {
           exportedFiles.forEach((file: any, index: number) => {
             setTimeout(() => {
               autoDownloadFile(file.downloadUrl, file.fileName);
-            }, index * 400);
+            }, (index + 1) * 600);
+
+            const id = Date.now() + Math.random() + index;
+            setExportNotifications((prev) => {
+              if (prev.some((n) => n.fileName === file.fileName)) return prev;
+              return [...prev, { ...file, id }];
+            });
+
+            setTimeout(() => {
+              setExportNotifications((prev) => prev.filter((n) => n.id !== id));
+            }, 10000);
           });
-          setRecentExport(exportedFiles[0]);
         }
       } else {
         const errMsg = resultAction.error?.message || 'Error al ejecutar flujo';
@@ -653,33 +669,35 @@ export function FlowListView() {
         onClose={() => setHistoryModalFlow(null)}
       />
 
-      {/* Floating Export Alert */}
-      {recentExport && (
-        <div className="fixed bottom-5 right-5 z-40 bg-surface border border-border rounded-md shadow-raised p-4 flex items-center gap-3 animate-in slide-in-from-bottom-3 max-w-sm">
-          <div className="w-9 h-9 rounded bg-accent-light text-accent flex items-center justify-center shrink-0">
-            <Download size={18} />
+      {/* Floating Export Alerts - Stacking upwards above global toast with flex-col-reverse and bottom-[115px] */}
+      <div className="fixed bottom-[115px] right-4 z-40 flex flex-col-reverse gap-2.5 pointer-events-none max-w-sm w-full">
+        {exportNotifications.map(notification => (
+          <div key={notification.id} className="bg-surface border border-border rounded-md shadow-raised p-3.5 flex items-center gap-3 animate-in slide-in-from-bottom-3 pointer-events-auto">
+            <div className="w-8 h-8 rounded bg-accent-light text-accent flex items-center justify-center shrink-0">
+              <Download size={16} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-fg truncate">Archivo generado</div>
+              <div className="text-xs text-muted truncate">{notification.fileName}</div>
+            </div>
+            <a
+              href={`http://localhost:3001${notification.downloadUrl}`}
+              download={notification.fileName}
+              target="_blank"
+              rel="noreferrer"
+              className="px-2.5 py-1 text-xs font-semibold text-white bg-accent hover:bg-accent-hover rounded transition-colors shrink-0 inline-flex items-center gap-1"
+            >
+              <span>Descargar</span>
+            </a>
+            <button
+              onClick={() => setExportNotifications(prev => prev.filter(n => n.id !== notification.id))}
+              className="text-muted hover:text-fg p-1 rounded"
+            >
+              <X size={14} />
+            </button>
           </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-xs font-semibold text-fg truncate">Archivo generado</div>
-            <div className="text-xs text-muted truncate">{recentExport.fileName}</div>
-          </div>
-          <a
-            href={`http://localhost:3001${recentExport.downloadUrl}`}
-            download={recentExport.fileName}
-            target="_blank"
-            rel="noreferrer"
-            className="px-2.5 py-1 text-xs font-semibold text-white bg-accent hover:bg-accent-hover rounded transition-colors shrink-0 inline-flex items-center gap-1"
-          >
-            <span>Descargar</span>
-          </a>
-          <button
-            onClick={() => setRecentExport(null)}
-            className="text-muted hover:text-fg p-1 rounded"
-          >
-            <X size={14} />
-          </button>
-        </div>
-      )}
+        ))}
+      </div>
     </div>
   );
 }

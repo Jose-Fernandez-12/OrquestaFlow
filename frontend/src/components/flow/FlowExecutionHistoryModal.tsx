@@ -88,6 +88,18 @@ export function FlowExecutionHistoryModal({
     }
   };
 
+  const formatStartedAt = (dateStr?: string | null) => {
+    if (!dateStr) return 'Fecha desconocida';
+    try {
+      const isoStr = dateStr.includes(' ') && !dateStr.includes('T') ? dateStr.replace(' ', 'T') : dateStr;
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return dateStr;
+      return format(d, 'dd/MM/yyyy HH:mm:ss');
+    } catch {
+      return dateStr;
+    }
+  };
+
   const formatDuration = (ms?: number | null) => {
     if (ms == null) return 'N/A';
     if (ms < 1000) return `${ms}ms`;
@@ -95,7 +107,7 @@ export function FlowExecutionHistoryModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4 z-[9999] animate-in fade-in duration-fast">
       <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-fast">
         {/* Header */}
         <div className="p-4 border-b border-border flex items-center justify-between shrink-0 bg-surface">
@@ -157,7 +169,7 @@ export function FlowExecutionHistoryModal({
           ) : (
             logs.map((log) => {
               const resultData = parseResult(log.result);
-              const exportedFiles = resultData?.exportedFiles || [];
+              const exportedFiles = Array.isArray(resultData?.exportedFiles) ? resultData.exportedFiles : [];
               const isCompleted = log.status === 'completed';
               const isCancelled = log.status === 'cancelled' || (log.status === 'error' && (log.error_message?.toLowerCase().includes('detenid') || log.error_message?.toLowerCase().includes('cancelad')));
               const isError = log.status === 'error' && !isCancelled;
@@ -197,7 +209,7 @@ export function FlowExecutionHistoryModal({
                       )}
 
                       <span className="text-xs text-muted">
-                        {log.started_at ? format(new Date(log.started_at), 'dd/MM/yyyy HH:mm:ss') : 'Fecha desconocida'}
+                        {formatStartedAt(log.started_at)}
                       </span>
                     </div>
 
@@ -232,24 +244,30 @@ export function FlowExecutionHistoryModal({
                   {exportedFiles.length > 0 && (
                     <div className="pt-1.5 border-t border-border/60 flex flex-wrap items-center gap-2">
                       <span className="text-[11px] font-medium text-muted">Archivos exportados:</span>
-                      {exportedFiles.map((file, idx) => (
-                        <a
-                          key={idx}
-                          href={`http://localhost:3001${file.downloadUrl}`}
-                          download={file.fileName}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1.5 text-xs font-medium text-accent bg-accent-light hover:bg-accent/20 px-2.5 py-1 rounded transition-colors"
-                        >
-                          {file.format === 'Excel' || file.fileName.endsWith('.xlsx') ? (
-                            <FileSpreadsheet size={13} />
-                          ) : (
-                            <FileText size={13} />
-                          )}
-                          <span>{file.fileName}</span>
-                          <Download size={11} className="opacity-70" />
-                        </a>
-                      ))}
+                      {exportedFiles.map((file, idx) => {
+                        const fileName = file?.fileName || `archivo_${idx + 1}`;
+                        const downloadUrl = file?.downloadUrl || '#';
+                        const isExcel = file?.format === 'Excel' || fileName.toLowerCase().endsWith('.xlsx') || fileName.toLowerCase().endsWith('.xls');
+
+                        return (
+                          <a
+                            key={idx}
+                            href={downloadUrl.startsWith('http') ? downloadUrl : `http://localhost:3001${downloadUrl}`}
+                            download={fileName}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1.5 text-xs font-medium text-accent bg-accent-light hover:bg-accent/20 px-2.5 py-1 rounded transition-colors"
+                          >
+                            {isExcel ? (
+                              <FileSpreadsheet size={13} />
+                            ) : (
+                              <FileText size={13} />
+                            )}
+                            <span>{fileName}</span>
+                            <Download size={11} className="opacity-70" />
+                          </a>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
