@@ -38,10 +38,17 @@ export function ScheduleView() {
     }
   }, [cronExpr]);
 
+  // Fetch schedules on mount and set up auto-refresh every 30 seconds
   useEffect(() => {
     dispatch(fetchSchedules());
     dispatch(fetchFlows());
     dispatch(fetchScripts());
+
+    const intervalId = setInterval(() => {
+      dispatch(fetchSchedules());
+    }, 30000); // 30 seconds
+
+    return () => clearInterval(intervalId);
   }, [dispatch]);
 
   // Set default target ID when tab changes or lists load

@@ -25,9 +25,11 @@ export async function initScheduler() {
 
 function getNextRunAt(cronExpression: string): string | null {
   try {
-    const interval = cronParser.parseExpression(cronExpression);
+    const parser = require('cron-parser');
+    const interval = parser.CronExpressionParser.parse(cronExpression);
     return interval.next().toISOString();
-  } catch (err) {
+  } catch (err: any) {
+    console.error('Failed to parse cron:', err.message);
     return null;
   }
 }
