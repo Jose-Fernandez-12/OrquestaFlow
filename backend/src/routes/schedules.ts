@@ -57,19 +57,21 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
   // Update schedule
   app.put<{
     Params: { id: string };
-    Body: { name?: string; cron_expression?: string; is_active?: number }
+    Body: { name?: string; cron_expression?: string; is_active?: number; target_type?: 'flow' | 'script' | 'query'; target_id?: string }
   }>('/:id', async (request, reply) => {
     const db = getDb();
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(request.params.id);
     if (!existing) return reply.status(404).send({ error: 'Schedule not found' });
 
-    const { name, cron_expression, is_active } = request.body;
+    const { name, cron_expression, is_active, target_type, target_id } = request.body;
     const updates: string[] = [];
     const values: unknown[] = [];
 
     if (name !== undefined) { updates.push('name = ?'); values.push(name); }
     if (cron_expression !== undefined) { updates.push('cron_expression = ?'); values.push(cron_expression); }
     if (is_active !== undefined) { updates.push('is_active = ?'); values.push(is_active); }
+    if (target_type !== undefined) { updates.push('target_type = ?'); values.push(target_type); }
+    if (target_id !== undefined) { updates.push('target_id = ?'); values.push(target_id); }
     updates.push("updated_at = datetime('now')");
 
     values.push(request.params.id);
@@ -96,5 +98,22 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     updateJobSchedule(request.params.id);
 
     return { data: { deleted: true } };
+  });
+
+  // Get schedule logs
+  app.get<{ Params: { id: string } }>('/:id/logs', async (request, reply) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(request.params.id);
+    if (!existing) return reply.status(404).send({ error: 'Schedule not found' });
+
+    const logs = db.prepare(`
+      SELECT id, status, error_message, duration_ms, record_count, result, started_at, completed_at
+      FROM execution_logs 
+      WHERE schedule_id = ?
+      ORDER BY started_at DESC
+      LIMIT 20
+    `).all(request.params.id);
+    
+    return { data: logs };
   });
 }
