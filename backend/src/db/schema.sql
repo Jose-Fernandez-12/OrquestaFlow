@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS flows (
   description TEXT,
   definition TEXT NOT NULL DEFAULT '{"nodes":[],"edges":[]}',
   status TEXT DEFAULT 'draft',
+  is_locked INTEGER DEFAULT 0,
   last_run_at TEXT,
   last_run_duration_ms INTEGER,
   last_run_record_count INTEGER,

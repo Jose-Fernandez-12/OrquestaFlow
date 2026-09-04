@@ -46,7 +46,7 @@ export const fetchQueries = createAsyncThunk('queries/fetchAll', async () => {
   return data.data as Query[];
 });
 
-export const createQuery = createAsyncThunk('queries/create', async (body: { name: string; sql_text: string; connection_ids?: string[] }) => {
+export const createQuery = createAsyncThunk('queries/create', async (body: { name: string; sql_text: string; connection_ids?: string[]; display_columns?: string }) => {
   const res = await fetch(`${API_URL}/queries`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -56,7 +56,7 @@ export const createQuery = createAsyncThunk('queries/create', async (body: { nam
   return data.data as Query;
 });
 
-export const updateQuery = createAsyncThunk('queries/update', async ({ id, ...body }: { id: string; name?: string; sql_text?: string; connection_ids?: string[] }) => {
+export const updateQuery = createAsyncThunk('queries/update', async ({ id, ...body }: { id: string; name?: string; sql_text?: string; connection_ids?: string[]; display_columns?: string }) => {
   const res = await fetch(`${API_URL}/queries/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

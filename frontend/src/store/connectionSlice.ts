@@ -12,6 +12,7 @@ export interface Connection {
   database_name: string;
   port: number;
   driver: string;
+  username?: string | null;
   env_credential_key: string | null;
   is_active: number;
   last_tested_at: string | null;

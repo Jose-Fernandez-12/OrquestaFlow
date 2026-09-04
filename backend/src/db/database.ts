@@ -93,7 +93,12 @@ export async function initDb(): Promise<void> {
   const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf-8');
   wrappedDb.exec(schema);
 
+  try {
+    wrappedDb.exec('ALTER TABLE flows ADD COLUMN is_locked INTEGER DEFAULT 0;');
+  } catch (e) {
+    // Column already exists, ignore
   // Migrate schedule_id if needed
+  }
   try {
     wrappedDb.exec('ALTER TABLE execution_logs ADD COLUMN schedule_id TEXT;');
     console.log('[DB] Migrated: added schedule_id to execution_logs');

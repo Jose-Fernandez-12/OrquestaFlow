@@ -1,5 +1,5 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import {
   GitMerge,
   Code2,
@@ -18,6 +18,7 @@ import { Button } from '../ui/button';
 
 export function Sidebar() {
   const dispatch = useAppDispatch();
+  const location = useLocation();
   const collapsed = useAppSelector((state) => state.ui.sidebarCollapsed);
 
   const navItems = [
@@ -26,6 +27,13 @@ export function Sidebar() {
     { id: 'bases', label: 'Bases de datos', icon: Database, path: '/bases' },
     { id: 'programacion', label: 'Programación', icon: Calendar, path: '/programacion' },
   ];
+
+  const isItemActive = (item: typeof navItems[0]) => {
+    if (item.id === 'flujos') {
+      return location.pathname === '/' || location.pathname.startsWith('/flujos');
+    }
+    return location.pathname.startsWith(item.path);
+  };
 
   return (
     <aside
@@ -59,9 +67,9 @@ export function Sidebar() {
           <NavLink
             key={item.id}
             to={item.path}
-            className={({ isActive }) => cn(
+            className={() => cn(
               "flex items-center gap-3 h-10 px-3 rounded-sm transition-colors relative group",
-              isActive
+              isItemActive(item)
                 ? "bg-accent-light text-accent font-medium before:absolute before:left-0 before:top-2 before:bottom-2 before:w-[3px] before:bg-accent before:rounded-r-sm"
                 : "text-muted hover:bg-bg hover:text-fg"
             )}

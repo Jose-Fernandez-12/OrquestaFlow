@@ -10,6 +10,8 @@ const buttonVariants = cva(
       variant: {
         default: "border-border bg-surface text-fg hover:bg-fg/5 hover:border-fg/35 active:translate-y-[1px]",
         primary: "border-accent bg-accent text-accent-on hover:bg-accent-hover hover:border-accent-hover active:translate-y-[1px]",
+        outline: "border-border bg-transparent text-fg hover:bg-fg/5 hover:border-fg/35 active:translate-y-[1px]",
+        ghost: "border-transparent bg-transparent text-fg hover:bg-fg/5 active:translate-y-[1px]",
         dangerLink: "border-transparent bg-transparent text-danger hover:underline font-normal text-xs p-0 min-h-0",
         textLink: "border-transparent bg-transparent text-accent hover:underline font-normal text-xs p-0 min-h-0",
         icon: "border-transparent bg-transparent text-muted hover:text-fg hover:bg-bg rounded-md",
