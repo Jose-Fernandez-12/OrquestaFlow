@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchSchedules, createSchedule, updateSchedule } from '../../store/scheduleSlice';
 import { fetchFlows } from '../../store/flowSlice';
@@ -8,6 +8,7 @@ import { Button } from '../ui/button';
 import { Card } from '../ui/card';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
+import cronstrue from 'cronstrue/i18n';
 
 export function ScheduleView() {
   const dispatch = useAppDispatch();
@@ -20,6 +21,15 @@ export function ScheduleView() {
   const [targetId, setTargetId] = useState('');
   const [cronExpr, setCronExpr] = useState('0 8 * * 1'); // Monday 8am
   const [scheduleName, setScheduleName] = useState('');
+
+  const cronDescription = useMemo(() => {
+    if (!cronExpr) return '';
+    try {
+      return cronstrue.toString(cronExpr, { locale: 'es' });
+    } catch (e) {
+      return 'Expresión Cron inválida';
+    }
+  }, [cronExpr]);
 
   useEffect(() => {
     dispatch(fetchSchedules());
@@ -224,7 +234,23 @@ export function ScheduleView() {
                   placeholder="Ej. 0 8 * * 1"
                   className="font-mono text-sm"
                 />
-                <span className="text-[10px] text-muted block mt-1">Minuto Hora Día-Mes Mes Día-Semana</span>
+                <div className="flex flex-col gap-1 mt-1">
+                  <span className={cn(
+                    "text-[11px] font-medium transition-colors",
+                    cronDescription === 'Expresión Cron inválida' ? "text-red-500" : "text-accent"
+                  )}>
+                    {cronDescription || 'Escribe una expresión cron'}
+                  </span>
+                  <span className="text-[10px] text-muted">Minuto Hora Día-Mes Mes Día-Semana</span>
+                </div>
+                
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  <button type="button" onClick={() => setCronExpr('*/5 * * * *')} className="text-[10px] px-2 py-1 rounded bg-surface border border-border hover:border-accent hover:text-accent transition-colors">Cada 5 min</button>
+                  <button type="button" onClick={() => setCronExpr('0 * * * *')} className="text-[10px] px-2 py-1 rounded bg-surface border border-border hover:border-accent hover:text-accent transition-colors">Cada hora</button>
+                  <button type="button" onClick={() => setCronExpr('0 8 * * *')} className="text-[10px] px-2 py-1 rounded bg-surface border border-border hover:border-accent hover:text-accent transition-colors">Diario 8am</button>
+                  <button type="button" onClick={() => setCronExpr('0 8 * * 1')} className="text-[10px] px-2 py-1 rounded bg-surface border border-border hover:border-accent hover:text-accent transition-colors">Lunes 8am</button>
+                  <button type="button" onClick={() => setCronExpr('0 8 * * 1-5')} className="text-[10px] px-2 py-1 rounded bg-surface border border-border hover:border-accent hover:text-accent transition-colors">Lun-Vie 8am</button>
+                </div>
               </div>
 
               <div className="flex justify-end gap-2 mt-2">
