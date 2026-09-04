@@ -3,7 +3,9 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchSchedules, createSchedule, updateSchedule } from '../../store/scheduleSlice';
 import { fetchFlows } from '../../store/flowSlice';
 import { fetchScripts } from '../../store/scriptSlice';
-import { Calendar, Plus, Clock, ToggleLeft, ToggleRight, X, Play, Loader2 } from 'lucide-react';
+import { Calendar, Plus, Clock, ToggleLeft, ToggleRight, X, Play, Loader2, History, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { formatDistanceToNow, format } from 'date-fns';
+import { es } from 'date-fns/locale';
 import { Button } from '../ui/button';
 import { Card } from '../ui/card';
 import { Input } from '../ui/input';
@@ -21,6 +23,11 @@ export function ScheduleView() {
   const [targetId, setTargetId] = useState('');
   const [cronExpr, setCronExpr] = useState('0 8 * * 1'); // Monday 8am
   const [scheduleName, setScheduleName] = useState('');
+
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [selectedScheduleName, setSelectedScheduleName] = useState('');
+  const [historyLogs, setHistoryLogs] = useState<any[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const cronDescription = useMemo(() => {
     if (!cronExpr) return '';
@@ -69,6 +76,22 @@ export function ScheduleView() {
       is_active: currentStatus === 1 ? 0 : 1
     }));
     dispatch(fetchSchedules());
+  };
+
+  const openHistory = async (id: string, name: string) => {
+    setSelectedScheduleName(name);
+    setHistoryModalOpen(true);
+    setLoadingHistory(true);
+    try {
+      const res = await fetch(`http://localhost:3001/api/schedules/${id}/logs`);
+      const data = await res.json();
+      setHistoryLogs(data.data || []);
+    } catch (e) {
+      console.error('Failed to load history', e);
+      setHistoryLogs([]);
+    } finally {
+      setLoadingHistory(false);
+    }
   };
 
   return (
@@ -124,13 +147,27 @@ export function ScheduleView() {
                   </button>
                 </div>
 
-                <div className="border-t border-border pt-4 flex items-center justify-between text-xs text-muted">
-                  <span>
-                    Próxima ejecución: {job.next_run_at ? new Date(job.next_run_at).toLocaleString() : 'Pendiente'}
-                  </span>
-                  <span className={job.is_active === 1 ? 'text-success font-medium' : 'text-muted'}>
-                    {job.is_active === 1 ? 'Activa' : 'Inactiva'}
-                  </span>
+                <div className="border-t border-border pt-4 flex items-center justify-between text-xs">
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-muted">Próxima ejecución:</span>
+                    <span className="font-medium text-fg">
+                      {job.next_run_at 
+                        ? `En ${formatDistanceToNow(new Date(job.next_run_at), { locale: es })}`
+                        : 'Pendiente'}
+                    </span>
+                  </div>
+                  <div className="flex flex-col items-end gap-2">
+                    <span className={job.is_active === 1 ? 'text-success font-medium' : 'text-muted'}>
+                      {job.is_active === 1 ? 'Activa' : 'Inactiva'}
+                    </span>
+                    <button 
+                      onClick={() => openHistory(job.id, job.name)}
+                      className="flex items-center gap-1 text-accent hover:text-accent-light transition-colors"
+                    >
+                      <History size={14} />
+                      <span>Historial</span>
+                    </button>
+                  </div>
                 </div>
               </Card>
             ))}
@@ -262,6 +299,70 @@ export function ScheduleView() {
                 </Button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* History Modal Dialog */}
+      {historyModalOpen && (
+        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-2xl max-h-[80vh] flex flex-col relative animate-in fade-in zoom-in-95 duration-fast">
+            <div className="p-5 border-b border-border flex justify-between items-center shrink-0">
+              <div>
+                <h2 className="text-lg font-semibold tracking-tight">Historial de Ejecución</h2>
+                <p className="text-xs text-muted mt-1">{selectedScheduleName}</p>
+              </div>
+              <button 
+                onClick={() => setHistoryModalOpen(false)}
+                className="text-muted hover:text-fg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-5">
+              {loadingHistory ? (
+                <div className="flex justify-center items-center py-10 text-muted">
+                  <Loader2 size={24} className="animate-spin" />
+                </div>
+              ) : historyLogs.length === 0 ? (
+                <div className="text-center py-10 text-muted border border-dashed border-border rounded-md">
+                  No hay ejecuciones previas para esta programación.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {historyLogs.map(log => (
+                    <div key={log.id} className="border border-border/60 rounded-md p-3 flex flex-col gap-2 bg-bg text-sm">
+                      <div className="flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                          {log.status === 'completed' ? (
+                            <CheckCircle2 size={16} className="text-success" />
+                          ) : log.status === 'error' ? (
+                            <AlertCircle size={16} className="text-danger" />
+                          ) : (
+                            <Loader2 size={16} className="text-accent animate-spin" />
+                          )}
+                          <span className="font-medium capitalize">{log.status}</span>
+                        </div>
+                        <span className="text-xs text-muted">
+                          {format(new Date(log.started_at), 'dd MMM yyyy, HH:mm:ss')}
+                        </span>
+                      </div>
+                      
+                      <div className="flex items-center gap-4 text-xs text-muted mt-1">
+                        {log.duration_ms !== null && <span>Duración: {log.duration_ms}ms</span>}
+                        {log.record_count !== null && <span>Registros: {log.record_count}</span>}
+                      </div>
+
+                      {log.error_message && (
+                        <div className="mt-2 p-2 bg-danger/10 border border-danger/20 rounded text-danger text-xs break-all">
+                          {log.error_message}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

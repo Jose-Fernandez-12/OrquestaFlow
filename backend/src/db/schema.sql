@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS execution_logs (
   id TEXT PRIMARY KEY,
   target_type TEXT NOT NULL CHECK(target_type IN ('flow', 'script', 'query', 'node')),
   target_id TEXT NOT NULL,
+  schedule_id TEXT,
   status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'error')),
   result TEXT,
   error_message TEXT,

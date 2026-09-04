@@ -97,4 +97,21 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
 
     return { data: { deleted: true } };
   });
+
+  // Get schedule logs
+  app.get<{ Params: { id: string } }>('/:id/logs', async (request, reply) => {
+    const db = getDb();
+    const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(request.params.id);
+    if (!existing) return reply.status(404).send({ error: 'Schedule not found' });
+
+    const logs = db.prepare(`
+      SELECT id, status, error_message, duration_ms, record_count, started_at, completed_at
+      FROM execution_logs 
+      WHERE schedule_id = ?
+      ORDER BY started_at DESC
+      LIMIT 20
+    `).all(request.params.id);
+    
+    return { data: logs };
+  });
 }

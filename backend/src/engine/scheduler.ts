@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import cronParser from 'cron-parser';
 import { getDb } from '../db/database.js';
 import { executeFlowEngine } from './executor.js';
 import { spawn } from 'child_process';
@@ -22,15 +23,39 @@ export async function initScheduler() {
   });
 }
 
+function getNextRunAt(cronExpression: string): string | null {
+  try {
+    const interval = cronParser.parseExpression(cronExpression);
+    return interval.next().toISOString();
+  } catch (err) {
+    return null;
+  }
+}
+
 function startCronJob(schedule: any) {
   if (activeJobs[schedule.id]) {
     activeJobs[schedule.id].stop();
     delete activeJobs[schedule.id];
   }
 
+  // Update initial next_run_at when starting the job
+  const nextRun = getNextRunAt(schedule.cron_expression);
+  if (nextRun) {
+    getDb().prepare("UPDATE schedules SET next_run_at = ? WHERE id = ?").run(nextRun, schedule.id);
+  }
+
   const task = cron.schedule(schedule.cron_expression, async () => {
     console.log(`[Scheduler] Triggered job: ${schedule.name} (${schedule.target_type})`);
+    const { v4: uuid } = require('uuid');
+    const logId = uuid();
+    const db = getDb();
     
+    db.prepare(`
+      INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status)
+      VALUES (?, ?, ?, ?, 'running')
+    `).run(logId, schedule.target_type, schedule.target_id, schedule.id);
+
+    const startTime = Date.now();
     try {
       if (schedule.target_type === 'flow') {
         await executeFlowEngine(schedule.target_id);
@@ -38,11 +63,26 @@ function startCronJob(schedule: any) {
         await runScriptById(schedule.target_id);
       }
       
-      // Update database status
-      const db = getDb();
-      db.prepare("UPDATE schedules SET next_run_at = datetime('now', '+1 day') WHERE id = ?").run(schedule.id);
+      const duration = Date.now() - startTime;
+      db.prepare(`
+        UPDATE execution_logs
+        SET status = 'completed', duration_ms = ?, completed_at = datetime('now')
+        WHERE id = ?
+      `).run(duration, logId);
+      
+      // Update database status for the next run
+      const nextNextRun = getNextRunAt(schedule.cron_expression);
+      if (nextNextRun) {
+        db.prepare("UPDATE schedules SET next_run_at = ? WHERE id = ?").run(nextNextRun, schedule.id);
+      }
     } catch (err: any) {
       console.error(`[Scheduler] Error running job ${schedule.id}:`, err.message);
+      const duration = Date.now() - startTime;
+      db.prepare(`
+        UPDATE execution_logs
+        SET status = 'error', error_message = ?, duration_ms = ?, completed_at = datetime('now')
+        WHERE id = ?
+      `).run(err.message, duration, logId);
     }
   });
 

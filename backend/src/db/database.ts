@@ -93,6 +93,14 @@ export async function initDb(): Promise<void> {
   const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf-8');
   wrappedDb.exec(schema);
 
+  // Migrate schedule_id if needed
+  try {
+    wrappedDb.exec('ALTER TABLE execution_logs ADD COLUMN schedule_id TEXT;');
+    console.log('[DB] Migrated: added schedule_id to execution_logs');
+  } catch (e: any) {
+    // Ignore if column already exists (sql.js throws error on duplicate column)
+  }
+
   // Seed demo data if tables are empty
   const flowCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM flows').get() as { count: number };
   if (flowCount.count === 0) {
