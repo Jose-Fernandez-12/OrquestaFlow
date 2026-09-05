@@ -38,6 +38,7 @@ interface FlowState {
   errorNodeIds: string[];
   nodeResults: Record<string, any>;
   nodeProgress: Record<string, { current: number; total: number }>;
+  nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
   loading: boolean;
@@ -53,6 +54,7 @@ const initialState: FlowState = {
   errorNodeIds: [],
   nodeResults: {},
   nodeProgress: {},
+  nodeTimers: {},
   canvasExpanded: false,
   nodeLibraryExpanded: true,
   loading: false,
@@ -163,6 +165,7 @@ const flowSlice = createSlice({
       if (result !== undefined) {
         state.nodeResults[nodeId] = result;
       }
+      delete state.nodeTimers[nodeId];
     },
     setNodeError(state, action: PayloadAction<{ nodeId: string; error?: any }>) {
       const { nodeId, error } = action.payload;
@@ -173,10 +176,15 @@ const flowSlice = createSlice({
       if (error !== undefined) {
         state.nodeResults[nodeId] = error;
       }
+      delete state.nodeTimers[nodeId];
     },
     setNodeProgress(state, action: PayloadAction<{ nodeId: string; current: number; total: number }>) {
       const { nodeId, current, total } = action.payload;
       state.nodeProgress[nodeId] = { current, total };
+    },
+    setNodeTimer(state, action: PayloadAction<{ nodeId: string; remainingSeconds: number; totalSeconds: number }>) {
+      const { nodeId, remainingSeconds, totalSeconds } = action.payload;
+      state.nodeTimers[nodeId] = { remainingSeconds, totalSeconds };
     },
     resetNodeStates(state) {
       state.executingNodeIds = [];
@@ -184,6 +192,7 @@ const flowSlice = createSlice({
       state.errorNodeIds = [];
       state.nodeResults = {};
       state.nodeProgress = {};
+      state.nodeTimers = {};
     },
     toggleCanvasExpanded(state) {
       state.canvasExpanded = !state.canvasExpanded;
@@ -223,6 +232,7 @@ const flowSlice = createSlice({
       })
       .addCase(stopFlow.fulfilled, (state) => {
         state.executingNodeIds = [];
+        state.nodeTimers = {};
       })
       .addCase(deleteFlow.fulfilled, (state, action) => {
         state.flows = state.flows.filter(f => f.id !== action.payload);
@@ -243,6 +253,7 @@ export const {
   setNodeCompleted,
   setNodeError,
   setNodeProgress,
+  setNodeTimer,
   resetNodeStates,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,

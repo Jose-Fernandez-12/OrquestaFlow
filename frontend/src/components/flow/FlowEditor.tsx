@@ -8,6 +8,7 @@ import {
   useEdgesState,
   addEdge,
   ReactFlowProvider,
+  ConnectionMode,
   type Connection,
   type Edge,
   type Node
@@ -59,6 +60,7 @@ import {
   setNodeCompleted,
   setNodeError,
   setNodeProgress,
+  setNodeTimer,
   resetNodeStates
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
@@ -67,6 +69,8 @@ import { Button } from '../ui/button';
 import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
 import { NodeInspector } from './NodeInspector';
+import { ExportPreviewModal } from './ExportPreviewModal';
+import { DataSourcePreviewModal } from './DataSourcePreviewModal';
 import { cn } from '../../lib/utils';
 import { downloadAsXMLSpreadsheet, downloadAsCSV, resolveExportData, triggerBrowserDownload } from '../../lib/exportUtils';
 
@@ -80,6 +84,7 @@ function FlowCanvas() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
   const completedNodeIds = useAppSelector(state => state.flows.completedNodeIds);
   const errorNodeIds = useAppSelector(state => state.flows.errorNodeIds);
+  const nodeResults = useAppSelector(state => state.flows.nodeResults);
   const queries = useAppSelector(state => (state as any).queries.queries || []);
 
   const flowSchedules = currentFlow 
@@ -114,21 +119,50 @@ function FlowCanvas() {
     hasError: boolean;
   } | null>(null);
 
+  const [previewExportData, setPreviewExportData] = useState<{
+    id: string;
+    label: string;
+    result: any;
+    completed: boolean;
+    hasError: boolean;
+    fileName?: string;
+    format?: string;
+  } | null>(null);
+
+  const [previewDataSourceData, setPreviewDataSourceData] = useState<{
+    id: string;
+    label: string;
+    filePath?: string;
+    fileName?: string;
+    format?: string;
+    sheetName?: string;
+    sheets?: string[];
+    sampleRows?: any[];
+    totalRows?: number;
+    result?: any;
+    completed?: boolean;
+  } | null>(null);
+
   const [missingParamsContext, setMissingParamsContext] = useState<{
     nodesWithMissing: { node: Node, missing: string[], currentParams: Record<string, string> }[];
   } | null>(null);
   
   const [showSaveNotification, setShowSaveNotification] = useState(false);
   const [isLiveExecuting, setIsLiveExecuting] = useState(false);
+  const isLiveExecutingRef = useRef(false);
+  useEffect(() => {
+    isLiveExecutingRef.current = isLiveExecuting;
+  }, [isLiveExecuting]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const downloadedUrlsRef = useRef(new Set<string>());
 
   const autoDownloadFile = (downloadUrl: string, fileName: string) => {
-    if (downloadedUrlsRef.current.has(downloadUrl)) return;
-    downloadedUrlsRef.current.add(downloadUrl);
+    const key = `${downloadUrl}_${fileName}`;
+    if (downloadedUrlsRef.current.has(key)) return;
+    downloadedUrlsRef.current.add(key);
     triggerBrowserDownload(downloadUrl, fileName);
     setTimeout(() => {
-      downloadedUrlsRef.current.delete(downloadUrl);
+      downloadedUrlsRef.current.delete(key);
     }, 15000);
   };
 
@@ -150,9 +184,38 @@ function FlowCanvas() {
     const handleInspect = (e: any) => {
       setInspectNodeData(e.detail);
     };
+    const handlePreviewExport = (e: any) => {
+      setPreviewExportData(e.detail);
+    };
+    const handlePreviewDataSource = (e: any) => {
+      setPreviewDataSourceData(e.detail);
+    };
     window.addEventListener('inspect-node-result', handleInspect);
-    return () => window.removeEventListener('inspect-node-result', handleInspect);
+    window.addEventListener('preview-export-node', handlePreviewExport);
+    window.addEventListener('preview-data-source-node', handlePreviewDataSource);
+    return () => {
+      window.removeEventListener('inspect-node-result', handleInspect);
+      window.removeEventListener('preview-export-node', handlePreviewExport);
+      window.removeEventListener('preview-data-source-node', handlePreviewDataSource);
+    };
   }, []);
+
+  // Sync previewExportData with latest node result if preview modal is open
+  useEffect(() => {
+    if (previewExportData) {
+      const latestResult = nodeResults[previewExportData.id];
+      const isCompleted = completedNodeIds.includes(previewExportData.id);
+      const isError = errorNodeIds.includes(previewExportData.id);
+      if (latestResult && latestResult !== previewExportData.result) {
+        setPreviewExportData(prev => prev ? {
+          ...prev,
+          result: latestResult,
+          completed: isCompleted,
+          hasError: isError
+        } : null);
+      }
+    }
+  }, [nodeResults, completedNodeIds, errorNodeIds, previewExportData]);
 
   useEffect(() => {
     if (currentFlow) setEditingName(currentFlow.name);
@@ -194,7 +257,16 @@ function FlowCanvas() {
 
     const socket = io('http://localhost:3001');
 
-    socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error' | 'progress', result?: any, current?: number, total?: number }) => {
+    socket.on('flow-progress', (data: { 
+      flowId: string; 
+      nodeId: string; 
+      status: 'running' | 'completed' | 'error' | 'progress'; 
+      result?: any; 
+      current?: number; 
+      total?: number;
+      remainingSeconds?: number;
+      totalSeconds?: number;
+    }) => {
       if (data.flowId === flowId) {
         if (data.status === 'running') {
           setIsLiveExecuting(true);
@@ -203,8 +275,15 @@ function FlowCanvas() {
           dispatch(setNodeCompleted({ nodeId: data.nodeId, result: data.result }));
         } else if (data.status === 'error') {
           dispatch(setNodeError({ nodeId: data.nodeId, error: data.result }));
-        } else if (data.status === 'progress' && data.current && data.total) {
-          dispatch(setNodeProgress({ nodeId: data.nodeId, current: data.current, total: data.total }));
+        } else if (data.status === 'progress') {
+          if (data.current !== undefined && data.total !== undefined) {
+            dispatch(setNodeProgress({ nodeId: data.nodeId, current: data.current, total: data.total }));
+          }
+          if (data.remainingSeconds !== undefined && data.totalSeconds !== undefined) {
+            dispatch(setNodeTimer({ nodeId: data.nodeId, remainingSeconds: data.remainingSeconds, totalSeconds: data.totalSeconds }));
+          } else if (data.result?.remainingSeconds !== undefined && data.result?.totalSeconds !== undefined) {
+            dispatch(setNodeTimer({ nodeId: data.nodeId, remainingSeconds: data.result.remainingSeconds, totalSeconds: data.result.totalSeconds }));
+          }
         }
       }
     });
@@ -227,8 +306,18 @@ function FlowCanvas() {
       }
     });
 
-    socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string; filePath?: string }) => {
+    socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string; filePath?: string; source?: string }) => {
       if (data.flowId === flowId) {
+        // Do not auto-download if this was triggered in the background by a scheduler
+        if (data.source === 'scheduler') {
+          return;
+        }
+
+        // Do not auto-download if the execution was stopped or is not actively executing
+        if (!isLiveExecutingRef.current) {
+          return;
+        }
+
         const id = Date.now() + Math.random();
         setExportNotification(prev => [...prev, { ...data, id }]);
         
@@ -290,13 +379,16 @@ function FlowCanvas() {
   }, [currentFlow, setNodes, setEdges]);
 
   const onConnect = useCallback(
-    (params: Connection | Edge) => setEdges((eds) => {
-      // Prevent duplicate edges between the same source and target
-      if (eds.some(e => e.source === params.source && e.target === params.target)) {
-        return eds;
-      }
-      return addEdge(params, eds);
-    }),
+    (params: Connection | Edge) => {
+      if (params.source === params.target) return;
+      setEdges((eds) => {
+        // Prevent duplicate edges between the same source and target
+        if (eds.some(e => e.source === params.source && e.target === params.target)) {
+          return eds;
+        }
+        return addEdge(params, eds);
+      });
+    },
     [setEdges]
   );
 
@@ -340,6 +432,48 @@ function FlowCanvas() {
       dispatch(selectNode(null));
     }
   }, [dispatch]);
+
+  const handleNodeDoubleClick = useCallback((event: React.MouseEvent, node: Node) => {
+    event.stopPropagation();
+    if (node.type === 'export') {
+      setPreviewExportData({
+        id: node.id,
+        label: (node.data?.label as string) || 'Exportar',
+        result: nodeResults[node.id],
+        completed: completedNodeIds.includes(node.id),
+        hasError: errorNodeIds.includes(node.id),
+        fileName: node.data?.fileName as string,
+        format: node.data?.format as string,
+      });
+      return;
+    }
+
+    if (node.type === 'dataSource' || node.type === 'fileSource') {
+      setPreviewDataSourceData({
+        id: node.id,
+        label: (node.data?.label as string) || 'Obtener datos',
+        filePath: node.data?.filePath as string,
+        fileName: node.data?.fileName as string,
+        format: node.data?.format as string,
+        sheetName: node.data?.sheetName as string,
+        sheets: node.data?.sheets as string[],
+        sampleRows: node.data?.sampleRows as any[],
+        totalRows: node.data?.totalRows as number,
+        result: nodeResults[node.id],
+        completed: completedNodeIds.includes(node.id),
+      });
+      return;
+    }
+
+    if (completedNodeIds.includes(node.id) || errorNodeIds.includes(node.id)) {
+      setInspectNodeData({
+        id: node.id,
+        label: (node.data?.label as string) || (node.type ? String(node.type) : 'Nodo'),
+        result: nodeResults[node.id],
+        hasError: errorNodeIds.includes(node.id),
+      });
+    }
+  }, [nodeResults, completedNodeIds, errorNodeIds]);
 
   const handleSave = () => {
     if (!currentFlow || isLocked) return;
@@ -495,8 +629,9 @@ function FlowCanvas() {
   const handleStopExecution = async () => {
     if (!currentFlow) return;
     try {
-      await dispatch(stopFlow(currentFlow.id)).unwrap();
+      isLiveExecutingRef.current = false;
       setIsLiveExecuting(false);
+      await dispatch(stopFlow(currentFlow.id)).unwrap();
       dispatch(showToast(`Ejecución de «${currentFlow.name}» detenida.`));
     } catch (err: any) {
       dispatch(showToast(`No se pudo detener el flujo: ${err.message}`));
@@ -716,6 +851,7 @@ function FlowCanvas() {
             <ReactFlow
               nodes={nodes}
               edges={edges}
+              connectionMode={ConnectionMode.Loose}
               onNodesChange={isLocked ? undefined : onNodesChange}
               onEdgesChange={isLocked ? undefined : onEdgesChange}
               onConnect={isLocked ? undefined : onConnect}
@@ -723,6 +859,7 @@ function FlowCanvas() {
               onDrop={isLocked ? undefined : onDrop}
               onDragOver={isLocked ? undefined : onDragOver}
               onSelectionChange={onSelectionChange}
+              onNodeDoubleClick={handleNodeDoubleClick}
               nodeTypes={nodeTypes}
               deleteKeyCode={isLocked ? null : ['Backspace', 'Delete']}
               nodesDraggable={!isLocked}
@@ -979,6 +1116,48 @@ function FlowCanvas() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Export Preview Modal */}
+      {previewExportData && (
+        <ExportPreviewModal
+          isOpen={Boolean(previewExportData)}
+          onClose={() => setPreviewExportData(null)}
+          nodeId={previewExportData.id}
+          nodeLabel={previewExportData.label}
+          nodeResult={previewExportData.result || nodeResults[previewExportData.id]}
+          completed={previewExportData.completed || completedNodeIds.includes(previewExportData.id)}
+          isLiveExecuting={isLiveExecuting}
+          onExecuteFlow={handleExecute}
+          fileName={previewExportData.fileName}
+          format={previewExportData.format}
+        />
+      )}
+
+      {/* Data Source Preview Modal */}
+      {previewDataSourceData && (
+        <DataSourcePreviewModal
+          isOpen={Boolean(previewDataSourceData)}
+          onClose={() => setPreviewDataSourceData(null)}
+          nodeId={previewDataSourceData.id}
+          nodeLabel={previewDataSourceData.label}
+          fileName={previewDataSourceData.fileName}
+          filePath={previewDataSourceData.filePath}
+          format={previewDataSourceData.format}
+          sheetName={previewDataSourceData.sheetName}
+          sheets={previewDataSourceData.sheets}
+          sampleRows={previewDataSourceData.sampleRows}
+          totalRows={previewDataSourceData.totalRows}
+          nodeResult={previewDataSourceData.result || nodeResults[previewDataSourceData.id]}
+          onSelectSheet={(sheet) => {
+            setNodes(nds => nds.map(n => {
+              if (n.id === previewDataSourceData.id) {
+                return { ...n, data: { ...n.data, sheetName: sheet } };
+              }
+              return n;
+            }));
+          }}
+        />
       )}
 
       {/* Execution History Modal */}

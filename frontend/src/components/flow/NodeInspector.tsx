@@ -2,10 +2,232 @@ import React, { useState } from 'react';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
-import { X, ChevronDown, ChevronRight } from 'lucide-react';
+import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
 import { useAppSelector } from '../../store/hooks';
+
+function DataSourceInspector({
+  node,
+  updateNodeData
+}: {
+  node: Node;
+  updateNodeData: (key: string, value: any) => void;
+}) {
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [showSample, setShowSample] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    setIsUploading(true);
+    setUploadError(null);
+
+    try {
+      const res = await fetch('http://localhost:3001/api/file-manager/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json();
+        throw new Error(errJson.error || 'Error al subir el archivo');
+      }
+
+      const resJson = await res.json();
+      const uploaded = resJson.data;
+
+      updateNodeData('filePath', uploaded.filePath);
+      updateNodeData('fileName', uploaded.originalName);
+      updateNodeData('format', uploaded.format);
+      updateNodeData('columns', uploaded.columns);
+      updateNodeData('totalRows', uploaded.totalRows);
+      updateNodeData('sheets', uploaded.sheets);
+      updateNodeData('sampleRows', uploaded.sampleRows);
+      if (uploaded.sheets && uploaded.sheets.length > 0) {
+        updateNodeData('sheetName', uploaded.sheets[0]);
+      }
+    } catch (err: any) {
+      setUploadError(err.message || 'Error al procesar el archivo');
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const fileName = node.data?.fileName as string;
+  const format = node.data?.format as string;
+  const columns = (node.data?.columns as string[]) || [];
+  const sheets = (node.data?.sheets as string[]) || [];
+  const totalRows = (node.data?.totalRows as number) || 0;
+  const sampleRows = (node.data?.sampleRows as any[]) || [];
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Archivo origen (Excel o CSV)</label>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xlsx,.xls,.csv,.txt"
+          onChange={handleFileUpload}
+          className="hidden"
+        />
+        <div
+          onClick={() => !isUploading && fileInputRef.current?.click()}
+          className="border-2 border-dashed border-border hover:border-accent/60 rounded-md p-4 flex flex-col items-center justify-center gap-2 cursor-pointer bg-bg/40 hover:bg-bg transition-colors text-center"
+        >
+          {isUploading ? (
+            <>
+              <Loader2 size={22} className="animate-spin text-accent" />
+              <span className="text-xs text-muted">Procesando y analizando archivo...</span>
+            </>
+          ) : (
+            <>
+              <div className="w-9 h-9 rounded-full bg-accent/10 text-accent flex items-center justify-center">
+                <Upload size={18} />
+              </div>
+              <div>
+                <p className="text-xs font-medium text-fg">
+                  {fileName ? 'Reemplazar archivo' : 'Cargar archivo Excel o CSV'}
+                </p>
+                <p className="text-[10px] text-muted mt-0.5">
+                  Formatos soportados: .xlsx, .xls, .csv
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+        {uploadError && (
+          <p className="text-[11px] text-danger mt-1">{uploadError}</p>
+        )}
+      </div>
+
+      {fileName && (
+        <div className="space-y-3 pt-2 border-t border-border">
+          <div className="bg-bg p-3 rounded-md border border-border space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-fg truncate max-w-[180px]" title={fileName}>
+                {fileName}
+              </span>
+              <span className="text-[10px] font-mono bg-accent/10 text-accent px-1.5 py-0.5 rounded font-semibold">
+                {format}
+              </span>
+            </div>
+
+            <div className="text-[11px] text-muted">
+              Filas detectadas: <strong className="text-fg">{totalRows.toLocaleString()}</strong>
+            </div>
+
+            {sheets.length > 1 && (
+              <div className="space-y-1 pt-1">
+                <label className="text-[10px] font-medium text-muted">Hoja de cálculo</label>
+                <select
+                  className="w-full text-xs h-8 border border-border bg-surface rounded px-2"
+                  value={(node.data?.sheetName as string) || sheets[0]}
+                  onChange={(e) => updateNodeData('sheetName', e.target.value)}
+                >
+                  {sheets.map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <Button
+              variant="default"
+              size="sm"
+              type="button"
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent('preview-data-source-node', {
+                    detail: {
+                      id: node.id,
+                      label: (node.data?.label as string) || 'Obtener datos',
+                      filePath: node.data?.filePath,
+                      fileName: node.data?.fileName,
+                      format: node.data?.format,
+                      sheetName: node.data?.sheetName,
+                      sheets: node.data?.sheets,
+                      sampleRows: node.data?.sampleRows,
+                      totalRows: node.data?.totalRows,
+                      completed: false
+                    }
+                  })
+                );
+              }}
+              className="w-full gap-2 text-xs h-8 bg-surface border-border hover:bg-bg mt-2 text-fg font-medium"
+            >
+              <Eye size={14} className="text-emerald-600" />
+              <span>Previsualizar tabla de datos</span>
+            </Button>
+          </div>
+
+          {columns.length > 0 && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium flex items-center justify-between">
+                <span>Columnas extraídas ({columns.length})</span>
+                {sampleRows.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowSample(!showSample)}
+                    className="text-[10px] text-accent hover:underline font-medium"
+                  >
+                    {showSample ? 'Ocultar muestra' : 'Ver muestra'}
+                  </button>
+                )}
+              </label>
+              <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto p-1.5 bg-bg rounded border border-border">
+                {columns.map(col => (
+                  <span
+                    key={col}
+                    className="text-[10px] font-mono bg-surface border border-border px-1.5 py-0.5 rounded text-fg"
+                  >
+                    {col}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {showSample && sampleRows.length > 0 && (
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-medium text-muted">Primeras filas (muestra)</label>
+              <div className="border border-border rounded overflow-x-auto max-h-40 text-[10px] font-mono bg-surface">
+                <table className="w-full text-left border-collapse">
+                  <thead className="bg-bg border-b border-border">
+                    <tr>
+                      {columns.slice(0, 5).map(c => (
+                        <th key={c} className="p-1 border-r border-border last:border-r-0 whitespace-nowrap">{c}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sampleRows.map((r, i) => (
+                      <tr key={i} className="border-b border-border last:border-b-0">
+                        {columns.slice(0, 5).map(c => (
+                          <td key={c} className="p-1 border-r border-border last:border-r-0 whitespace-nowrap truncate max-w-[100px]">
+                            {String(r[c] ?? '')}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface NodeInspectorProps {
   nodes: Node[];
@@ -372,6 +594,28 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               </select>
             </div>
 
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              className="w-full gap-2 text-xs font-medium border-accent/40 text-accent hover:bg-accent/10 mt-1"
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent('preview-export-node', {
+                    detail: {
+                      id: node.id,
+                      label: node.data?.label || 'Exportar',
+                      fileName: node.data?.fileName,
+                      format: node.data?.format
+                    }
+                  })
+                );
+              }}
+            >
+              <Eye size={14} />
+              <span>Previsualizar datos exportados</span>
+            </Button>
+
             <div className="space-y-1.5 mt-2">
               <label className="text-xs font-medium">Ruta de Colección (Array Base)</label>
               <Input 
@@ -431,6 +675,55 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               ))
             }
           </>
+        )}
+
+        {(node.type === 'timer' || node.type === 'delay') && (
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Tiempo de pausa</label>
+              <div className="flex gap-2">
+                <Input 
+                  type="number"
+                  min="1"
+                  className="w-24"
+                  value={(node.data?.duration as number | undefined) ?? 10}
+                  onChange={(e) => updateNodeData('duration', Math.max(1, parseFloat(e.target.value) || 1))}
+                />
+                <select
+                  className="flex flex-1 min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
+                  value={node.data?.unit as string || 'seconds'}
+                  onChange={(e) => updateNodeData('unit', e.target.value)}
+                >
+                  <option value="seconds">Segundos</option>
+                  <option value="minutes">Minutos</option>
+                  <option value="hours">Horas</option>
+                </select>
+              </div>
+              <p className="text-[10px] text-muted">
+                El flujo pausará su ciclo en este punto durante el tiempo configurado y luego continuará automáticamente hacia los nodos conectados.
+              </p>
+            </div>
+
+            <div className="p-3 bg-bg rounded-sm border border-border flex items-center gap-2 text-xs">
+              <Clock size={16} className="text-amber-500 shrink-0" />
+              <span>
+                Tiempo efectivo:{' '}
+                <strong className="text-fg">
+                  {(() => {
+                    const dur = parseFloat(node.data?.duration as any ?? 10) || 10;
+                    const u = (node.data?.unit as string) || 'seconds';
+                    const sec = u === 'minutes' ? dur * 60 : u === 'hours' ? dur * 3600 : dur;
+                    if (sec >= 60) return `${Math.floor(sec / 60)} min ${sec % 60} s (${sec}s)`;
+                    return `${sec} segundos`;
+                  })()}
+                </strong>
+              </span>
+            </div>
+          </div>
+        )}
+
+        {(node.type === 'dataSource' || node.type === 'fileSource') && (
+          <DataSourceInspector node={node} updateNodeData={updateNodeData} />
         )}
 
         <div className="mt-8 pt-4 border-t border-border">

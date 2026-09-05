@@ -22,6 +22,8 @@ out/
 # Databases & local state
 data/
 backend/data/
+backend/uploads/
+.agents/
 *.db
 *.sqlite
 *.sqlite3

@@ -1,12 +1,14 @@
 import React from 'react';
-import { Play, Globe, Code, FileOutput, ArrowRight, Database } from 'lucide-react';
+import { Play, Globe, Code, FileOutput, Database, Clock, FileSpreadsheet } from 'lucide-react';
 
 const NODE_TEMPLATES = [
   { type: 'start', label: 'Inicio de flujo', icon: Play, desc: 'Punto de entrada' },
   { type: 'httpRequest', label: 'HTTP Request', icon: Globe, desc: 'Petición HTTP personalizable' },
+  { type: 'dataSource', label: 'Obtener datos', icon: FileSpreadsheet, desc: 'Cargar desde Excel o CSV' },
+  { type: 'timer', label: 'Temporizador', icon: Clock, desc: 'Pausar ciclo por tiempo' },
+  { type: 'query', label: 'Consulta DB', icon: Database, desc: 'Ejecutar consulta SQL' },
   { type: 'scraping', label: 'Web Scraping', icon: Code, desc: 'Extraer HTML/XML' },
   { type: 'export', label: 'Exportar CSV/Excel', icon: FileOutput, desc: 'Generar archivo' },
-  { type: 'query', label: 'Consulta DB', icon: Database, desc: 'Ejecutar consulta SQL' },
 ];
 
 export function NodeLibrary() {

@@ -76,6 +76,7 @@ function startCronJob(schedule: any) {
             const io = getIo();
             io.emit('flow-export-ready', {
               flowId: schedule.target_id,
+              source: 'scheduler',
               fileName,
               downloadUrl: `/api/files/${fileName}`,
               records: exportResult.records,

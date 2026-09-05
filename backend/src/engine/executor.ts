@@ -5,6 +5,7 @@ import fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import mssql from 'mssql';
 import ExcelJS from 'exceljs';
+import { parseExcelOrCsvFile } from '../routes/files.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -118,7 +119,18 @@ export async function executeFlowEngine(
               notifyProgress(node.id, 'running');
               
               const delayMs = node.type === 'start' ? 150 : 800;
-              await new Promise(r => setTimeout(r, delayMs));
+              await new Promise<void>((res, rej) => {
+                if (abortController.signal.aborted) {
+                  return rej(new Error('Ejecución detenida por el usuario'));
+                }
+                const t = setTimeout(res, delayMs);
+                const onAbort = () => {
+                  clearTimeout(t);
+                  abortController.signal.removeEventListener('abort', onAbort);
+                  rej(new Error('Ejecución detenida por el usuario'));
+                };
+                abortController.signal.addEventListener('abort', onAbort, { once: true });
+              });
 
               if (abortController.signal.aborted) {
                 throw new Error('Ejecución detenida por el usuario');
@@ -141,8 +153,13 @@ export async function executeFlowEngine(
                   case 'export':
                     output = await executeExportNode(node, context);
                     break;
-                  case 'query':
-                    output = await executeQueryNode(node, context, abortController.signal);
+                  case 'timer':
+                  case 'delay':
+                    output = await executeTimerNode(node, (status, res) => notifyProgress(node.id, status, res), abortController.signal);
+                    break;
+                  case 'dataSource':
+                  case 'fileSource':
+                    output = await executeDataSourceNode(node, abortController.signal);
                     break;
                   default:
                     output = { warning: 'Unknown node type' };
@@ -587,7 +604,106 @@ async function executeExportNode(node: any, context: Record<string, any>) {
     }
   }
 
-  return { filePath, format, records: exportData.length, success: true };
+  const previewRows = exportData.slice(0, 1000);
+  const sampleHeaders = exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null
+    ? Object.keys(exportData[0])
+    : [];
+
+  return {
+    filePath,
+    format,
+    records: exportData.length,
+    success: true,
+    previewRows,
+    headers: sampleHeaders
+  };
+}
+
+// Timer / Delay Node Handler with real-time second-by-second countdown and abort support
+async function executeTimerNode(
+  node: any,
+  notify: (status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void,
+  signal?: AbortSignal
+) {
+  const durationVal = parseFloat(node.data?.duration ?? '10') || 10;
+  const unit = (node.data?.unit as string) || 'seconds';
+
+  let totalSeconds = durationVal;
+  if (unit === 'minutes') {
+    totalSeconds = Math.round(durationVal * 60);
+  } else if (unit === 'hours') {
+    totalSeconds = Math.round(durationVal * 3600);
+  }
+  totalSeconds = Math.max(1, Math.round(totalSeconds));
+
+  let remainingSeconds = totalSeconds;
+
+  // Initial progress update
+  notify('progress', { remainingSeconds, totalSeconds, elapsedSeconds: 0 });
+
+  while (remainingSeconds > 0) {
+    if (signal?.aborted) {
+      throw new Error('Ejecución detenida por el usuario');
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        return reject(new Error('Ejecución detenida por el usuario'));
+      }
+      let onAbort: (() => void) | undefined;
+      const timer = setTimeout(() => {
+        if (signal && onAbort) {
+          signal.removeEventListener('abort', onAbort);
+        }
+        resolve();
+      }, 1000);
+
+      if (signal) {
+        onAbort = () => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', onAbort!);
+          reject(new Error('Ejecución detenida por el usuario'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+
+    remainingSeconds--;
+    const elapsedSeconds = totalSeconds - remainingSeconds;
+    notify('progress', { remainingSeconds, totalSeconds, elapsedSeconds });
+  }
+
+  return {
+    totalSeconds,
+    completedAt: new Date().toISOString(),
+    success: true,
+    msg: `Pausa de ${totalSeconds}s completada`
+  };
+}
+
+// Data Source Node Handler (Loads Excel / CSV into workflow context)
+async function executeDataSourceNode(
+  node: any,
+  signal?: AbortSignal
+) {
+  if (signal?.aborted) {
+    throw new Error('Ejecución detenida por el usuario');
+  }
+
+  const rawFilePath = node.data?.filePath;
+  if (!rawFilePath) {
+    throw new Error('El nodo de origen de datos no tiene ningún archivo seleccionado.');
+  }
+
+  const fullPath = path.isAbsolute(rawFilePath) ? rawFilePath : path.join(process.cwd(), rawFilePath);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`Archivo no encontrado en el servidor: ${rawFilePath}`);
+  }
+
+  const sheetName = node.data?.sheetName as string | undefined;
+  const parsed = await parseExcelOrCsvFile(fullPath, sheetName);
+
+  return parsed.rows;
 }
 
 // Query Node Handler

@@ -133,29 +133,57 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       const { getIo } = await import('../engine/socket.js');
       const io = getIo();
       
+      // Track exported files emitted in real-time so we also include them in the final DB log
+      const realtimeExportedFiles: any[] = [];
+
       // Execute the DAG with real-time socket callbacks
       const context = await executeFlowEngine(request.params.id, (nodeId, status, result) => {
-        io.emit('flow-progress', { flowId: request.params.id, nodeId, status, result });
+        io.emit('flow-progress', { 
+          flowId: request.params.id, 
+          nodeId, 
+          status, 
+          result,
+          current: result?.current,
+          total: result?.total,
+          remainingSeconds: result?.remainingSeconds,
+          totalSeconds: result?.totalSeconds
+        });
+
+        // Emit export ready immediately when an export node finishes, so files download without waiting for other branches
+        if (status === 'completed' && result?.filePath && result?.success) {
+          const fileName = result.filePath.split(/[/\\]/).pop();
+          const info = {
+            nodeId,
+            fileName,
+            downloadUrl: `/api/files/${fileName}`,
+            records: result.records,
+            format: result.format,
+            filePath: result.filePath,
+            previewRows: result.previewRows,
+            headers: result.headers
+          };
+          realtimeExportedFiles.push(info);
+          io.emit('flow-export-ready', {
+            flowId: request.params.id,
+            ...info
+          });
+        }
       });
       const duration = Date.now() - startTime;
 
-      // Find any export output to surface the download link
+      // Ensure exportedFiles are collected for the execution logs and completion payload
       const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
-      
-      const exportedFiles = exportResults.map((exportResult: any) => {
+      const exportedFiles = realtimeExportedFiles.length > 0 ? realtimeExportedFiles : exportResults.map((exportResult: any) => {
         const fileName = exportResult.filePath.split(/[/\\]/).pop();
-        const info = {
+        return {
           fileName,
           downloadUrl: `/api/files/${fileName}`,
           records: exportResult.records,
           format: exportResult.format,
-          filePath: exportResult.filePath
+          filePath: exportResult.filePath,
+          previewRows: exportResult.previewRows,
+          headers: exportResult.headers
         };
-        io.emit('flow-export-ready', {
-          flowId: request.params.id,
-          ...info
-        });
-        return info;
       });
 
       let recordCount = 0;
