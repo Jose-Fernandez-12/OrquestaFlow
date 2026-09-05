@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
-import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2 } from 'lucide-react';
+import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2, Plus, Trash2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
 import { useAppSelector } from '../../store/hooks';
@@ -244,7 +244,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
   
   const detectedParams = React.useMemo(() => {
     if (!selectedQuery?.sql_text) return [];
-    const regex = /(?:^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
+    const regex = /(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
     const params = new Set<string>();
     let match;
     while ((match = regex.exec(selectedQuery.sql_text)) !== null) {
@@ -274,14 +274,14 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
 
   if (!node) {
     return (
-      <div className="w-[300px] bg-surface border-l border-border flex flex-col p-4 z-10 shrink-0">
+      <div className="w-[380px] bg-surface border-l border-border flex flex-col p-4 z-10 shrink-0">
         Nodo no encontrado
       </div>
     );
   }
 
   return (
-    <div className="w-[300px] bg-surface border-l border-border flex flex-col h-full z-10 shrink-0">
+    <div className="w-[380px] bg-surface border-l border-border flex flex-col h-full z-10 shrink-0">
       <div className="p-4 border-b border-border font-medium flex items-center justify-between">
         Configuración
         <span className="text-xs text-muted px-2 py-1 bg-bg rounded-sm font-mono">{node.type || 'unknown'}</span>
@@ -311,6 +311,92 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                 <option value="PATCH">PATCH</option>
                 <option value="DELETE">DELETE</option>
               </select>
+            </div>
+
+            <div className="space-y-1.5 pt-2 border-t border-border mt-3">
+              <label className="text-xs font-medium">Autenticación</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
+                value={node.data?.authType as string || 'none'}
+                onChange={(e) => updateNodeData('authType', e.target.value)}
+              >
+                <option value="none">Sin Autenticación</option>
+                <option value="bearer">Bearer Token</option>
+                <option value="basic">Basic Auth</option>
+              </select>
+
+              {node.data?.authType === 'bearer' && (
+                <div className="mt-2 space-y-1 bg-bg/50 p-2.5 rounded-sm border border-border">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[11px] font-medium text-accent">Token (Bearer)</label>
+                    <div className="flex gap-1">
+                      {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                        <JsonSelectorTrigger 
+                          key={upNode!.id} 
+                          node={upNode} 
+                          customLabel={`Mapear`} 
+                          onSelectValue={(val) => updateNodeData('authToken', val)} 
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <Input
+                    className="h-8 text-xs font-mono"
+                    value={node.data?.authToken as string || ''}
+                    onChange={(e) => updateNodeData('authToken', e.target.value)}
+                    placeholder="Token fijo o {{nodo_login.data.access_token}}"
+                  />
+                  <p className="text-[10px] text-muted">Se enviará como <code>Authorization: Bearer ...</code></p>
+                </div>
+              )}
+
+              {node.data?.authType === 'basic' && (
+                <div className="mt-2 space-y-2 bg-bg/50 p-2.5 rounded-sm border border-border">
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[11px] font-medium text-accent">Usuario</label>
+                      <div className="flex gap-1">
+                        {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                          <JsonSelectorTrigger 
+                            key={upNode!.id} 
+                            node={upNode} 
+                            customLabel={`Mapear`} 
+                            onSelectValue={(val) => updateNodeData('authUsername', val)} 
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <Input
+                      className="h-7 text-xs font-mono"
+                      value={node.data?.authUsername as string || ''}
+                      onChange={(e) => updateNodeData('authUsername', e.target.value)}
+                      placeholder="Usuario o {{nodo.user}}"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[11px] font-medium text-accent">Contraseña</label>
+                      <div className="flex gap-1">
+                        {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
+                          <JsonSelectorTrigger 
+                            key={upNode!.id} 
+                            node={upNode} 
+                            customLabel={`Mapear`} 
+                            onSelectValue={(val) => updateNodeData('authPassword', val)} 
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <Input
+                      type="password"
+                      className="h-7 text-xs font-mono"
+                      value={node.data?.authPassword as string || ''}
+                      onChange={(e) => updateNodeData('authPassword', e.target.value)}
+                      placeholder="Contraseña o {{nodo.pass}}"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-1.5 pt-2 border-t border-border mt-3">
@@ -344,7 +430,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                 </div>
               )}
             </div>
-                        <div className="space-y-1.5">
+            <div className="space-y-1.5">
               <div className="flex justify-between items-center">
                 <label className="text-xs font-medium">Endpoint URL</label>
                 <div className="flex gap-1">
@@ -355,7 +441,45 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               </div>
               <Input 
                 value={node.data?.endpoint as string || ''} 
-                onChange={(e) => updateNodeData('endpoint', e.target.value)}
+                onChange={(e) => {
+                  const newUrl = e.target.value;
+                  if (newUrl.includes('?')) {
+                    const qIndex = newUrl.indexOf('?');
+                    const baseUrl = newUrl.substring(0, qIndex);
+                    const queryString = newUrl.substring(qIndex + 1);
+                    
+                    const searchParams = new URLSearchParams(queryString);
+                    let existingParamsObj: Record<string, any> = {};
+                    try {
+                      if (node.data?.params) {
+                        existingParamsObj = JSON.parse(node.data.params as string);
+                      }
+                    } catch {}
+                    
+                    const newParamsObj = { ...existingParamsObj };
+                    searchParams.forEach((value, key) => {
+                      newParamsObj[key] = value;
+                    });
+                    
+                    setNodes(nds =>
+                      nds.map(n => {
+                        if (n.id === selectedNodeId) {
+                          return {
+                            ...n,
+                            data: {
+                              ...n.data,
+                              endpoint: baseUrl,
+                              params: JSON.stringify(newParamsObj, null, 2)
+                            }
+                          };
+                        }
+                        return n;
+                      })
+                    );
+                  } else {
+                    updateNodeData('endpoint', newUrl);
+                  }
+                }}
                 placeholder="https://api.example.com/v1/users/{{start.data.id}}"
               />
             </div>
@@ -377,22 +501,13 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
               />
             </div>
             
-            <div className="space-y-1.5">
-              <div className="flex justify-between items-center">
-                <label className="text-xs font-medium">Query Params (JSON)</label>
-                <div className="flex gap-1">
-                  {edges.filter(e => e.target === node.id).map(e => nodes.find(n => n.id === e.source)).filter(n => n && (n.type?.startsWith('http') || n.type === 'query')).map(upNode => (
-                    <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('params', ((node.data?.params as string) || '') + val)} />
-                  ))}
-                </div>
-              </div>
-              <textarea 
-                className="flex w-full min-h-[60px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
-                value={node.data?.params as string || ''}
-                onChange={(e) => updateNodeData('params', e.target.value)}
-                placeholder={'{\n  "status": "active"\n}'}
-              />
-            </div>
+            <HttpParamsEditor
+              paramsJson={node.data?.params as string || ''}
+              onChange={(newParamsJson) => updateNodeData('params', newParamsJson)}
+              node={node}
+              edges={edges}
+              nodes={nodes}
+            />
 
             {['POST', 'PUT', 'PATCH'].includes((node.data?.method as string) || 'GET') && (
               <div className="space-y-1.5">
@@ -492,7 +607,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                   {detectedParams.map(param => (
                     <div key={param} className="flex flex-col gap-1">
                       <div className="flex justify-between items-center">
-                        <label className="text-[10px] font-mono font-medium text-accent">:{param}</label>
+                        <label className="text-[10px] font-mono font-medium text-accent">#param_{param}</label>
                         <div className="flex gap-1">
                           {edges
                             .filter(e => e.target === node.id)
@@ -529,7 +644,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                 </div>
               ) : (
                 <div className="text-[10px] text-muted p-3 bg-bg border border-border rounded-sm border-dashed text-center">
-                  La consulta no requiere parámetros (:param).
+                  La consulta no requiere parámetros (#param_nombre).
                 </div>
               )}
             </div>
@@ -617,6 +732,35 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
             </Button>
 
             <div className="space-y-1.5 mt-2">
+              <label className="text-xs font-medium">Nodo Origen de Datos</label>
+              <select 
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
+                value={node.data?.sourceNodeId as string || ''}
+                onChange={(e) => {
+                  const selectedId = e.target.value;
+                  updateNodeData('sourceNodeId', selectedId);
+                  if (selectedId) {
+                    updateNodeData('dataSource', `{{${selectedId}}}`);
+                  } else {
+                    updateNodeData('dataSource', '');
+                  }
+                }}
+              >
+                <option value="">Auto-detectar (Último nodo ejecutado)</option>
+                {edges
+                  .filter(e => e.target === node.id)
+                  .map(e => nodes.find(n => n.id === e.source))
+                  .filter((n): n is Node => !!n && (n.type?.startsWith('http') || n.type === 'query'))
+                  .map(upNode => (
+                    <option key={upNode!.id} value={upNode!.id}>
+                      {(upNode!.data?.label as string) || upNode!.type} ({upNode!.id})
+                    </option>
+                  ))
+                }
+              </select>
+            </div>
+
+            <div className="space-y-1.5 mt-2">
               <label className="text-xs font-medium">Ruta de Colección (Array Base)</label>
               <Input 
                 placeholder="{{httpGet_1.data.items}}"
@@ -624,7 +768,7 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                 value={node.data?.dataSource as string || ''} 
                 onChange={(e) => updateNodeData('dataSource', e.target.value)}
               />
-              <p className="text-[10px] text-muted leading-tight">Dejar vacío para usar todo el resultado del nodo anterior.</p>
+              <p className="text-[10px] text-muted leading-tight">Dejar vacío para usar el último nodo conectado.</p>
             </div>
 
             {node.data?.format === 'Excel' && (
@@ -656,6 +800,16 @@ export function NodeInspector({ nodes, setNodes, edges, selectedNodeId }: NodeIn
                 <p className="text-[10px] text-muted leading-tight">Color de fondo en formato hex para la fila de encabezados del reporte.</p>
               </div>
             )}
+
+            <JoinMappingEditor 
+              joins={node.data?.joins as any || []}
+              onChange={joins => updateNodeData('joins', joins)}
+              upstreamNodes={edges
+                .filter(e => e.target === node.id)
+                .map(e => nodes.find(n => n.id === e.source))
+                .filter(n => !!n) as Node[]
+              }
+            />
 
             <ColumnMappingEditor 
               columns={node.data?.columns as any || []}
@@ -758,6 +912,44 @@ function truncateArrays(obj: any): any {
   return obj;
 }
 
+function extractExportableSample(data: any): any {
+  if (!data) return null;
+  if (!Array.isArray(data)) {
+    if (typeof data === 'object' && data !== null) {
+      if (Array.isArray(data.data) && data.data.length > 0) {
+        return extractExportableSample(data.data);
+      }
+      if (Array.isArray(data.rows) && data.rows.length > 0) {
+        return extractExportableSample(data.rows);
+      }
+      if (Array.isArray(data.items) && data.items.length > 0) {
+        return extractExportableSample(data.items);
+      }
+      return data;
+    }
+    return data;
+  }
+  const nonEmpties: any[] = [];
+  for (const item of data) {
+    if (!item) continue;
+    if (Array.isArray(item)) {
+      const sample = extractExportableSample(item);
+      if (sample) nonEmpties.push(...(Array.isArray(sample) ? sample : [sample]));
+    } else if (typeof item === 'object') {
+      if (Array.isArray(item.data) && item.data.length > 0) {
+        nonEmpties.push(...item.data);
+      } else if (Array.isArray(item.rows) && item.rows.length > 0) {
+        nonEmpties.push(...item.rows);
+      } else if (Array.isArray(item.items) && item.items.length > 0) {
+        nonEmpties.push(...item.items);
+      } else if (Object.keys(item).length > 0 && !item.data) {
+        nonEmpties.push(item);
+      }
+    }
+  }
+  return nonEmpties.length > 0 ? nonEmpties : data;
+}
+
 function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValue, customLabel }: { node: any, forExportNode?: any, updateNodeData?: (key: string, val: any) => void, onSelectValue?: (val: string) => void, customLabel?: string }) {
   const [isOpen, setIsOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState('');
@@ -784,11 +976,14 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValu
     
     // 1. Usar resultado en caché de Redux (si el flujo ya se ejecutó recientemente)
     if (cachedResult) {
+      let resultToDisplay = cachedResult;
       if (node.type === 'query') {
-        setJsonData(truncateArrays(cachedResult.rows || cachedResult.data?.rows || cachedResult));
-      } else {
-        setJsonData(truncateArrays(cachedResult));
+        resultToDisplay = cachedResult.rows || cachedResult.data?.rows || cachedResult;
       }
+      if (isMultiSelect) {
+        resultToDisplay = extractExportableSample(resultToDisplay);
+      }
+      setJsonData(truncateArrays(resultToDisplay));
       return;
     }
     
@@ -869,11 +1064,14 @@ function JsonSelectorTrigger({ node, forExportNode, updateNodeData, onSelectValu
       const text = await res.text();
       try {
         const parsed = JSON.parse(text);
+        let resultToDisplay = parsed;
         if (node.type === 'query') {
-          setJsonData(truncateArrays(parsed.data?.rows || []));
-        } else {
-          setJsonData(truncateArrays(parsed));
+          resultToDisplay = parsed.data?.rows || [];
         }
+        if (isMultiSelect) {
+          resultToDisplay = extractExportableSample(resultToDisplay);
+        }
+        setJsonData(truncateArrays(resultToDisplay));
       } catch (e) {
         setJsonData({ textResponse: text.slice(0, 500) + '...' });
       }
@@ -1132,6 +1330,244 @@ function ColumnMappingEditor({ columns, onChange }: { columns: { header: string,
           {(!columns || columns.length === 0) && (
             <div className="text-[10px] text-muted text-center py-4 bg-bg rounded-sm border border-border border-dashed">
               Sin mapeo. Se exportarán todos los campos.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HttpParamsEditor({
+  paramsJson,
+  onChange,
+  node,
+  edges,
+  nodes
+}: {
+  paramsJson: string;
+  onChange: (newJson: string) => void;
+  node: Node;
+  edges: Edge[];
+  nodes: Node[];
+}) {
+  const [showRaw, setShowRaw] = useState(false);
+  const [newKey, setNewKey] = useState('');
+
+  const paramsObj = React.useMemo(() => {
+    try {
+      if (!paramsJson || !paramsJson.trim()) return {};
+      const parsed = JSON.parse(paramsJson);
+      return typeof parsed === 'object' && parsed !== null ? parsed : {};
+    } catch {
+      return {};
+    }
+  }, [paramsJson]);
+
+  const updateParamValue = (key: string, value: any) => {
+    const updated = { ...paramsObj, [key]: value };
+    onChange(JSON.stringify(updated, null, 2));
+  };
+
+  const removeParam = (key: string) => {
+    const updated = { ...paramsObj };
+    delete updated[key];
+    onChange(Object.keys(updated).length === 0 ? '' : JSON.stringify(updated, null, 2));
+  };
+
+  const addParam = () => {
+    const keyToAdd = newKey.trim() || `param_${Object.keys(paramsObj).length + 1}`;
+    const updated = { ...paramsObj, [keyToAdd]: '' };
+    onChange(JSON.stringify(updated, null, 2));
+    setNewKey('');
+  };
+
+  const paramEntries = Object.entries(paramsObj);
+  const upstreamNodes = edges
+    .filter(e => e.target === node.id)
+    .map(e => nodes.find(n => n.id === e.source))
+    .filter((n): n is Node => !!n && (n.type?.startsWith('http') || n.type === 'query'));
+
+  return (
+    <div className="space-y-2 border-t border-border pt-3 mt-2">
+      <div className="flex justify-between items-center">
+        <label className="text-xs font-medium">Parámetros de Consulta (Query Params)</label>
+        <button
+          type="button"
+          onClick={() => setShowRaw(!showRaw)}
+          className="text-[10px] text-accent hover:underline font-mono"
+        >
+          {showRaw ? 'Vista Guiada' : 'Ver JSON'}
+        </button>
+      </div>
+
+      {showRaw ? (
+        <textarea
+          className="flex w-full min-h-[70px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
+          value={paramsJson}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={'{\n  "idEds": "94",\n  "estadoRegistro": "A"\n}'}
+        />
+      ) : (
+        <div className="space-y-2 border border-border rounded-sm p-2.5 bg-bg/50">
+          {paramEntries.length > 0 ? (
+            paramEntries.map(([key, val]) => (
+              <div key={key} className="flex flex-col gap-1 pb-2 border-b border-border/50 last:border-0 last:pb-0">
+                <div className="flex justify-between items-center gap-1">
+                  <span className="text-[11px] font-mono font-semibold text-accent truncate max-w-[140px]" title={key}>
+                    {key}
+                  </span>
+                  <div className="flex gap-1 items-center">
+                    {upstreamNodes.map(upNode => (
+                      <JsonSelectorTrigger
+                        key={upNode.id}
+                        node={upNode}
+                        customLabel={`Mapear desde ${upNode.data?.label || upNode.type}`}
+                        onSelectValue={(mappedVal) => updateParamValue(key, mappedVal)}
+                      />
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => removeParam(key)}
+                      className="text-muted hover:text-danger p-0.5"
+                      title="Eliminar parámetro"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
+                <Input
+                  className="h-7 text-xs font-mono"
+                  value={typeof val === 'string' ? val : JSON.stringify(val)}
+                  onChange={(e) => updateParamValue(key, e.target.value)}
+                  placeholder="Valor o {{nodo_1.data.id}}"
+                />
+              </div>
+            ))
+          ) : (
+            <div className="text-[10px] text-muted text-center py-2 leading-relaxed">
+              No hay parámetros. Pega una URL con <code className="text-accent font-mono">?key=val</code> o agrega un parámetro abajo.
+            </div>
+          )}
+
+          <div className="flex gap-1.5 pt-1.5 border-t border-border/50">
+            <Input
+              className="h-7 text-xs font-mono flex-1"
+              placeholder="Nombre del parámetro..."
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addParam();
+                }
+              }}
+            />
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              className="h-7 px-2 text-xs shrink-0 flex items-center gap-1"
+              onClick={addParam}
+            >
+              <Plus size={12} />
+              Agregar
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JoinMappingEditor({ joins, onChange, upstreamNodes }: { joins: { nodeId: string, localKey: string, foreignKey: string }[], onChange: (joins: any) => void, upstreamNodes: Node[] }) {
+  const [collapsed, setCollapsed] = useState(false);
+
+  const addJoin = () => {
+    onChange([...(joins || []), { nodeId: '', localKey: '', foreignKey: '' }]);
+  };
+
+  const updateJoin = (index: number, field: 'nodeId' | 'localKey' | 'foreignKey', value: string) => {
+    const newJoins = [...(joins || [])];
+    newJoins[index] = { ...newJoins[index], [field]: value };
+    onChange(newJoins);
+  };
+
+  const removeJoin = (index: number) => {
+    const newJoins = [...(joins || [])];
+    newJoins.splice(index, 1);
+    onChange(newJoins);
+  };
+
+  const count = (joins || []).length;
+
+  return (
+    <div className="space-y-2 mt-4 pt-4 border-t border-border">
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setCollapsed(prev => !prev)}
+          className="flex items-center gap-1.5 text-xs font-medium hover:text-accent transition-colors"
+        >
+          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+          Relaciones (Joins)
+          {count > 0 && (
+            <span className="ml-1 px-1.5 py-0.5 rounded-full bg-accent/15 text-accent text-[10px] font-mono leading-none">
+              {count}
+            </span>
+          )}
+        </button>
+        {!collapsed && (
+          <Button variant="default" size="sm" onClick={addJoin} className="h-6 text-[10px] px-2 py-0">
+            + Agregar
+          </Button>
+        )}
+      </div>
+
+      {!collapsed && (
+        <div className="space-y-2 max-h-[300px] overflow-y-auto pb-2">
+          {(joins || []).map((join, i) => (
+            <div key={i} className="flex gap-2 items-start bg-bg p-2 rounded-sm border border-border flex-col">
+              <div className="flex w-full items-center justify-between">
+                <select 
+                  className="flex-1 h-7 rounded-sm border border-border bg-surface px-[9px] text-xs focus-visible:outline-none focus-visible:border-accent"
+                  value={join.nodeId}
+                  onChange={e => updateJoin(i, 'nodeId', e.target.value)}
+                >
+                  <option value="">Seleccionar nodo a cruzar...</option>
+                  {upstreamNodes.map(n => (
+                    <option key={n.id} value={n.id}>{(n.data?.label as string) || n.type} ({n.id})</option>
+                  ))}
+                </select>
+                <Button variant="icon" size="icon" onClick={() => removeJoin(i)} className="text-danger hover:text-danger hover:bg-danger/10 shrink-0 ml-1">
+                  <X size={14} />
+                </Button>
+              </div>
+              <div className="flex gap-2 w-full mt-1.5">
+                <div className="flex-1">
+                  <label className="text-[10px] text-muted mb-0.5 block">Llave Local</label>
+                  <Input
+                    placeholder="ej: id_eds"
+                    className="h-7 text-xs font-mono"
+                    value={join.localKey}
+                    onChange={e => updateJoin(i, 'localKey', e.target.value)}
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="text-[10px] text-muted mb-0.5 block">Llave Externa</label>
+                  <Input
+                    placeholder="ej: IdEds"
+                    className="h-7 text-xs font-mono"
+                    value={join.foreignKey}
+                    onChange={e => updateJoin(i, 'foreignKey', e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+          {(!joins || joins.length === 0) && (
+            <div className="text-[10px] text-muted text-center py-4 bg-bg rounded-sm border border-border border-dashed px-2">
+              Sin relaciones. Útil si los IDs no coinciden entre nodos.
             </div>
           )}
         </div>

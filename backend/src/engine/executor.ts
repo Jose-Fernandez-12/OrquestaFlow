@@ -278,8 +278,12 @@ async function executeHttpNode(
         const parsed = JSON.parse(node.data.params);
         const paramsObj = resolveTemplate(localContext, parsed);
         const url = new URL(endpoint);
-        for (const [k, v] of Object.entries(paramsObj)) {
-          url.searchParams.append(k, String(v));
+        if (typeof paramsObj === 'object' && paramsObj !== null) {
+          for (const [k, v] of Object.entries(paramsObj)) {
+            if (v !== undefined && v !== null) {
+              url.searchParams.set(k, String(v));
+            }
+          }
         }
         endpoint = url.toString();
       } catch (e) {
@@ -297,6 +301,21 @@ async function executeHttpNode(
         headers = { ...headers, ...resolveTemplate(localContext, parsedHeaders) };
       } catch(e) {
         console.error('Failed to parse headers', e);
+      }
+    }
+
+    const authType = node.data?.authType;
+    if (authType === 'bearer' && node.data?.authToken) {
+      const resolvedToken = resolveTemplate(localContext, node.data.authToken);
+      if (resolvedToken) {
+        headers['Authorization'] = `Bearer ${String(resolvedToken).trim()}`;
+      }
+    } else if (authType === 'basic') {
+      const user = resolveTemplate(localContext, node.data?.authUsername || '') || '';
+      const pass = resolveTemplate(localContext, node.data?.authPassword || '') || '';
+      if (user || pass) {
+        const encoded = Buffer.from(`${user}:${pass}`).toString('base64');
+        headers['Authorization'] = `Basic ${encoded}`;
       }
     }
 
@@ -461,6 +480,40 @@ function resolveTemplate(context: Record<string, any>, value: any): any {
   return value;
 }
 
+function flattenRows(data: any): any[] {
+  if (!data) return [];
+  if (!Array.isArray(data)) {
+    if (typeof data === 'object' && data !== null) {
+      if (Array.isArray(data.rows)) return flattenRows(data.rows);
+      if (Array.isArray(data.data)) return flattenRows(data.data);
+      if (Array.isArray(data.items)) return flattenRows(data.items);
+      const arr = Object.values(data).find(v => Array.isArray(v));
+      if (arr) return flattenRows(arr);
+      return [data];
+    }
+    return [];
+  }
+
+  const result: any[] = [];
+  for (const item of data) {
+    if (!item) continue;
+    if (Array.isArray(item)) {
+      result.push(...flattenRows(item));
+    } else if (typeof item === 'object') {
+      if (Array.isArray(item.data)) {
+        result.push(...flattenRows(item.data));
+      } else if (Array.isArray(item.rows)) {
+        result.push(...flattenRows(item.rows));
+      } else if (Array.isArray(item.items)) {
+        result.push(...flattenRows(item.items));
+      } else {
+        result.push(item);
+      }
+    }
+  }
+  return result;
+}
+
 // Export Node Handler
 async function executeExportNode(node: any, context: Record<string, any>) {
   const fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0,10)}`;
@@ -468,61 +521,124 @@ async function executeExportNode(node: any, context: Record<string, any>) {
   const dataSource = node.data?.dataSource as string | undefined;
   const columns = node.data?.columns as { header: string, key: string }[] | undefined;
 
-  let baseData: any[] = [];
+  let rawData: any = null;
 
-  if (dataSource) {
-    // Resolve variable: strip {{ }} wrapper
+  if (dataSource && dataSource.trim() !== '') {
     const match = dataSource.match(/^\{\{(.+)\}\}$/);
     const pathStr = match ? match[1] : dataSource;
-    const resolved = resolvePath(context, pathStr);
-
-    if (Array.isArray(resolved)) {
-      baseData = resolved;
-    } else if (resolved && typeof resolved === 'object') {
-      // If it's not an array but an object, try to find an array inside it
-      const arrVal = Object.values(resolved).find(v => Array.isArray(v));
-      baseData = arrVal ? (arrVal as any[]) : [resolved];
-    } else {
-      baseData = [];
-    }
+    rawData = resolvePath(context, pathStr);
   } else {
-    // No dataSource configured: auto-detect from upstream context values
-    // Look for the first array (likely the HTTP GET response)
-    for (const ctxVal of Object.values(context)) {
-      if (Array.isArray(ctxVal) && ctxVal.length > 0) {
-        baseData = ctxVal;
+    // Auto-detect: reverse context keys to prioritize the latest executed upstream node (HTTP Request)
+    const contextKeys = Object.keys(context).reverse();
+    for (const key of contextKeys) {
+      if (key.startsWith('start')) continue;
+      const val = context[key];
+      if (val !== undefined && val !== null) {
+        rawData = val;
         break;
       }
-      // If the value is an object, check one level deep for arrays
-      if (ctxVal && typeof ctxVal === 'object') {
-        const nested = Object.values(ctxVal).find(v => Array.isArray(v));
-        if (nested) {
-          baseData = nested as any[];
-          break;
-        }
-      }
-    }
-    // Last resort: flatten all context values
-    if (baseData.length === 0) {
-      baseData = Object.values(context);
     }
   }
+
+  let baseDataWrapped: { item: any, rootIndex: number }[] = [];
+  if (Array.isArray(rawData)) {
+      rawData.forEach((rootItem, idx) => {
+          const flat = flattenRows(rootItem);
+          baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: idx })));
+      });
+  } else {
+      const flat = flattenRows(rawData);
+      baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: 0 })));
+  }
+
+  const baseData = baseDataWrapped.map(w => w.item);
 
   // Apply column mapping if defined
   let exportData: any[] = baseData;
   if (columns && columns.length > 0 && Array.isArray(baseData)) {
-    exportData = baseData.map(item => {
+    exportData = baseDataWrapped.map((wrappedItem, itemIndex) => {
+      const { item, rootIndex } = wrappedItem;
       const row: Record<string, any> = {};
       for (const col of columns) {
         if (col.header && col.key) {
-          // Resolve dot-notation key on item
-          const parts = col.key.split('.');
-          let val: any = item;
-          for (const part of parts) {
-            if (val === undefined || val === null) break;
-            val = val[part];
+          if (col.key.includes('{{') && col.key.includes('}}')) {
+             row[col.header] = resolveTemplate({ ...context, _item: item, _index: itemIndex }, col.key) ?? '';
+          } else {
+            // Resolve dot-notation key on item
+            const parts = col.key.split('.');
+            let val: any = item;
+            for (const part of parts) {
+              if (val === undefined || val === null) break;
+              val = val[part];
+            }
+            
+            // Fallback 1: Resolve as a direct path in the global context
+            if (val === undefined || val === null) {
+              val = resolvePath(context, col.key);
+            }
+            
+            // Fallback 2: Smart resolution across other node results for flat keys
+            if (val === undefined || val === null) {
+               for (const [nodeId, nodeResult] of Object.entries(context)) {
+                  if (nodeId === 'start') continue;
+                  if (Array.isArray(nodeResult)) {
+                      let rowMatch: any = null;
+                      let manualJoinAttempted = false;
+                      const joins = node.data?.joins as { nodeId: string, localKey: string, foreignKey: string }[] | undefined;
+                      const explicitJoin = joins?.find(j => j.nodeId === nodeId);
+                      
+                      if (explicitJoin && explicitJoin.localKey && explicitJoin.foreignKey) {
+                          manualJoinAttempted = true;
+                          
+                          // Find actual local key (case-insensitive)
+                          const localKeyActual = Object.keys(item).find(k => k.toLowerCase() === explicitJoin.localKey.toLowerCase());
+                          
+                          if (localKeyActual && item[localKeyActual] !== undefined && item[localKeyActual] !== null) {
+                              rowMatch = nodeResult.find((r: any) => {
+                                  // Find actual foreign key (case-insensitive)
+                                  const foreignKeyActual = Object.keys(r).find(k => k.toLowerCase() === explicitJoin.foreignKey.toLowerCase());
+                                  return foreignKeyActual && String(r[foreignKeyActual]) === String(item[localKeyActual]);
+                              });
+                          }
+                      } else if (nodeResult.length > 0 && typeof nodeResult[0] === 'object' && typeof item === 'object') {
+                          // Smart Relational Join: try to find a common ID key between the item and nodeResult
+                          const itemKeys = Object.keys(item);
+                          const foreignKeys = Object.keys(nodeResult[0]);
+                          // Find common keys that likely represent IDs
+                          const commonKeys = itemKeys.filter(k => 
+                              foreignKeys.some(fk => fk.toLowerCase() === k.toLowerCase())
+                          );
+                          
+                          // Prefer keys that have 'id' or 'code' in their name
+                          const bestKeyItem = commonKeys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('code')) || commonKeys[0];
+                          
+                          if (bestKeyItem && item[bestKeyItem] !== undefined && item[bestKeyItem] !== null) {
+                              const bestKeyForeign = foreignKeys.find(fk => fk.toLowerCase() === bestKeyItem.toLowerCase())!;
+                              // Find the row where the IDs match
+                              rowMatch = nodeResult.find((r: any) => String(r[bestKeyForeign]) === String(item[bestKeyItem]));
+                          }
+                      }
+
+                      // Try to match by index if relational join failed
+                      if (!rowMatch && !manualJoinAttempted) {
+                          rowMatch = nodeResult[rootIndex];
+                      }
+
+                      if (rowMatch && typeof rowMatch === 'object' && col.key in rowMatch) {
+                          val = rowMatch[col.key];
+                          break;
+                      }
+                  } else if (nodeResult && typeof nodeResult === 'object') {
+                      if (col.key in nodeResult) {
+                          val = nodeResult[col.key];
+                          break;
+                      }
+                  }
+               }
+            }
+
+            row[col.header] = val ?? '';
           }
-          row[col.header] = val ?? '';
         }
       }
       return row;
@@ -561,21 +677,15 @@ async function executeExportNode(node: any, context: Record<string, any>) {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
         cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
         cell.alignment = { vertical: 'middle', horizontal: 'left' };
-        cell.border = { bottom: { style: 'medium', color: { argb: 'FF6366F1' } } };
       });
 
-      // Add data rows - plain, no background color (except first column if specified)
+      // Add data rows - plain, no background color
       exportData.forEach(row => {
         const dataRow = sheet.addRow(headers.map(h => {
           const v = row[h];
           return (v === null || v === undefined) ? '' : v;
         }));
         dataRow.height = 18;
-        
-        if (parsedColor) {
-          const firstCell = dataRow.getCell(1);
-          firstCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` } };
-        }
       });
     }
 
