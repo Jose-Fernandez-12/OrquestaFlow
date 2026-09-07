@@ -5,6 +5,7 @@ import fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import mssql from 'mssql';
 import ExcelJS from 'exceljs';
+import { parseExcelOrCsvFile } from '../routes/files.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -74,7 +75,21 @@ export async function executeFlowEngine(
     adjList[node.id] = [];
   });
 
-  edges.forEach(edge => {
+  // Normalize edges: if an edge connects A -> B, but A references B in its configuration,
+  // the edge was connected backwards and B must execute before A.
+  const normalizedEdges = edges.map(edge => {
+    const srcNode = nodes.find(n => n.id === edge.source);
+    const tgtNode = nodes.find(n => n.id === edge.target);
+    if (srcNode && tgtNode) {
+      const srcConfigStr = JSON.stringify(srcNode.data || {});
+      if (srcConfigStr.includes(tgtNode.id)) {
+        return { ...edge, source: tgtNode.id, target: srcNode.id };
+      }
+    }
+    return edge;
+  });
+
+  normalizedEdges.forEach(edge => {
     if (adjList[edge.source]) {
       adjList[edge.source].push(edge.target);
       inDegree[edge.target] = (inDegree[edge.target] || 0) + 1;
@@ -118,7 +133,18 @@ export async function executeFlowEngine(
               notifyProgress(node.id, 'running');
               
               const delayMs = node.type === 'start' ? 150 : 800;
-              await new Promise(r => setTimeout(r, delayMs));
+              await new Promise<void>((res, rej) => {
+                if (abortController.signal.aborted) {
+                  return rej(new Error('Ejecución detenida por el usuario'));
+                }
+                const t = setTimeout(res, delayMs);
+                const onAbort = () => {
+                  clearTimeout(t);
+                  abortController.signal.removeEventListener('abort', onAbort);
+                  rej(new Error('Ejecución detenida por el usuario'));
+                };
+                abortController.signal.addEventListener('abort', onAbort, { once: true });
+              });
 
               if (abortController.signal.aborted) {
                 throw new Error('Ejecución detenida por el usuario');
@@ -143,6 +169,20 @@ export async function executeFlowEngine(
                     break;
                   case 'query':
                     output = await executeQueryNode(node, context, abortController.signal);
+                    break;
+                  case 'timer':
+                  case 'delay':
+                    output = await executeTimerNode(node, (status, res) => notifyProgress(node.id, status, res), abortController.signal);
+                    {
+                      const timerUpstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+                      if (timerUpstreamIds.length > 0 && context[timerUpstreamIds[0]]) {
+                        output = context[timerUpstreamIds[0]];
+                      }
+                    }
+                    break;
+                  case 'dataSource':
+                  case 'fileSource':
+                    output = await executeDataSourceNode(node, context, abortController.signal, edges, nodes);
                     break;
                   default:
                     output = { warning: 'Unknown node type' };
@@ -261,8 +301,12 @@ async function executeHttpNode(
         const parsed = JSON.parse(node.data.params);
         const paramsObj = resolveTemplate(localContext, parsed);
         const url = new URL(endpoint);
-        for (const [k, v] of Object.entries(paramsObj)) {
-          url.searchParams.append(k, String(v));
+        if (typeof paramsObj === 'object' && paramsObj !== null) {
+          for (const [k, v] of Object.entries(paramsObj)) {
+            if (v !== undefined && v !== null) {
+              url.searchParams.set(k, String(v));
+            }
+          }
         }
         endpoint = url.toString();
       } catch (e) {
@@ -283,7 +327,30 @@ async function executeHttpNode(
       }
     }
 
-    const options: RequestInit = { method, headers, signal };
+    const authType = node.data?.authType;
+    if (authType === 'bearer' && node.data?.authToken) {
+      const resolvedToken = resolveTemplate(localContext, node.data.authToken);
+      if (resolvedToken) {
+        headers['Authorization'] = `Bearer ${String(resolvedToken).trim()}`;
+      }
+    } else if (authType === 'basic') {
+      const user = resolveTemplate(localContext, node.data?.authUsername || '') || '';
+      const pass = resolveTemplate(localContext, node.data?.authPassword || '') || '';
+      if (user || pass) {
+        const encoded = Buffer.from(`${user}:${pass}`).toString('base64');
+        headers['Authorization'] = `Basic ${encoded}`;
+      }
+    }
+
+    // Combine user abort signal with a 30-second timeout
+    const fetchController = new AbortController();
+    const timeoutId = setTimeout(() => fetchController.abort(new Error('Timeout de 30 segundos agotado')), 30000);
+    
+    if (signal) {
+      signal.addEventListener('abort', () => fetchController.abort(new Error('Ejecución detenida por el usuario')), { once: true });
+    }
+
+    const options: RequestInit = { method, headers, signal: fetchController.signal };
 
     if (['POST', 'PUT', 'PATCH'].includes(method)) {
       if (node.data?.body && node.data.body.trim() !== '') {
@@ -308,16 +375,54 @@ async function executeHttpNode(
       }
     }
 
-    const response = await fetch(endpoint, options);
+    let response;
+    try {
+      response = await fetch(endpoint, options);
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      throw new Error(`HTTP Request falló: ${err.message}`);
+    }
+    clearTimeout(timeoutId);
+
     if (!response.ok) {
       throw new Error(`HTTP Request failed with status ${response.status}`);
     }
 
     const text = await response.text();
     try {
-      results.push(JSON.parse(text));
+      const parsed = JSON.parse(text);
+      let finalResult = parsed;
+      if (node.data?.extractPath) {
+        const pathParts = node.data.extractPath.split('.');
+        let extracted = parsed;
+        for (const part of pathParts) {
+          if (extracted && typeof extracted === 'object' && part in extracted) {
+            extracted = extracted[part];
+          } else {
+            extracted = undefined;
+            break;
+          }
+        }
+        if (extracted !== undefined) {
+          finalResult = extracted;
+        }
+      }
+
+      if (itemsToIterate.length > 1 || iterateOver) {
+        if (Array.isArray(finalResult)) {
+          results.push(...finalResult);
+        } else {
+          results.push(finalResult);
+        }
+      } else {
+        return finalResult;
+      }
     } catch {
-      results.push({ text });
+      if (itemsToIterate.length > 1 || iterateOver) {
+        results.push({ text });
+      } else {
+        return { text };
+      }
     }
     
     // Report progress
@@ -326,8 +431,7 @@ async function executeHttpNode(
     }
   }
 
-  // Return single response if not iterating, or array if iterating
-  return itemsToIterate.length > 1 || iterateOver ? results : results[0];
+  return results;
 }
 
 // Scraping Node Handler (spawns Python script if configured)
@@ -444,6 +548,45 @@ function resolveTemplate(context: Record<string, any>, value: any): any {
   return value;
 }
 
+function flattenRows(data: any): any[] {
+  if (!data) return [];
+  if (!Array.isArray(data)) {
+    if (typeof data === 'object' && data !== null) {
+      if (Array.isArray(data.rows)) return flattenRows(data.rows);
+      if (Array.isArray(data.data)) return flattenRows(data.data);
+      if (Array.isArray(data.items)) return flattenRows(data.items);
+      if (data.data && typeof data.data === 'object' && Object.keys(data.data).length > 0) {
+        return [data.data];
+      }
+      const arr = Object.values(data).find(v => Array.isArray(v));
+      if (arr) return flattenRows(arr);
+      return [data];
+    }
+    return [];
+  }
+
+  const result: any[] = [];
+  for (const item of data) {
+    if (!item) continue;
+    if (Array.isArray(item)) {
+      result.push(...flattenRows(item));
+    } else if (typeof item === 'object') {
+      if (Array.isArray(item.data)) {
+        result.push(...flattenRows(item.data));
+      } else if (Array.isArray(item.rows)) {
+        result.push(...flattenRows(item.rows));
+      } else if (Array.isArray(item.items)) {
+        result.push(...flattenRows(item.items));
+      } else if (item.data && typeof item.data === 'object' && Object.keys(item.data).length > 0) {
+        result.push({ ...item.data });
+      } else {
+        result.push(item);
+      }
+    }
+  }
+  return result;
+}
+
 // Export Node Handler
 async function executeExportNode(node: any, context: Record<string, any>) {
   const fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0,10)}`;
@@ -451,61 +594,124 @@ async function executeExportNode(node: any, context: Record<string, any>) {
   const dataSource = node.data?.dataSource as string | undefined;
   const columns = node.data?.columns as { header: string, key: string }[] | undefined;
 
-  let baseData: any[] = [];
+  let rawData: any = null;
 
-  if (dataSource) {
-    // Resolve variable: strip {{ }} wrapper
+  if (dataSource && dataSource.trim() !== '') {
     const match = dataSource.match(/^\{\{(.+)\}\}$/);
     const pathStr = match ? match[1] : dataSource;
-    const resolved = resolvePath(context, pathStr);
-
-    if (Array.isArray(resolved)) {
-      baseData = resolved;
-    } else if (resolved && typeof resolved === 'object') {
-      // If it's not an array but an object, try to find an array inside it
-      const arrVal = Object.values(resolved).find(v => Array.isArray(v));
-      baseData = arrVal ? (arrVal as any[]) : [resolved];
-    } else {
-      baseData = [];
-    }
+    rawData = resolvePath(context, pathStr);
   } else {
-    // No dataSource configured: auto-detect from upstream context values
-    // Look for the first array (likely the HTTP GET response)
-    for (const ctxVal of Object.values(context)) {
-      if (Array.isArray(ctxVal) && ctxVal.length > 0) {
-        baseData = ctxVal;
+    // Auto-detect: reverse context keys to prioritize the latest executed upstream node (HTTP Request)
+    const contextKeys = Object.keys(context).reverse();
+    for (const key of contextKeys) {
+      if (key.startsWith('start')) continue;
+      const val = context[key];
+      if (val !== undefined && val !== null) {
+        rawData = val;
         break;
       }
-      // If the value is an object, check one level deep for arrays
-      if (ctxVal && typeof ctxVal === 'object') {
-        const nested = Object.values(ctxVal).find(v => Array.isArray(v));
-        if (nested) {
-          baseData = nested as any[];
-          break;
-        }
-      }
-    }
-    // Last resort: flatten all context values
-    if (baseData.length === 0) {
-      baseData = Object.values(context);
     }
   }
+
+  let baseDataWrapped: { item: any, rootIndex: number }[] = [];
+  if (Array.isArray(rawData)) {
+      rawData.forEach((rootItem, idx) => {
+          const flat = flattenRows(rootItem);
+          baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: idx })));
+      });
+  } else {
+      const flat = flattenRows(rawData);
+      baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: 0 })));
+  }
+
+  const baseData = baseDataWrapped.map(w => w.item);
 
   // Apply column mapping if defined
   let exportData: any[] = baseData;
   if (columns && columns.length > 0 && Array.isArray(baseData)) {
-    exportData = baseData.map(item => {
+    exportData = baseDataWrapped.map((wrappedItem, itemIndex) => {
+      const { item, rootIndex } = wrappedItem;
       const row: Record<string, any> = {};
       for (const col of columns) {
         if (col.header && col.key) {
-          // Resolve dot-notation key on item
-          const parts = col.key.split('.');
-          let val: any = item;
-          for (const part of parts) {
-            if (val === undefined || val === null) break;
-            val = val[part];
+          if (col.key.includes('{{') && col.key.includes('}}')) {
+             row[col.header] = resolveTemplate({ ...context, _item: item, _index: itemIndex }, col.key) ?? '';
+          } else {
+            // Resolve dot-notation key on item
+            const parts = col.key.split('.');
+            let val: any = item;
+            for (const part of parts) {
+              if (val === undefined || val === null) break;
+              val = val[part];
+            }
+            
+            // Fallback 1: Resolve as a direct path in the global context
+            if (val === undefined || val === null) {
+              val = resolvePath(context, col.key);
+            }
+            
+            // Fallback 2: Smart resolution across other node results for flat keys
+            if (val === undefined || val === null) {
+               for (const [nodeId, nodeResult] of Object.entries(context)) {
+                  if (nodeId === 'start') continue;
+                  if (Array.isArray(nodeResult)) {
+                      let rowMatch: any = null;
+                      let manualJoinAttempted = false;
+                      const joins = node.data?.joins as { nodeId: string, localKey: string, foreignKey: string }[] | undefined;
+                      const explicitJoin = joins?.find(j => j.nodeId === nodeId);
+                      
+                      if (explicitJoin && explicitJoin.localKey && explicitJoin.foreignKey) {
+                          manualJoinAttempted = true;
+                          
+                          // Find actual local key (case-insensitive)
+                          const localKeyActual = Object.keys(item).find(k => k.toLowerCase() === explicitJoin.localKey.toLowerCase());
+                          
+                          if (localKeyActual && item[localKeyActual] !== undefined && item[localKeyActual] !== null) {
+                              rowMatch = nodeResult.find((r: any) => {
+                                  // Find actual foreign key (case-insensitive)
+                                  const foreignKeyActual = Object.keys(r).find(k => k.toLowerCase() === explicitJoin.foreignKey.toLowerCase());
+                                  return foreignKeyActual && String(r[foreignKeyActual]) === String(item[localKeyActual]);
+                              });
+                          }
+                      } else if (nodeResult.length > 0 && typeof nodeResult[0] === 'object' && typeof item === 'object') {
+                          // Smart Relational Join: try to find a common ID key between the item and nodeResult
+                          const itemKeys = Object.keys(item);
+                          const foreignKeys = Object.keys(nodeResult[0]);
+                          // Find common keys that likely represent IDs
+                          const commonKeys = itemKeys.filter(k => 
+                              foreignKeys.some(fk => fk.toLowerCase() === k.toLowerCase())
+                          );
+                          
+                          // Prefer keys that have 'id' or 'code' in their name
+                          const bestKeyItem = commonKeys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('code')) || commonKeys[0];
+                          
+                          if (bestKeyItem && item[bestKeyItem] !== undefined && item[bestKeyItem] !== null) {
+                              const bestKeyForeign = foreignKeys.find(fk => fk.toLowerCase() === bestKeyItem.toLowerCase())!;
+                              // Find the row where the IDs match
+                              rowMatch = nodeResult.find((r: any) => String(r[bestKeyForeign]) === String(item[bestKeyItem]));
+                          }
+                      }
+
+                      // Try to match by index if relational join failed
+                      if (!rowMatch && !manualJoinAttempted) {
+                          rowMatch = nodeResult[rootIndex];
+                      }
+
+                      if (rowMatch && typeof rowMatch === 'object' && col.key in rowMatch) {
+                          val = rowMatch[col.key];
+                          break;
+                      }
+                  } else if (nodeResult && typeof nodeResult === 'object') {
+                      if (col.key in nodeResult) {
+                          val = nodeResult[col.key];
+                          break;
+                      }
+                  }
+               }
+            }
+
+            row[col.header] = val ?? '';
           }
-          row[col.header] = val ?? '';
         }
       }
       return row;
@@ -525,41 +731,81 @@ async function executeExportNode(node: any, context: Record<string, any>) {
   if (isExcel) {
     // Generate a real .xlsx file with ExcelJS
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('Datos');
+    
+    // Parse the header color early so we can apply it to the header row
+    const headerColStr = node.data?.headerColor as string;
+    const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
+      ? headerColStr.replace('#', '').toUpperCase() 
+      : null;
 
-    if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
-      const headers = Object.keys(exportData[0]);
+    if (node.data?.exportMode === 'multi') {
+      const multiSheetConfig = (node.data?.multiSheetConfig as Record<string, string>) || {};
+      const nodeIds = Object.keys(multiSheetConfig);
+      
+      if (nodeIds.length === 0) {
+        workbook.addWorksheet('Datos Vacio');
+      }
 
-      // Parse the header color early so we can apply it to the header row
-      const headerColStr = node.data?.headerColor as string;
-      const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
-        ? headerColStr.replace('#', '').toUpperCase() 
-        : null;
-
-      // Add styled header row - per cell to avoid coloring the entire row
-      sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
-      const headerRow = sheet.getRow(1);
-      headerRow.height = 24;
-      headerRow.eachCell({ includeEmpty: false }, (cell) => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
-        cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
-        cell.alignment = { vertical: 'middle', horizontal: 'left' };
-        cell.border = { bottom: { style: 'medium', color: { argb: 'FF6366F1' } } };
-      });
-
-      // Add data rows - plain, no background color (except first column if specified)
-      exportData.forEach(row => {
-        const dataRow = sheet.addRow(headers.map(h => {
-          const v = row[h];
-          return (v === null || v === undefined) ? '' : v;
-        }));
-        dataRow.height = 18;
-        
-        if (parsedColor) {
-          const firstCell = dataRow.getCell(1);
-          firstCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` } };
+      for (const nodeId of nodeIds) {
+        let sheetName = multiSheetConfig[nodeId];
+        // Ensure valid sheet name
+        if (!sheetName || sheetName.trim() === '') {
+          sheetName = `Hoja_${nodeId.substring(0, 5)}`;
         }
-      });
+        
+        let sheetData = context[nodeId];
+        if (!sheetData) continue;
+        
+        const flatData = flattenRows(sheetData);
+        if (flatData.length === 0) continue;
+        
+        const sheet = workbook.addWorksheet(sheetName.substring(0, 31)); // Excel limit is 31 chars
+        const firstItem = typeof flatData[0] === 'object' && flatData[0] !== null ? flatData[0] : { Valor: flatData[0] };
+        const headers = Object.keys(firstItem);
+        
+        sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
+        const headerRow = sheet.getRow(1);
+        headerRow.height = 24;
+        headerRow.eachCell({ includeEmpty: false }, (cell) => {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
+          cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+          cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        });
+
+        flatData.forEach(row => {
+          const dataRow = sheet.addRow(headers.map(h => {
+            const v = (typeof row === 'object' && row !== null) ? row[h] : row;
+            return (v === null || v === undefined) ? '' : v;
+          }));
+          dataRow.height = 18;
+        });
+      }
+    } else {
+      // Single Sheet Mode
+      const sheet = workbook.addWorksheet('Datos');
+
+      if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
+        const headers = Object.keys(exportData[0]);
+
+        // Add styled header row - per cell to avoid coloring the entire row
+        sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
+        const headerRow = sheet.getRow(1);
+        headerRow.height = 24;
+        headerRow.eachCell({ includeEmpty: false }, (cell) => {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
+          cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+          cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        });
+
+        // Add data rows - plain, no background color
+        exportData.forEach(row => {
+          const dataRow = sheet.addRow(headers.map(h => {
+            const v = row[h];
+            return (v === null || v === undefined) ? '' : v;
+          }));
+          dataRow.height = 18;
+        });
+      }
     }
 
     await workbook.xlsx.writeFile(filePath);
@@ -587,7 +833,204 @@ async function executeExportNode(node: any, context: Record<string, any>) {
     }
   }
 
-  return { filePath, format, records: exportData.length, success: true };
+  const previewRows = exportData.slice(0, 1000);
+  const sampleHeaders = exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null
+    ? Object.keys(exportData[0])
+    : [];
+
+  return {
+    filePath,
+    format,
+    records: exportData.length,
+    success: true,
+    previewRows,
+    headers: sampleHeaders
+  };
+}
+
+// Timer / Delay Node Handler with real-time second-by-second countdown and abort support
+async function executeTimerNode(
+  node: any,
+  notify: (status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void,
+  signal?: AbortSignal
+) {
+  const durationVal = parseFloat(node.data?.duration ?? '10') || 10;
+  const unit = (node.data?.unit as string) || 'seconds';
+
+  let totalSeconds = durationVal;
+  if (unit === 'minutes') {
+    totalSeconds = Math.round(durationVal * 60);
+  } else if (unit === 'hours') {
+    totalSeconds = Math.round(durationVal * 3600);
+  }
+  totalSeconds = Math.max(1, Math.round(totalSeconds));
+
+  let remainingSeconds = totalSeconds;
+
+  // Initial progress update
+  notify('progress', { remainingSeconds, totalSeconds, elapsedSeconds: 0 });
+
+  while (remainingSeconds > 0) {
+    if (signal?.aborted) {
+      throw new Error('Ejecución detenida por el usuario');
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        return reject(new Error('Ejecución detenida por el usuario'));
+      }
+      let onAbort: (() => void) | undefined;
+      const timer = setTimeout(() => {
+        if (signal && onAbort) {
+          signal.removeEventListener('abort', onAbort);
+        }
+        resolve();
+      }, 1000);
+
+      if (signal) {
+        onAbort = () => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', onAbort!);
+          reject(new Error('Ejecución detenida por el usuario'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+
+    remainingSeconds--;
+    const elapsedSeconds = totalSeconds - remainingSeconds;
+    notify('progress', { remainingSeconds, totalSeconds, elapsedSeconds });
+  }
+
+  return {
+    totalSeconds,
+    completedAt: new Date().toISOString(),
+    success: true,
+    msg: `Pausa de ${totalSeconds}s completada`
+  };
+}
+
+// Helper to trace back through timers/delays to find the real upstream data sources
+function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[] = []): string[] {
+  const incomingEdges = (edges || []).filter(e => e.target === nodeId);
+  const result: string[] = [];
+
+  for (const edge of incomingEdges) {
+    const sourceNode = (nodes || []).find(n => n.id === edge.source);
+    if (!sourceNode) {
+      result.push(edge.source);
+      continue;
+    }
+    
+    // If source is a timer or delay, trace back to what feeds the timer
+    if (sourceNode.type === 'timer' || sourceNode.type === 'delay') {
+      const upstreamSources = getEffectiveDataSources(sourceNode.id, edges, nodes);
+      result.push(...upstreamSources);
+    } else if (sourceNode.type !== 'start') {
+      result.push(sourceNode.id);
+    }
+  }
+
+  return [...new Set(result)];
+}
+
+// Data Source Node Handler (Loads Excel / CSV into workflow context or merges incoming data)
+async function executeDataSourceNode(
+  node: any,
+  context: Record<string, any>,
+  signal?: AbortSignal,
+  edges?: any[],
+  nodes?: any[]
+) {
+  if (signal?.aborted) {
+    throw new Error('Ejecución detenida por el usuario');
+  }
+
+  const mode = node.data?.mode || 'file';
+
+  if (mode === 'merge') {
+    // Modo Unificador: Unir datos de los nodos anteriores conectados a la entrada
+    // Filtramos temporizadores y nodos de control para obtener los orígenes de datos reales
+    const incomingSourceIds = getEffectiveDataSources(node.id, edges || [], nodes || []);
+
+    const targetKeys = incomingSourceIds.length > 0
+      ? incomingSourceIds
+      : Object.keys(context).filter(k => {
+          if (k === 'start' || k === node.id) return false;
+          const n = (nodes || []).find(nodeItem => nodeItem.id === k);
+          return n?.type !== 'timer' && n?.type !== 'delay';
+        });
+
+    const contextResults: any[][] = [];
+    for (const key of targetKeys) {
+      const val = context[key];
+      if (!val) continue;
+      const flat = flattenRows(val);
+      if (flat.length > 0) {
+        contextResults.push(flat);
+      }
+    }
+
+    if (contextResults.length === 0) {
+      return [];
+    }
+
+    // Ordenar de mayor a menor longitud para usar el más grande como base
+    contextResults.sort((a, b) => b.length - a.length);
+    const baseArray = contextResults[0];
+    const otherArrays = contextResults.slice(1);
+
+    const merged = baseArray.map((baseItem, index) => {
+      let combined = { ...baseItem };
+      
+      for (const arr of otherArrays) {
+        let rowMatch: any = null;
+        
+        // Smart Relational Join: Buscar llaves ID en común
+        const itemKeys = Object.keys(combined);
+        const foreignKeys = Object.keys(arr[0] || {});
+        
+        const commonKeys = itemKeys.filter(k => 
+          foreignKeys.some(fk => fk.toLowerCase() === k.toLowerCase())
+        );
+        
+        const bestKeyItem = commonKeys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('code')) || commonKeys[0];
+        
+        if (bestKeyItem && combined[bestKeyItem] !== undefined && combined[bestKeyItem] !== null) {
+          const bestKeyForeign = foreignKeys.find(fk => fk.toLowerCase() === bestKeyItem.toLowerCase())!;
+          rowMatch = arr.find((r: any) => String(r[bestKeyForeign]) === String(combined[bestKeyItem]));
+        }
+
+        // Fallback a unión por índice
+        if (!rowMatch) {
+          rowMatch = arr[index];
+        }
+
+        if (rowMatch && typeof rowMatch === 'object') {
+          combined = { ...combined, ...rowMatch };
+        }
+      }
+      return combined;
+    });
+
+    return merged;
+  }
+
+  // Modo archivo tradicional
+  const rawFilePath = node.data?.filePath;
+  if (!rawFilePath) {
+    throw new Error('El nodo de origen de datos no tiene ningún archivo seleccionado.');
+  }
+
+  const fullPath = path.isAbsolute(rawFilePath) ? rawFilePath : path.join(process.cwd(), rawFilePath);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`Archivo no encontrado en el servidor: ${rawFilePath}`);
+  }
+
+  const sheetName = node.data?.sheetName as string | undefined;
+  const parsed = await parseExcelOrCsvFile(fullPath, sheetName);
+
+  return parsed.rows;
 }
 
 // Query Node Handler

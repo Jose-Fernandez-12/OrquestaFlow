@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Globe, FileOutput, Code, Database } from 'lucide-react';
+import { Play, Globe, FileOutput, Code, Database, Clock, FileSpreadsheet } from 'lucide-react';
 import { BaseNode } from './BaseNode';
 
 export const StartNode = (props: any) => (
@@ -22,10 +22,24 @@ export const QueryNode = (props: any) => (
   <BaseNode {...props} type="query" data={{ ...props.data, icon: Database }} />
 );
 
+export const TimerNode = (props: any) => (
+  <BaseNode {...props} type="timer" data={{ ...props.data, icon: Clock }} />
+);
+
+export const DataSourceNode = (props: any) => (
+  <BaseNode {...props} type="dataSource" data={{ ...props.data, icon: FileSpreadsheet }} />
+);
+
 export const nodeTypes = {
   start: StartNode,
   httpRequest: HttpNode,
+  httpGet: HttpNode,
+  httpPost: HttpNode,
   scraping: ScrapingNode,
   export: ExportNode,
   query: QueryNode,
+  timer: TimerNode,
+  delay: TimerNode,
+  dataSource: DataSourceNode,
+  fileSource: DataSourceNode,
 };
