@@ -75,7 +75,21 @@ export async function executeFlowEngine(
     adjList[node.id] = [];
   });
 
-  edges.forEach(edge => {
+  // Normalize edges: if an edge connects A -> B, but A references B in its configuration,
+  // the edge was connected backwards and B must execute before A.
+  const normalizedEdges = edges.map(edge => {
+    const srcNode = nodes.find(n => n.id === edge.source);
+    const tgtNode = nodes.find(n => n.id === edge.target);
+    if (srcNode && tgtNode) {
+      const srcConfigStr = JSON.stringify(srcNode.data || {});
+      if (srcConfigStr.includes(tgtNode.id)) {
+        return { ...edge, source: tgtNode.id, target: srcNode.id };
+      }
+    }
+    return edge;
+  });
+
+  normalizedEdges.forEach(edge => {
     if (adjList[edge.source]) {
       adjList[edge.source].push(edge.target);
       inDegree[edge.target] = (inDegree[edge.target] || 0) + 1;
@@ -153,13 +167,22 @@ export async function executeFlowEngine(
                   case 'export':
                     output = await executeExportNode(node, context);
                     break;
+                  case 'query':
+                    output = await executeQueryNode(node, context, abortController.signal);
+                    break;
                   case 'timer':
                   case 'delay':
                     output = await executeTimerNode(node, (status, res) => notifyProgress(node.id, status, res), abortController.signal);
+                    {
+                      const timerUpstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+                      if (timerUpstreamIds.length > 0 && context[timerUpstreamIds[0]]) {
+                        output = context[timerUpstreamIds[0]];
+                      }
+                    }
                     break;
                   case 'dataSource':
                   case 'fileSource':
-                    output = await executeDataSourceNode(node, abortController.signal);
+                    output = await executeDataSourceNode(node, context, abortController.signal, edges, nodes);
                     break;
                   default:
                     output = { warning: 'Unknown node type' };
@@ -319,7 +342,15 @@ async function executeHttpNode(
       }
     }
 
-    const options: RequestInit = { method, headers, signal };
+    // Combine user abort signal with a 30-second timeout
+    const fetchController = new AbortController();
+    const timeoutId = setTimeout(() => fetchController.abort(new Error('Timeout de 30 segundos agotado')), 30000);
+    
+    if (signal) {
+      signal.addEventListener('abort', () => fetchController.abort(new Error('Ejecución detenida por el usuario')), { once: true });
+    }
+
+    const options: RequestInit = { method, headers, signal: fetchController.signal };
 
     if (['POST', 'PUT', 'PATCH'].includes(method)) {
       if (node.data?.body && node.data.body.trim() !== '') {
@@ -344,16 +375,54 @@ async function executeHttpNode(
       }
     }
 
-    const response = await fetch(endpoint, options);
+    let response;
+    try {
+      response = await fetch(endpoint, options);
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      throw new Error(`HTTP Request falló: ${err.message}`);
+    }
+    clearTimeout(timeoutId);
+
     if (!response.ok) {
       throw new Error(`HTTP Request failed with status ${response.status}`);
     }
 
     const text = await response.text();
     try {
-      results.push(JSON.parse(text));
+      const parsed = JSON.parse(text);
+      let finalResult = parsed;
+      if (node.data?.extractPath) {
+        const pathParts = node.data.extractPath.split('.');
+        let extracted = parsed;
+        for (const part of pathParts) {
+          if (extracted && typeof extracted === 'object' && part in extracted) {
+            extracted = extracted[part];
+          } else {
+            extracted = undefined;
+            break;
+          }
+        }
+        if (extracted !== undefined) {
+          finalResult = extracted;
+        }
+      }
+
+      if (itemsToIterate.length > 1 || iterateOver) {
+        if (Array.isArray(finalResult)) {
+          results.push(...finalResult);
+        } else {
+          results.push(finalResult);
+        }
+      } else {
+        return finalResult;
+      }
     } catch {
-      results.push({ text });
+      if (itemsToIterate.length > 1 || iterateOver) {
+        results.push({ text });
+      } else {
+        return { text };
+      }
     }
     
     // Report progress
@@ -362,8 +431,7 @@ async function executeHttpNode(
     }
   }
 
-  // Return single response if not iterating, or array if iterating
-  return itemsToIterate.length > 1 || iterateOver ? results : results[0];
+  return results;
 }
 
 // Scraping Node Handler (spawns Python script if configured)
@@ -487,6 +555,9 @@ function flattenRows(data: any): any[] {
       if (Array.isArray(data.rows)) return flattenRows(data.rows);
       if (Array.isArray(data.data)) return flattenRows(data.data);
       if (Array.isArray(data.items)) return flattenRows(data.items);
+      if (data.data && typeof data.data === 'object' && Object.keys(data.data).length > 0) {
+        return [data.data];
+      }
       const arr = Object.values(data).find(v => Array.isArray(v));
       if (arr) return flattenRows(arr);
       return [data];
@@ -506,6 +577,8 @@ function flattenRows(data: any): any[] {
         result.push(...flattenRows(item.rows));
       } else if (Array.isArray(item.items)) {
         result.push(...flattenRows(item.items));
+      } else if (item.data && typeof item.data === 'object' && Object.keys(item.data).length > 0) {
+        result.push({ ...item.data });
       } else {
         result.push(item);
       }
@@ -658,35 +731,81 @@ async function executeExportNode(node: any, context: Record<string, any>) {
   if (isExcel) {
     // Generate a real .xlsx file with ExcelJS
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('Datos');
+    
+    // Parse the header color early so we can apply it to the header row
+    const headerColStr = node.data?.headerColor as string;
+    const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
+      ? headerColStr.replace('#', '').toUpperCase() 
+      : null;
 
-    if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
-      const headers = Object.keys(exportData[0]);
+    if (node.data?.exportMode === 'multi') {
+      const multiSheetConfig = (node.data?.multiSheetConfig as Record<string, string>) || {};
+      const nodeIds = Object.keys(multiSheetConfig);
+      
+      if (nodeIds.length === 0) {
+        workbook.addWorksheet('Datos Vacio');
+      }
 
-      // Parse the header color early so we can apply it to the header row
-      const headerColStr = node.data?.headerColor as string;
-      const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
-        ? headerColStr.replace('#', '').toUpperCase() 
-        : null;
+      for (const nodeId of nodeIds) {
+        let sheetName = multiSheetConfig[nodeId];
+        // Ensure valid sheet name
+        if (!sheetName || sheetName.trim() === '') {
+          sheetName = `Hoja_${nodeId.substring(0, 5)}`;
+        }
+        
+        let sheetData = context[nodeId];
+        if (!sheetData) continue;
+        
+        const flatData = flattenRows(sheetData);
+        if (flatData.length === 0) continue;
+        
+        const sheet = workbook.addWorksheet(sheetName.substring(0, 31)); // Excel limit is 31 chars
+        const firstItem = typeof flatData[0] === 'object' && flatData[0] !== null ? flatData[0] : { Valor: flatData[0] };
+        const headers = Object.keys(firstItem);
+        
+        sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
+        const headerRow = sheet.getRow(1);
+        headerRow.height = 24;
+        headerRow.eachCell({ includeEmpty: false }, (cell) => {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
+          cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+          cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        });
 
-      // Add styled header row - per cell to avoid coloring the entire row
-      sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
-      const headerRow = sheet.getRow(1);
-      headerRow.height = 24;
-      headerRow.eachCell({ includeEmpty: false }, (cell) => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
-        cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
-        cell.alignment = { vertical: 'middle', horizontal: 'left' };
-      });
+        flatData.forEach(row => {
+          const dataRow = sheet.addRow(headers.map(h => {
+            const v = (typeof row === 'object' && row !== null) ? row[h] : row;
+            return (v === null || v === undefined) ? '' : v;
+          }));
+          dataRow.height = 18;
+        });
+      }
+    } else {
+      // Single Sheet Mode
+      const sheet = workbook.addWorksheet('Datos');
 
-      // Add data rows - plain, no background color
-      exportData.forEach(row => {
-        const dataRow = sheet.addRow(headers.map(h => {
-          const v = row[h];
-          return (v === null || v === undefined) ? '' : v;
-        }));
-        dataRow.height = 18;
-      });
+      if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
+        const headers = Object.keys(exportData[0]);
+
+        // Add styled header row - per cell to avoid coloring the entire row
+        sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
+        const headerRow = sheet.getRow(1);
+        headerRow.height = 24;
+        headerRow.eachCell({ includeEmpty: false }, (cell) => {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
+          cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+          cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        });
+
+        // Add data rows - plain, no background color
+        exportData.forEach(row => {
+          const dataRow = sheet.addRow(headers.map(h => {
+            const v = row[h];
+            return (v === null || v === undefined) ? '' : v;
+          }));
+          dataRow.height = 18;
+        });
+      }
     }
 
     await workbook.xlsx.writeFile(filePath);
@@ -791,15 +910,113 @@ async function executeTimerNode(
   };
 }
 
-// Data Source Node Handler (Loads Excel / CSV into workflow context)
+// Helper to trace back through timers/delays to find the real upstream data sources
+function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[] = []): string[] {
+  const incomingEdges = (edges || []).filter(e => e.target === nodeId);
+  const result: string[] = [];
+
+  for (const edge of incomingEdges) {
+    const sourceNode = (nodes || []).find(n => n.id === edge.source);
+    if (!sourceNode) {
+      result.push(edge.source);
+      continue;
+    }
+    
+    // If source is a timer or delay, trace back to what feeds the timer
+    if (sourceNode.type === 'timer' || sourceNode.type === 'delay') {
+      const upstreamSources = getEffectiveDataSources(sourceNode.id, edges, nodes);
+      result.push(...upstreamSources);
+    } else if (sourceNode.type !== 'start') {
+      result.push(sourceNode.id);
+    }
+  }
+
+  return [...new Set(result)];
+}
+
+// Data Source Node Handler (Loads Excel / CSV into workflow context or merges incoming data)
 async function executeDataSourceNode(
   node: any,
-  signal?: AbortSignal
+  context: Record<string, any>,
+  signal?: AbortSignal,
+  edges?: any[],
+  nodes?: any[]
 ) {
   if (signal?.aborted) {
     throw new Error('Ejecución detenida por el usuario');
   }
 
+  const mode = node.data?.mode || 'file';
+
+  if (mode === 'merge') {
+    // Modo Unificador: Unir datos de los nodos anteriores conectados a la entrada
+    // Filtramos temporizadores y nodos de control para obtener los orígenes de datos reales
+    const incomingSourceIds = getEffectiveDataSources(node.id, edges || [], nodes || []);
+
+    const targetKeys = incomingSourceIds.length > 0
+      ? incomingSourceIds
+      : Object.keys(context).filter(k => {
+          if (k === 'start' || k === node.id) return false;
+          const n = (nodes || []).find(nodeItem => nodeItem.id === k);
+          return n?.type !== 'timer' && n?.type !== 'delay';
+        });
+
+    const contextResults: any[][] = [];
+    for (const key of targetKeys) {
+      const val = context[key];
+      if (!val) continue;
+      const flat = flattenRows(val);
+      if (flat.length > 0) {
+        contextResults.push(flat);
+      }
+    }
+
+    if (contextResults.length === 0) {
+      return [];
+    }
+
+    // Ordenar de mayor a menor longitud para usar el más grande como base
+    contextResults.sort((a, b) => b.length - a.length);
+    const baseArray = contextResults[0];
+    const otherArrays = contextResults.slice(1);
+
+    const merged = baseArray.map((baseItem, index) => {
+      let combined = { ...baseItem };
+      
+      for (const arr of otherArrays) {
+        let rowMatch: any = null;
+        
+        // Smart Relational Join: Buscar llaves ID en común
+        const itemKeys = Object.keys(combined);
+        const foreignKeys = Object.keys(arr[0] || {});
+        
+        const commonKeys = itemKeys.filter(k => 
+          foreignKeys.some(fk => fk.toLowerCase() === k.toLowerCase())
+        );
+        
+        const bestKeyItem = commonKeys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('code')) || commonKeys[0];
+        
+        if (bestKeyItem && combined[bestKeyItem] !== undefined && combined[bestKeyItem] !== null) {
+          const bestKeyForeign = foreignKeys.find(fk => fk.toLowerCase() === bestKeyItem.toLowerCase())!;
+          rowMatch = arr.find((r: any) => String(r[bestKeyForeign]) === String(combined[bestKeyItem]));
+        }
+
+        // Fallback a unión por índice
+        if (!rowMatch) {
+          rowMatch = arr[index];
+        }
+
+        if (rowMatch && typeof rowMatch === 'object') {
+          combined = { ...combined, ...rowMatch };
+        }
+      }
+      return combined;
+    });
+
+    return merged;
+  }
+
+  // Modo archivo tradicional
   const rawFilePath = node.data?.filePath;
   if (!rawFilePath) {
     throw new Error('El nodo de origen de datos no tiene ningún archivo seleccionado.');

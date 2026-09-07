@@ -160,29 +160,41 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
         </div>
       )}
 
-      {/* 4 Connection Points: Left, Right, Top, Bottom */}
+      {/* 4 Universal Connection Points: Left, Right, Top, Bottom */}
       <Handle
         type="source"
         position={Position.Left}
         id="left"
+        isConnectable={true}
+        isConnectableStart={true}
+        isConnectableEnd={true}
         className={handleClass}
       />
       <Handle
         type="source"
         position={Position.Right}
         id="right"
+        isConnectable={true}
+        isConnectableStart={true}
+        isConnectableEnd={true}
         className={handleClass}
       />
       <Handle
         type="source"
         position={Position.Top}
         id="top"
+        isConnectable={true}
+        isConnectableStart={true}
+        isConnectableEnd={true}
         className={handleClass}
       />
       <Handle
         type="source"
         position={Position.Bottom}
         id="bottom"
+        isConnectable={true}
+        isConnectableStart={true}
+        isConnectableEnd={true}
         className={handleClass}
       />
 
@@ -289,6 +301,38 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
                     <span>Ver datos</span>
                   </button>
                 </>
+              ) : data.mode === 'merge' ? (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="italic flex items-center gap-1 text-emerald-600">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                    Modo Unificador
+                  </span>
+                  {completed && nodeResult && Array.isArray(nodeResult) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        window.dispatchEvent(
+                          new CustomEvent('preview-data-source-node', {
+                            detail: {
+                              id,
+                              label: data.label || 'Obtener datos',
+                              format: 'Unificado',
+                              result: nodeResult,
+                              totalRows: nodeResult.length,
+                              completed
+                            }
+                          })
+                        );
+                      }}
+                      className="flex items-center gap-1 text-[9px] text-emerald-700 dark:text-emerald-300 font-semibold cursor-pointer bg-emerald-500/15 hover:bg-emerald-500/25 px-1.5 py-0.5 rounded border border-emerald-500/30 shrink-0 transition-colors"
+                      title="Previsualizar tabla de datos unificados"
+                    >
+                      <Eye size={10} />
+                      <span>Ver datos ({nodeResult.length})</span>
+                    </button>
+                  )}
+                </div>
               ) : (
                 <span className="italic">Sin archivo configurado</span>
               )}

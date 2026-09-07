@@ -9,6 +9,7 @@ import {
   addEdge,
   ReactFlowProvider,
   ConnectionMode,
+  MarkerType,
   type Connection,
   type Edge,
   type Node
@@ -348,10 +349,11 @@ function FlowCanvas() {
           expectedStroke = '#22c55e'; // green
         }
         
-        if (!edge.style || edge.style.stroke !== expectedStroke) {
+        if (!edge.style || edge.style.stroke !== expectedStroke || !edge.markerEnd) {
           changed = true;
           return {
             ...edge,
+            markerEnd: { type: MarkerType.ArrowClosed, color: expectedStroke },
             style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2 },
             interactionWidth: 20
           };
@@ -362,13 +364,37 @@ function FlowCanvas() {
     });
   }, [completedNodeIds, errorNodeIds, setEdges]);
 
+
+
+  const handleEdgeDoubleClick = useCallback((event: React.MouseEvent, edge: Edge) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isLocked) return;
+    setEdges(eds => eds.map(e => {
+      if (e.id === edge.id) {
+        return {
+          ...e,
+          source: e.target,
+          target: e.source,
+          sourceHandle: undefined,
+          targetHandle: undefined,
+        };
+      }
+      return e;
+    }));
+  }, [isLocked, setEdges]);
+
   // Load flow definition when currentFlow changes
   useEffect(() => {
     if (currentFlow && currentFlow.definition) {
       try {
         const def = JSON.parse(currentFlow.definition);
         setNodes(def.nodes || []);
-        setEdges(def.edges || []);
+        const loadedEdges = (def.edges || []).map((e: Edge) => ({
+          ...e,
+          markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
+        }));
+        setEdges(loadedEdges);
       } catch (e) {
         console.error("Failed to parse flow definition", e);
       }
@@ -381,16 +407,26 @@ function FlowCanvas() {
   const onConnect = useCallback(
     (params: Connection | Edge) => {
       if (params.source === params.target) return;
+
       setEdges((eds) => {
-        // Prevent duplicate edges between the same source and target
-        if (eds.some(e => e.source === params.source && e.target === params.target)) {
-          return eds;
-        }
-        return addEdge(params, eds);
+        // Remover cualquier conexión previa entre estos dos nodos para reemplazarla limpiamente
+        const filtered = eds.filter(e => 
+          !( (e.source === params.source && e.target === params.target) || 
+             (e.source === params.target && e.target === params.source) )
+        );
+        return addEdge({
+          id: `e_${params.source}_${params.target}_${Date.now()}`,
+          ...params,
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6' }
+        }, filtered);
       });
     },
     [setEdges]
   );
+
+  const isValidConnection = useCallback((connection: Connection | Edge) => {
+    return connection.source !== connection.target;
+  }, []);
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
@@ -855,11 +891,13 @@ function FlowCanvas() {
               onNodesChange={isLocked ? undefined : onNodesChange}
               onEdgesChange={isLocked ? undefined : onEdgesChange}
               onConnect={isLocked ? undefined : onConnect}
+              isValidConnection={isValidConnection}
               onInit={setReactFlowInstance}
               onDrop={isLocked ? undefined : onDrop}
               onDragOver={isLocked ? undefined : onDragOver}
               onSelectionChange={onSelectionChange}
               onNodeDoubleClick={handleNodeDoubleClick}
+              onEdgeDoubleClick={handleEdgeDoubleClick}
               nodeTypes={nodeTypes}
               deleteKeyCode={isLocked ? null : ['Backspace', 'Delete']}
               nodesDraggable={!isLocked}

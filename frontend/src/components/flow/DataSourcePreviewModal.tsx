@@ -363,10 +363,10 @@ export function DataSourcePreviewModal({
                                 className={`p-2 border-r border-border/40 last:border-r-0 whitespace-nowrap truncate max-w-xs ${
                                   isNumber ? 'font-mono text-right' : ''
                                 }`}
-                                title={String(val ?? '')}
+                                title={typeof val === 'object' && val !== null ? JSON.stringify(val) : String(val ?? '')}
                               >
                                 {val !== null && val !== undefined && val !== '' ? (
-                                  String(val)
+                                  typeof val === 'object' ? JSON.stringify(val) : String(val)
                                 ) : (
                                   <span className="text-muted/40 italic">null</span>
                                 )}
