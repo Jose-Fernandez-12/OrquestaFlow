@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { Check, Loader2, X, Clock, FileSpreadsheet, Eye } from 'lucide-react';
+import { Check, Loader2, X, Clock, FileSpreadsheet, Eye, Pause } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
 
@@ -25,6 +25,7 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
   const executing = useAppSelector(state => state.flows.executingNodeIds.includes(id));
   const completed = useAppSelector(state => state.flows.completedNodeIds.includes(id));
   const hasError = useAppSelector(state => state.flows.errorNodeIds.includes(id));
+  const paused = useAppSelector(state => state.flows.pausedNodeIds.includes(id));
   const nodeResult = useAppSelector(state => state.flows.nodeResults[id]);
   const progress = useAppSelector(state => state.flows.nodeProgress[id]);
   const timerState = useAppSelector(state => state.flows.nodeTimers[id]);
@@ -112,7 +113,7 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
     }
 
     // Default inspection for completed/error nodes
-    if (completed || hasError) {
+    if (completed || hasError || paused) {
       window.dispatchEvent(
         new CustomEvent('inspect-node-result', {
           detail: { id, result: nodeResult, hasError, label: data.label }
@@ -133,15 +134,21 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
       className={cn(
         'bg-surface rounded-md border min-w-[210px] shadow-sm transition-all relative group cursor-pointer select-none',
         selected ? 'border-accent shadow-focus' : 'border-border hover:border-muted',
-        executing && (type === 'timer' || type === 'delay')
+        paused && 'border-amber-400 ring-2 ring-amber-400/50 bg-amber-50/20',
+        executing && !paused && (type === 'timer' || type === 'delay')
           ? 'border-amber-500'
-          : executing && 'border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10',
+          : executing && !paused && 'border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10',
         completed && !hasError && 'border-success',
         hasError && !executing && 'border-red-500 ring-2 ring-red-500/30 bg-red-50'
       )}
     >
       {/* Node Status Badge */}
-      {executing && (
+      {paused && (
+        <div className="absolute -top-3 -right-3 w-6 h-6 bg-amber-100 border border-amber-400 text-amber-600 rounded-full flex items-center justify-center shadow-sm z-20 animate-pulse">
+          <Pause size={12} className="fill-amber-600" />
+        </div>
+      )}
+      {executing && !paused && (
         <div className={cn(
           "absolute -top-3 -right-3 w-6 h-6 bg-surface border rounded-full flex items-center justify-center shadow-sm z-20",
           (type === 'timer' || type === 'delay') ? "border-amber-500 text-amber-600" : "border-blue-500 text-blue-500"
