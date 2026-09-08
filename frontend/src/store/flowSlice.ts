@@ -40,6 +40,7 @@ interface FlowState {
   executionMode: 'normal' | 'debug';
   intermediateContext: Record<string, any>;
   debugRequestPreview: any | null;
+  debugResponsePreview: any | null;
   nodeResults: Record<string, any>;
   nodeProgress: Record<string, { current: number; total: number }>;
   nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
@@ -60,6 +61,7 @@ const initialState: FlowState = {
   executionMode: 'normal',
   intermediateContext: {},
   debugRequestPreview: null,
+  debugResponsePreview: null,
   nodeResults: {},
   nodeProgress: {},
   nodeTimers: {},
@@ -175,14 +177,19 @@ const flowSlice = createSlice({
       }
       state.pausedNodeIds = state.pausedNodeIds.filter(id => id !== action.payload);
     },
-    setNodePaused(state, action: PayloadAction<{ nodeId: string; context: any; requestPreview?: any }>) {
-      const { nodeId, context, requestPreview } = action.payload;
+    setNodePaused(state, action: PayloadAction<{ nodeId: string; context?: any; requestPreview?: any; responsePreview?: any }>) {
+      const { nodeId, context, requestPreview, responsePreview } = action.payload;
       if (!state.pausedNodeIds.includes(nodeId)) {
         state.pausedNodeIds.push(nodeId);
       }
-      state.intermediateContext = context || {};
-      if (requestPreview) {
+      if (context) {
+        state.intermediateContext = context;
+      }
+      if (requestPreview !== undefined) {
         state.debugRequestPreview = requestPreview;
+      }
+      if (responsePreview !== undefined) {
+        state.debugResponsePreview = responsePreview;
       }
     },
     setExecutionMode(state, action: PayloadAction<'normal' | 'debug'>) {
@@ -226,6 +233,7 @@ const flowSlice = createSlice({
       state.pausedNodeIds = [];
       state.intermediateContext = {};
       state.debugRequestPreview = null;
+      state.debugResponsePreview = null;
       state.nodeResults = {};
       state.nodeProgress = {};
       state.nodeTimers = {};

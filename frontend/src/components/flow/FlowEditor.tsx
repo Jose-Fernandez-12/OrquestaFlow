@@ -287,7 +287,8 @@ function FlowCanvas() {
           dispatch(setNodePaused({ 
             nodeId: data.nodeId, 
             context: data.context || data.result?.context,
-            requestPreview: data.result?.requestPreview
+            requestPreview: data.result?.requestPreview,
+            responsePreview: data.result?.responsePreview
           }));
           dispatch(selectNode(data.nodeId));
         } else if (data.status === 'completed') {

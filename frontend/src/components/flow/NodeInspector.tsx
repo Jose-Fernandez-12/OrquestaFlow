@@ -561,6 +561,7 @@ function DataSourceInspector({
   const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
   const debugRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
+  const debugResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
   const currentFlow = useAppSelector(state => state.flows.currentFlow);
   const isPaused = pausedNodeIds.includes(selectedNodeId);
 
@@ -588,6 +589,7 @@ function DataSourceInspector({
             flowId={currentFlow?.id || ''}
             context={intermediateContext || {}}
             requestPreview={debugRequestPreview}
+            responsePreview={debugResponsePreview}
           />
         )}
 
