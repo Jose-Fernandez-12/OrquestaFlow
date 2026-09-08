@@ -115,11 +115,22 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     return { data: { stopped: true } };
   });
 
+  // Resume debug execution
+  app.post<{ Params: { id: string }, Body: { nodeId?: string, action: 'step_over' | 'continue' | 'continue_node' | 'step_request' } }>('/:id/debug/resume', async (request, reply) => {
+    const { resumeNodeExecution } = await import('../engine/executor.js');
+    const resumed = resumeNodeExecution(request.params.id, request.body.nodeId, request.body.action);
+    if (!resumed) {
+      return reply.status(400).send({ error: 'Failed to resume execution (invalid node or not in debug mode)' });
+    }
+    return { data: { resumed: true } };
+  });
+
   // Execute flow (using DAG engine)
-  app.post<{ Params: { id: string } }>('/:id/execute', async (request, reply) => {
+  app.post<{ Params: { id: string }, Body: { mode?: 'normal' | 'debug' } }>('/:id/execute', async (request, reply) => {
     const db = getDb();
     const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
     if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+    const mode = request.body?.mode || 'normal';
 
     const logId = uuid();
     db.prepare(`
@@ -146,7 +157,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
           current: result?.current,
           total: result?.total,
           remainingSeconds: result?.remainingSeconds,
-          totalSeconds: result?.totalSeconds
+          totalSeconds: result?.totalSeconds,
+          context: result?.context
         });
 
         // Emit export ready immediately when an export node finishes, so files download without waiting for other branches
@@ -168,7 +180,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
             ...info
           });
         }
-      });
+      }, { mode });
       const duration = Date.now() - startTime;
 
       // Ensure exportedFiles are collected for the execution logs and completion payload

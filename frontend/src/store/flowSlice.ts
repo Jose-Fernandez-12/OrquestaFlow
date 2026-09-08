@@ -36,6 +36,10 @@ interface FlowState {
   executingNodeIds: string[];
   completedNodeIds: string[];
   errorNodeIds: string[];
+  pausedNodeIds: string[];
+  executionMode: 'normal' | 'debug';
+  intermediateContext: Record<string, any>;
+  debugRequestPreview: any | null;
   nodeResults: Record<string, any>;
   nodeProgress: Record<string, { current: number; total: number }>;
   nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
@@ -52,6 +56,10 @@ const initialState: FlowState = {
   executingNodeIds: [],
   completedNodeIds: [],
   errorNodeIds: [],
+  pausedNodeIds: [],
+  executionMode: 'normal',
+  intermediateContext: {},
+  debugRequestPreview: null,
   nodeResults: {},
   nodeProgress: {},
   nodeTimers: {},
@@ -121,11 +129,21 @@ export const duplicateFlow = createAsyncThunk('flows/duplicate', async (flow: Fl
   return data.data as Flow;
 });
 
-export const executeFlow = createAsyncThunk('flows/execute', async (id: string) => {
+export const executeFlow = createAsyncThunk('flows/execute', async ({ id, mode = 'normal' }: { id: string; mode?: 'normal' | 'debug' }) => {
   const res = await fetch(`${API_URL}/flows/${id}/execute`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({})
+    body: JSON.stringify({ mode })
+  });
+  const data = await res.json();
+  return data.data;
+});
+
+export const resumeDebugNode = createAsyncThunk('flows/resumeDebug', async ({ id, nodeId, action }: { id: string, nodeId?: string, action: 'step_over' | 'continue' | 'continue_node' | 'step_request' }) => {
+  const res = await fetch(`${API_URL}/flows/${id}/debug/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodeId, action })
   });
   const data = await res.json();
   return data.data;
@@ -155,10 +173,25 @@ const flowSlice = createSlice({
       if (!state.executingNodeIds.includes(action.payload)) {
         state.executingNodeIds.push(action.payload);
       }
+      state.pausedNodeIds = state.pausedNodeIds.filter(id => id !== action.payload);
+    },
+    setNodePaused(state, action: PayloadAction<{ nodeId: string; context: any; requestPreview?: any }>) {
+      const { nodeId, context, requestPreview } = action.payload;
+      if (!state.pausedNodeIds.includes(nodeId)) {
+        state.pausedNodeIds.push(nodeId);
+      }
+      state.intermediateContext = context || {};
+      if (requestPreview) {
+        state.debugRequestPreview = requestPreview;
+      }
+    },
+    setExecutionMode(state, action: PayloadAction<'normal' | 'debug'>) {
+      state.executionMode = action.payload;
     },
     setNodeCompleted(state, action: PayloadAction<{ nodeId: string; result?: any }>) {
       const { nodeId, result } = action.payload;
       state.executingNodeIds = state.executingNodeIds.filter(id => id !== nodeId);
+      state.pausedNodeIds = state.pausedNodeIds.filter(id => id !== nodeId);
       if (!state.completedNodeIds.includes(nodeId)) {
         state.completedNodeIds.push(nodeId);
       }
@@ -190,6 +223,9 @@ const flowSlice = createSlice({
       state.executingNodeIds = [];
       state.completedNodeIds = [];
       state.errorNodeIds = [];
+      state.pausedNodeIds = [];
+      state.intermediateContext = {};
+      state.debugRequestPreview = null;
       state.nodeResults = {};
       state.nodeProgress = {};
       state.nodeTimers = {};
@@ -229,9 +265,11 @@ const flowSlice = createSlice({
       })
       .addCase(executeFlow.fulfilled, (state) => {
         state.executingNodeIds = [];
+        state.pausedNodeIds = [];
       })
       .addCase(stopFlow.fulfilled, (state) => {
         state.executingNodeIds = [];
+        state.pausedNodeIds = [];
         state.nodeTimers = {};
       })
       .addCase(deleteFlow.fulfilled, (state, action) => {
@@ -250,6 +288,8 @@ export const {
   setCurrentFlow,
   selectNode,
   setNodeExecuting,
+  setNodePaused,
+  setExecutionMode,
   setNodeCompleted,
   setNodeError,
   setNodeProgress,

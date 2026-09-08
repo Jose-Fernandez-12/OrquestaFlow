@@ -11,7 +11,11 @@ export interface ActiveExecutionState {
   flowId: string;
   startTime: number;
   status: 'running' | 'completed' | 'error' | 'cancelled';
-  nodes: Record<string, { status: 'running' | 'completed' | 'error' | 'progress'; result?: any }>;
+  mode?: 'normal' | 'debug';
+  debugState?: 'running' | 'paused';
+  resumeResolvers?: Record<string, (action?: string) => void>;
+  skipHttpPauseForNode?: Record<string, boolean>;
+  nodes: Record<string, { status: 'running' | 'completed' | 'error' | 'progress' | 'paused'; result?: any }>;
   abortController: AbortController;
   cancelReason?: string;
 }
@@ -33,27 +37,74 @@ export function stopFlowEngine(flowId: string, reason = 'Ejecución detenida por
   return true;
 }
 
+// Resume node execution for debug mode
+export function resumeNodeExecution(
+  flowId: string,
+  nodeId?: string,
+  action: 'step_over' | 'continue' | 'continue_node' | 'step_request' = 'step_over'
+): boolean {
+  const current = activeFlowExecutions.get(flowId);
+  if (!current || current.status !== 'running') {
+    return false;
+  }
+
+  if (action === 'continue') {
+    current.debugState = 'running';
+    if (!current.skipHttpPauseForNode) current.skipHttpPauseForNode = {};
+    if (nodeId) current.skipHttpPauseForNode[nodeId] = true;
+    if (current.resumeResolvers) {
+      Object.values(current.resumeResolvers).forEach(resolve => resolve('continue'));
+      current.resumeResolvers = {};
+    }
+    return true;
+  }
+
+  if (action === 'continue_node' && nodeId) {
+    if (!current.skipHttpPauseForNode) current.skipHttpPauseForNode = {};
+    current.skipHttpPauseForNode[nodeId] = true;
+    if (current.resumeResolvers && current.resumeResolvers[nodeId]) {
+      current.resumeResolvers[nodeId]('continue_node');
+      delete current.resumeResolvers[nodeId];
+      return true;
+    }
+  }
+
+  // action === 'step_over' or 'step_request'
+  if (nodeId && current.resumeResolvers && current.resumeResolvers[nodeId]) {
+    current.resumeResolvers[nodeId]('step');
+    delete current.resumeResolvers[nodeId];
+    return true;
+  }
+
+  return false;
+}
+
 // Global execution wrapper with parallel dependency resolution
 export async function executeFlowEngine(
   flowId: string,
-  onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void
+  onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
+  options?: { mode?: 'normal' | 'debug' }
 ): Promise<Record<string, any>> {
   const db = getDb();
   const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
   if (!flow) throw new Error('Flow not found');
 
   const abortController = new AbortController();
+  const mode = options?.mode || 'normal';
 
   // Track active execution in memory
   activeFlowExecutions.set(flowId, {
     flowId,
     startTime: Date.now(),
     status: 'running',
+    mode,
+    debugState: mode === 'debug' ? 'paused' : 'running',
+    resumeResolvers: {},
     nodes: {},
     abortController
   });
 
-  const notifyProgress = (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => {
+  const notifyProgress = (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => {
     const current = activeFlowExecutions.get(flowId);
     if (current) {
       current.nodes[nodeId] = { status, result };
@@ -130,6 +181,18 @@ export async function executeFlowEngine(
               if (abortController.signal.aborted) {
                 throw new Error('Ejecución detenida por el usuario');
               }
+
+              const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(node.type);
+              const currentExec = activeFlowExecutions.get(flowId);
+              if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
+                notifyProgress(node.id, 'paused', { context: { ...context } });
+                await new Promise<void>((resolve) => {
+                  if (currentExec.resumeResolvers) {
+                    currentExec.resumeResolvers[node.id] = () => resolve();
+                  }
+                });
+              }
+
               notifyProgress(node.id, 'running');
               
               const delayMs = node.type === 'start' ? 150 : 800;
@@ -159,7 +222,7 @@ export async function executeFlowEngine(
                   case 'httpGet':
                   case 'httpPost':
                   case 'httpRequest':
-                    output = await executeHttpNode(node, context, notifyProgress, abortController.signal);
+                    output = await executeHttpNode(node, context, notifyProgress, abortController.signal, flowId);
                     break;
                   case 'scraping':
                     output = await executeScrapingNode(node, context, abortController.signal);
@@ -246,8 +309,9 @@ export async function executeFlowEngine(
 async function executeHttpNode(
   node: any,
   context: Record<string, any>,
-  onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void,
-  signal?: AbortSignal
+  onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
+  signal?: AbortSignal,
+  flowId?: string
 ) {
   const iterateOver = node.data?.iterateOver;
   const iterateMode = node.data?.iterateMode;
@@ -342,7 +406,77 @@ async function executeHttpNode(
       }
     }
 
-    // Combine user abort signal with a 30-second timeout
+    let requestBody: any = undefined;
+    if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      if (node.data?.body && node.data.body.trim() !== '') {
+        const bodyContent = node.data.body;
+        const resolvedBody = resolveTemplate(localContext, bodyContent);
+        if (resolvedBody === undefined || resolvedBody === null || resolvedBody === '') {
+          // skip - no body
+        } else if (typeof resolvedBody === 'object') {
+          requestBody = JSON.stringify(resolvedBody);
+        } else {
+          // It's a string - try to parse as JSON to validate/normalize it
+          const strBody = String(resolvedBody);
+          try {
+            const parsed = JSON.parse(strBody);
+            requestBody = JSON.stringify(parsed);
+          } catch {
+            requestBody = strBody;
+          }
+        }
+      } else if (node.data?.payload) {
+        requestBody = JSON.stringify(resolveTemplate(localContext, node.data.payload) || {});
+      }
+    }
+
+    // DEBUG MODE: Pause before sending each request to let the user inspect how the request was formed
+    const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+    const shouldPause = currentExec?.mode === 'debug' &&
+                        currentExec?.debugState === 'paused' &&
+                        !currentExec?.skipHttpPauseForNode?.[node.id];
+
+    if (shouldPause) {
+      const requestPreview = {
+        method,
+        endpoint,
+        headers,
+        body: requestBody || null,
+        iteration: {
+          current: i + 1,
+          total: itemsToIterate.length
+        },
+        item
+      };
+
+      if (onNodeProgress) {
+        onNodeProgress(node.id, 'paused', {
+          debugType: 'http_request',
+          requestPreview,
+          context: { ...context, _item: item }
+        });
+      }
+
+      const resumeAction = await new Promise<string>((resolve) => {
+        if (currentExec.resumeResolvers) {
+          currentExec.resumeResolvers[node.id] = (act?: string) => resolve(act || 'step');
+        }
+      });
+
+      if (resumeAction === 'continue_node') {
+        if (!currentExec.skipHttpPauseForNode) currentExec.skipHttpPauseForNode = {};
+        currentExec.skipHttpPauseForNode[node.id] = true;
+      }
+    }
+
+    if (onNodeProgress) {
+      onNodeProgress(node.id, 'running', {
+        current: i + 1,
+        total: itemsToIterate.length
+      });
+    }
+
+    // Combine user abort signal with a 30-second network timeout ONLY when actually fetching
     const fetchController = new AbortController();
     const timeoutId = setTimeout(() => fetchController.abort(new Error('Timeout de 30 segundos agotado')), 30000);
     
@@ -351,28 +485,8 @@ async function executeHttpNode(
     }
 
     const options: RequestInit = { method, headers, signal: fetchController.signal };
-
-    if (['POST', 'PUT', 'PATCH'].includes(method)) {
-      if (node.data?.body && node.data.body.trim() !== '') {
-        const bodyContent = node.data.body;
-        const resolvedBody = resolveTemplate(localContext, bodyContent);
-        if (resolvedBody === undefined || resolvedBody === null || resolvedBody === '') {
-          // skip - no body
-        } else if (typeof resolvedBody === 'object') {
-          options.body = JSON.stringify(resolvedBody);
-        } else {
-          // It's a string - try to parse as JSON to validate/normalize it
-          const strBody = String(resolvedBody);
-          try {
-            const parsed = JSON.parse(strBody);
-            options.body = JSON.stringify(parsed);
-          } catch {
-            options.body = strBody;
-          }
-        }
-      } else if (node.data?.payload) {
-        options.body = JSON.stringify(resolveTemplate(localContext, node.data.payload) || {});
-      }
+    if (requestBody) {
+      options.body = requestBody;
     }
 
     let response;
@@ -385,7 +499,11 @@ async function executeHttpNode(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      throw new Error(`HTTP Request failed with status ${response.status}`);
+      let errDetail = '';
+      try {
+        errDetail = await response.text();
+      } catch {}
+      throw new Error(`HTTP Request falló con estado ${response.status} en ${endpoint}. ${errDetail ? 'Detalle: ' + errDetail.slice(0, 200) : ''}`);
     }
 
     const text = await response.text();
@@ -482,42 +600,112 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
   });
 }
 
-// Helper: resolve a path like "nodeId[0].name" or "nodeId.data.items" from context
-function resolvePath(context: Record<string, any>, pathStr: string): any {
+// Helper: evaluate direct property path on an object without recursing into fallback searches
+function evaluatePathOnObject(obj: any, pathStr: string): any {
+  if (!pathStr || !pathStr.trim() || obj === undefined || obj === null) return undefined;
   const tokens = pathStr.trim().split('.');
-  let val: any = context;
+  let val: any = obj;
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    if (val === undefined || val === null) break;
+    if (val === undefined || val === null) return undefined;
 
-    const bracketRe = /^([^\[]*?)\[(\d+|\*)\]$/;
-    const bracketMatch = token.match(bracketRe);
-    
+    const bracketMatch = token.match(/^([^\[]*?)\[(\d+|\*)\]$/);
     if (bracketMatch) {
       const key = bracketMatch[1];
       const idxOrStar = bracketMatch[2];
-      
       if (key) val = val[key];
-      
-      if (val !== undefined && val !== null) {
-        if (idxOrStar === '*') {
-          if (Array.isArray(val)) {
-            const remainingTokens = tokens.slice(i + 1);
-            if (remainingTokens.length === 0) return val;
-            return val.map(item => resolvePath({ item }, ['item', ...remainingTokens].join('.')));
-          }
-          break;
-        } else {
-          val = val[parseInt(idxOrStar, 10)];
+      if (val === undefined || val === null) return undefined;
+
+      if (idxOrStar === '*') {
+        if (Array.isArray(val)) {
+          const remainingTokens = tokens.slice(i + 1);
+          if (remainingTokens.length === 0) return val;
+          return val.map(item => evaluatePathOnObject(item, remainingTokens.join('.')));
         }
+        return undefined;
+      } else {
+        val = val[parseInt(idxOrStar, 10)];
       }
     } else {
       val = val[token];
     }
   }
-
   return val;
+}
+
+// Helper: resolve a path like "nodeId[0].name" or "nodeId.data.items" from context with smart fallback (no recursion)
+function resolvePath(context: Record<string, any>, pathStr: string): any {
+  if (!pathStr || !pathStr.trim() || !context) return undefined;
+  const trimmed = pathStr.trim();
+
+  // 1. Direct path resolution with tokens on context
+  const direct = evaluatePathOnObject(context, trimmed);
+  if (direct !== undefined && direct !== null) {
+    return direct;
+  }
+
+  // 2. Fallback: check if _item exists (iteration mode)
+  if (context._item !== undefined && context._item !== null) {
+    if (typeof context._item === 'object') {
+      if (context._item[trimmed] !== undefined && context._item[trimmed] !== null) {
+        return context._item[trimmed];
+      }
+      const fromItem = evaluatePathOnObject(context._item, trimmed);
+      if (fromItem !== undefined && fromItem !== null) return fromItem;
+
+      // Case-insensitive check on _item
+      const lower = trimmed.toLowerCase();
+      for (const [k, v] of Object.entries(context._item)) {
+        if (k.toLowerCase() === lower) return v;
+      }
+    } else {
+      return context._item;
+    }
+  }
+
+  // 3. Fallback: smart lookup across upstream nodes in context (pure iterative, no recursion)
+  const lowerTrimmed = trimmed.toLowerCase();
+  for (const [ctxKey, ctxVal] of Object.entries(context)) {
+    if (ctxKey === 'start' || ctxKey === '_item') continue;
+    if (ctxVal === undefined || ctxVal === null) continue;
+
+    if (Array.isArray(ctxVal) && ctxVal.length > 0) {
+      const first = ctxVal[0];
+      if (first && typeof first === 'object') {
+        const val = evaluatePathOnObject(first, trimmed);
+        if (val !== undefined && val !== null) return val;
+        for (const [k, v] of Object.entries(first)) {
+          if (k.toLowerCase() === lowerTrimmed) return v;
+        }
+      }
+    } else if (typeof ctxVal === 'object') {
+      const val = evaluatePathOnObject(ctxVal, trimmed);
+      if (val !== undefined && val !== null) return val;
+
+      if (ctxVal.data && typeof ctxVal.data === 'object') {
+        if (Array.isArray(ctxVal.data) && ctxVal.data.length > 0) {
+          const first = ctxVal.data[0];
+          if (first && typeof first === 'object') {
+            const dVal = evaluatePathOnObject(first, trimmed);
+            if (dVal !== undefined && dVal !== null) return dVal;
+            for (const [k, v] of Object.entries(first)) {
+              if (k.toLowerCase() === lowerTrimmed) return v;
+            }
+          }
+        } else {
+          const dVal = evaluatePathOnObject(ctxVal.data, trimmed);
+          if (dVal !== undefined && dVal !== null) return dVal;
+        }
+      }
+
+      for (const [k, v] of Object.entries(ctxVal)) {
+        if (k.toLowerCase() === lowerTrimmed) return v;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function resolveTemplate(context: Record<string, any>, value: any): any {
@@ -527,10 +715,86 @@ function resolveTemplate(context: Record<string, any>, value: any): any {
     if (exactMatch) {
       return resolvePath(context, exactMatch[1]);
     }
-    return value.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
+
+    // 1. Replace {{path}}
+    let res = value.replace(/\{\{([^}]+)\}\}/g, (match: string, pathStr: string) => {
       const val = resolvePath(context, pathStr);
       return typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
     });
+
+    // 2. Support single braces in URLs: /City/{id} or /City/{cityId} or /City/{aca_van un id}
+    if (res.includes('http') || res.startsWith('/')) {
+      res = res.replace(/\{([^{}]+)\}/g, (match: string, pathStr: string) => {
+        let val = resolvePath(context, pathStr);
+        // If placeholder has descriptive text or cannot find exact match, look for id-related field
+        if (val === undefined) {
+          if (pathStr.toLowerCase().includes('id')) {
+            val = resolvePath(context, 'id');
+            if (val === undefined && context._item && typeof context._item === 'object') {
+              for (const [k, v] of Object.entries(context._item)) {
+                if (k.toLowerCase().includes('id')) {
+                  val = v;
+                  break;
+                }
+              }
+            }
+            if (val === undefined) {
+              for (const ctxVal of Object.values(context)) {
+                const target = Array.isArray(ctxVal) ? ctxVal[0] : ctxVal;
+                if (target && typeof target === 'object') {
+                  for (const [k, v] of Object.entries(target)) {
+                    if (k.toLowerCase().includes('id')) {
+                      val = v;
+                      break;
+                    }
+                  }
+                }
+                if (val !== undefined) break;
+              }
+            }
+          }
+        }
+        if (val !== undefined && val !== null) {
+          return String(val);
+        }
+        return match;
+      });
+
+      // 3. Support route params like :id
+      res = res.replace(/:([a-zA-Z0-9_]+)/g, (match: string, paramName: string) => {
+        let val = resolvePath(context, paramName);
+        if (val === undefined && paramName.toLowerCase().includes('id')) {
+          if (context._item && typeof context._item === 'object') {
+            for (const [k, v] of Object.entries(context._item)) {
+              if (k.toLowerCase().includes('id')) {
+                val = v;
+                break;
+              }
+            }
+          }
+          if (val === undefined) {
+            for (const ctxVal of Object.values(context)) {
+              const target = Array.isArray(ctxVal) ? ctxVal[0] : ctxVal;
+              if (target && typeof target === 'object') {
+                for (const [k, v] of Object.entries(target)) {
+                  if (k.toLowerCase().includes('id')) {
+                    val = v;
+                    break;
+                  }
+                }
+              }
+              if (val !== undefined) break;
+            }
+          }
+        }
+        if (val !== undefined && val !== null) {
+          return String(val);
+        }
+        return match;
+      });
+    }
+
+    return res;
   }
   
   if (Array.isArray(value)) {

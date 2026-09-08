@@ -36,9 +36,12 @@ import {
   Download,
   Trash2,
   AlertTriangle,
-  Loader2,
   History,
-  Square
+  Square,
+  Bug,
+  StepForward,
+  PlayCircle,
+  Loader2
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -62,7 +65,10 @@ import {
   setNodeError,
   setNodeProgress,
   setNodeTimer,
-  resetNodeStates
+  resetNodeStates,
+  setNodePaused,
+  setExecutionMode,
+  resumeDebugNode
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
 import { fetchQueries } from '../../store/querySlice';
@@ -85,7 +91,10 @@ function FlowCanvas() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
   const completedNodeIds = useAppSelector(state => state.flows.completedNodeIds);
   const errorNodeIds = useAppSelector(state => state.flows.errorNodeIds);
+  const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
+  const executionMode = useAppSelector(state => state.flows.executionMode);
   const nodeResults = useAppSelector(state => state.flows.nodeResults);
+  const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
   const queries = useAppSelector(state => (state as any).queries.queries || []);
 
   const flowSchedules = currentFlow 
@@ -261,17 +270,26 @@ function FlowCanvas() {
     socket.on('flow-progress', (data: { 
       flowId: string; 
       nodeId: string; 
-      status: 'running' | 'completed' | 'error' | 'progress'; 
+      status: 'running' | 'completed' | 'error' | 'progress' | 'paused'; 
       result?: any; 
       current?: number; 
       total?: number;
       remainingSeconds?: number;
       totalSeconds?: number;
+      context?: any;
     }) => {
       if (data.flowId === flowId) {
         if (data.status === 'running') {
           setIsLiveExecuting(true);
           dispatch(setNodeExecuting(data.nodeId));
+        } else if (data.status === 'paused') {
+          setIsLiveExecuting(true);
+          dispatch(setNodePaused({ 
+            nodeId: data.nodeId, 
+            context: data.context || data.result?.context,
+            requestPreview: data.result?.requestPreview
+          }));
+          dispatch(selectNode(data.nodeId));
         } else if (data.status === 'completed') {
           dispatch(setNodeCompleted({ nodeId: data.nodeId, result: data.result }));
         } else if (data.status === 'error') {
@@ -574,8 +592,9 @@ function FlowCanvas() {
     }
   };
 
-  const handleExecute = async () => {
+  const handleExecute = async (mode: 'normal' | 'debug' = 'normal') => {
     if (!currentFlow) return;
+    dispatch(setExecutionMode(mode));
     dispatch(resetNodeStates());
     
     // Check for missing parameters
@@ -607,15 +626,16 @@ function FlowCanvas() {
       return; // Stop here and wait for the user to fill the modal
     }
 
-    await performExecution(nodes);
+    await performExecution(nodes, mode);
   };
 
-  const performExecution = async (nodesToExecute: Node[]) => {
+  const performExecution = async (nodesToExecute: Node[], mode: 'normal' | 'debug' = 'normal') => {
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
     const definition = JSON.stringify({ nodes: nodesToExecute, edges });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
     
-    const result = await dispatch(executeFlow(currentFlow!.id));
+    const result = await dispatch(executeFlow({ id: currentFlow!.id, mode }));
+
     
     // Check for exported files returned by backend execution
     const payload = (result as any)?.payload;
@@ -771,9 +791,14 @@ function FlowCanvas() {
               <span>Detener Flujo</span>
             </Button>
           ) : (
-            <Button variant="primary" size="sm" onClick={handleExecute} className="gap-2" disabled={nodes.length === 0}>
-              <Play size={16} /> Ejecutar Flujo
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => handleExecute('debug')} className="gap-2 text-amber-600 border-amber-600 hover:bg-amber-50" disabled={nodes.length === 0}>
+                <Bug size={16} /> Debug
+              </Button>
+              <Button variant="primary" size="sm" onClick={() => handleExecute('normal')} className="gap-2" disabled={nodes.length === 0}>
+                <Play size={16} /> Ejecutar Flujo
+              </Button>
+            </div>
           )}
           <div className="w-px h-6 bg-border mx-1"></div>
           <Button variant="icon" size="icon" onClick={() => dispatch(toggleCanvasExpanded())} title={canvasExpanded ? "Restaurar layout" : "Expandir canvas"}>
@@ -884,6 +909,25 @@ function FlowCanvas() {
           {!canvasExpanded && nodeLibraryExpanded && <NodeLibrary />}
           
           <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
+            {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
+                <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-2 animate-pulse">
+                  <Bug size={16} /> Debugging
+                </div>
+                {pausedNodeIds.length > 0 ? (
+                  <>
+                    <Button variant="outline" size="sm" onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))} className="h-7 text-xs border-amber-200 hover:bg-amber-50">
+                      <StepForward size={14} className="mr-1" /> Step Over
+                    </Button>
+                    <Button variant="primary" size="sm" onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))} className="h-7 text-xs bg-amber-600 hover:bg-amber-700">
+                      <PlayCircle size={14} className="mr-1" /> Continuar Todo
+                    </Button>
+                  </>
+                ) : (
+                  <span className="text-xs text-muted font-medium">Ejecutando...</span>
+                )}
+              </div>
+            )}
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -902,7 +946,7 @@ function FlowCanvas() {
               deleteKeyCode={isLocked ? null : ['Backspace', 'Delete']}
               nodesDraggable={!isLocked}
               nodesConnectable={!isLocked}
-              elementsSelectable={!isLocked}
+              elementsSelectable={true}
               fitView
               className="bg-bg"
               proOptions={{ hideAttribution: true }}
@@ -1169,6 +1213,10 @@ function FlowCanvas() {
           onExecuteFlow={handleExecute}
           fileName={previewExportData.fileName}
           format={previewExportData.format}
+          node={nodes.find(n => n.id === previewExportData.id)}
+          nodes={nodes}
+          edges={edges}
+          context={{ ...nodeResults, ...intermediateContext }}
         />
       )}
 
