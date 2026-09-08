@@ -414,19 +414,19 @@ async function executeHttpNode(
         if (resolvedBody === undefined || resolvedBody === null || resolvedBody === '') {
           // skip - no body
         } else if (typeof resolvedBody === 'object') {
-          requestBody = JSON.stringify(resolvedBody);
+          requestBody = JSON.stringify(resolvedBody, null, 2);
         } else {
           // It's a string - try to parse as JSON to validate/normalize it
           const strBody = String(resolvedBody);
           try {
             const parsed = JSON.parse(strBody);
-            requestBody = JSON.stringify(parsed);
+            requestBody = JSON.stringify(parsed, null, 2);
           } catch {
             requestBody = strBody;
           }
         }
       } else if (node.data?.payload) {
-        requestBody = JSON.stringify(resolveTemplate(localContext, node.data.payload) || {});
+        requestBody = JSON.stringify(resolveTemplate(localContext, node.data.payload) || {}, null, 2);
       }
     }
 
@@ -442,6 +442,7 @@ async function executeHttpNode(
         endpoint,
         headers,
         body: requestBody || null,
+        params: node.data?.params || null,
         iteration: {
           current: i + 1,
           total: itemsToIterate.length
@@ -489,7 +490,8 @@ async function executeHttpNode(
       options.body = requestBody;
     }
 
-    let response;
+    const fetchStart = Date.now();
+    let response: Response;
     try {
       response = await fetch(endpoint, options);
     } catch (err: any) {
@@ -497,50 +499,61 @@ async function executeHttpNode(
       throw new Error(`HTTP Request falló: ${err.message}`);
     }
     clearTimeout(timeoutId);
+    const durationMs = Date.now() - fetchStart;
 
-    if (!response.ok) {
-      let errDetail = '';
-      try {
-        errDetail = await response.text();
-      } catch {}
-      throw new Error(`HTTP Request falló con estado ${response.status} en ${endpoint}. ${errDetail ? 'Detalle: ' + errDetail.slice(0, 200) : ''}`);
-    }
+    const responseHeaders: Record<string, string> = {};
+    try {
+      response.headers.forEach((v, k) => {
+        responseHeaders[k] = v;
+      });
+    } catch {}
 
     const text = await response.text();
+    let parsedBody: any;
     try {
-      const parsed = JSON.parse(text);
-      let finalResult = parsed;
-      if (node.data?.extractPath) {
-        const pathParts = node.data.extractPath.split('.');
-        let extracted = parsed;
-        for (const part of pathParts) {
-          if (extracted && typeof extracted === 'object' && part in extracted) {
-            extracted = extracted[part];
-          } else {
-            extracted = undefined;
-            break;
-          }
-        }
-        if (extracted !== undefined) {
-          finalResult = extracted;
-        }
-      }
-
-      if (itemsToIterate.length > 1 || iterateOver) {
-        if (Array.isArray(finalResult)) {
-          results.push(...finalResult);
-        } else {
-          results.push(finalResult);
-        }
-      } else {
-        return finalResult;
-      }
+      parsedBody = JSON.parse(text);
     } catch {
-      if (itemsToIterate.length > 1 || iterateOver) {
-        results.push({ text });
-      } else {
-        return { text };
+      parsedBody = text;
+    }
+
+    // Extract path if specified
+    const extractPath = node.data?.extractPath;
+    const finalResult = extractPath ? resolvePath(parsedBody, extractPath) : parsedBody;
+    results.push(finalResult);
+
+    // DEBUG MODE: Pause after receiving response if in debug step mode so user can inspect the response
+    if (shouldPause) {
+      const responsePreview = {
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+        durationMs,
+        headers: responseHeaders,
+        data: parsedBody,
+        iteration: itemsToIterate.length > 1 ? { current: i + 1, total: itemsToIterate.length } : undefined
+      };
+      if (onNodeProgress) {
+        onNodeProgress(node.id, 'paused', {
+          debugType: 'http_response',
+          responsePreview,
+          current: i + 1,
+          total: itemsToIterate.length
+        });
       }
+      const resumeActionAfter = await new Promise<string>((resolve) => {
+        if (currentExec?.resumeResolvers) {
+          currentExec.resumeResolvers[node.id] = (act?: string) => resolve(act || 'step');
+        }
+      });
+      if (resumeActionAfter === 'continue_node') {
+        if (!currentExec.skipHttpPauseForNode) currentExec.skipHttpPauseForNode = {};
+        currentExec.skipHttpPauseForNode[node.id] = true;
+      }
+    }
+
+    if (!response.ok) {
+      const errDetail = typeof parsedBody === 'string' ? parsedBody.slice(0, 300) : JSON.stringify(parsedBody).slice(0, 300);
+      throw new Error(`HTTP Request falló con estado ${response.status} en ${endpoint}. ${errDetail ? 'Detalle: ' + errDetail : ''}`);
     }
     
     // Report progress
@@ -549,7 +562,7 @@ async function executeHttpNode(
     }
   }
 
-  return results;
+  return itemsToIterate.length > 1 ? results : results[0];
 }
 
 // Scraping Node Handler (spawns Python script if configured)
