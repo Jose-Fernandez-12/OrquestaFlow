@@ -902,11 +902,20 @@ function DataSourceInspector({
                       )}
                     </div>
 
-                    <div className="space-y-1.5 pt-2 border-t border-border mt-3">
+                    <div className="pt-2 border-t border-border mt-3">
                       {parentForEachNode ? (
-                        <div className="bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800/50 rounded p-2.5 text-[11px] text-sky-800 dark:text-sky-200">
-                          <span className="font-semibold block mb-0.5">Iteración controlada por el bucle: {parentForEachNode.data?.label || 'Para cada elemento'}</span>
-                          <span>Este nodo se ejecutará 1 vez por cada elemento de la lista usando {'{{_item}}'}. El modo batch interno está desactivado dentro del bucle.</span>
+                        <div className="flex items-start gap-2.5 p-2.5 bg-bg border border-border rounded-md">
+                          <div className="w-5 h-5 rounded bg-accent/10 text-accent flex items-center justify-center shrink-0 mt-0.5">
+                            <Repeat size={12} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-medium text-fg">
+                              Iteración del bucle activa
+                            </div>
+                            <div className="text-[11px] text-muted mt-0.5 leading-relaxed">
+                              Este nodo procesa cada elemento individualmente con <code className="px-1 py-0.5 bg-surface border border-border rounded text-[10px] font-mono text-accent">{'{{_item}}'}</code>. El modo batch interno está desactivado.
+                            </div>
+                          </div>
                         </div>
                       ) : (
                         <>
