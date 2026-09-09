@@ -125,6 +125,16 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     return { data: { resumed: true } };
   });
 
+  // Pause debug execution
+  app.post<{ Params: { id: string } }>('/:id/debug/pause', async (request, reply) => {
+    const { pauseDebugExecution } = await import('../engine/executor.js');
+    const paused = pauseDebugExecution(request.params.id);
+    if (!paused) {
+      return reply.status(400).send({ error: 'Failed to pause execution (not running in debug mode)' });
+    }
+    return { data: { paused: true } };
+  });
+
   // Execute flow (using DAG engine)
   app.post<{ Params: { id: string }, Body: { mode?: 'normal' | 'debug' } }>('/:id/execute', async (request, reply) => {
     const db = getDb();

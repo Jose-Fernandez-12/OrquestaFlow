@@ -68,7 +68,8 @@ import {
   resetNodeStates,
   setNodePaused,
   setExecutionMode,
-  resumeDebugNode
+  resumeDebugNode,
+  pauseDebugExecution
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
 import { fetchQueries } from '../../store/querySlice';
@@ -635,51 +636,55 @@ function FlowCanvas() {
     const definition = JSON.stringify({ nodes: nodesToExecute, edges });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
     
-    const result = await dispatch(executeFlow({ id: currentFlow!.id, mode }));
-
-    
-    // Check for exported files returned by backend execution
-    const payload = (result as any)?.payload;
-    const exportedFiles = payload?.exportedFiles || [];
-    if (exportedFiles.length > 0) {
-      exportedFiles.forEach((file: any, index: number) => {
-        setTimeout(() => {
-          autoDownloadFile(file.downloadUrl, file.fileName);
-        }, index * 400);
-      });
-    } else {
-      // Find export node results in the execution context as client-side fallback
-      const context = payload?.context as Record<string, any> | undefined;
-      if (context) {
-        const exportNodes = nodesToExecute.filter(n => n.type === 'export');
-        exportNodes.forEach(exportNode => {
-          const data = exportNode.data as any;
-          const format = data?.format || 'CSV';
-          const rawFileName = data?.fileName as string | undefined;
-          let dataSource = data?.dataSource;
-          
-          if (!dataSource) {
-            // If empty, explicitly use the node immediately upstream
-            const incomingEdge = edges.find(e => e.target === exportNode.id);
-            if (incomingEdge) {
-              dataSource = `{{${incomingEdge.source}}}`;
-            }
-          }
-          
-          const exportData = resolveExportData(context, dataSource);
-          const columns = (data?.columns && data.columns.length > 0) 
-            ? data.columns 
-            : (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
-          
-          if (exportData.length > 0) {
-            if (format === 'Excel') {
-              downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export', data?.headerColor as string | undefined);
-            } else {
-              downloadAsCSV(exportData, columns, rawFileName || 'export');
-            }
-          }
+    try {
+      const result = await dispatch(executeFlow({ id: currentFlow!.id, mode }));
+      
+      // Check for exported files returned by backend execution
+      const payload = (result as any)?.payload;
+      const exportedFiles = payload?.exportedFiles || [];
+      if (exportedFiles.length > 0) {
+        exportedFiles.forEach((file: any, index: number) => {
+          setTimeout(() => {
+            autoDownloadFile(file.downloadUrl, file.fileName);
+          }, index * 400);
         });
+      } else {
+        // Find export node results in the execution context as client-side fallback
+        const context = payload?.context as Record<string, any> | undefined;
+        if (context) {
+          const exportNodes = nodesToExecute.filter(n => n.type === 'export');
+          exportNodes.forEach(exportNode => {
+            const data = exportNode.data as any;
+            const format = data?.format || 'CSV';
+            const rawFileName = data?.fileName as string | undefined;
+            let dataSource = data?.dataSource;
+            
+            if (!dataSource) {
+              // If empty, explicitly use the node immediately upstream
+              const incomingEdge = edges.find(e => e.target === exportNode.id);
+              if (incomingEdge) {
+                dataSource = `{{${incomingEdge.source}}}`;
+              }
+            }
+            
+            const exportData = resolveExportData(context, dataSource);
+            const columns = (data?.columns && data.columns.length > 0) 
+              ? data.columns 
+              : (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
+            
+            if (exportData.length > 0) {
+              if (format === 'Excel') {
+                downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export', data?.headerColor as string | undefined);
+              } else {
+                downloadAsCSV(exportData, columns, rawFileName || 'export');
+              }
+            }
+          });
+        }
       }
+    } finally {
+      setIsLiveExecuting(false);
+      isLiveExecutingRef.current = false;
     }
   };
 
@@ -912,21 +917,57 @@ function FlowCanvas() {
           <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
             {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
               <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
-                <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-2 animate-pulse">
-                  <Bug size={16} /> Debugging
+                <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-1">
+                  <Bug size={16} className={isLiveExecuting && pausedNodeIds.length === 0 ? "animate-spin" : "animate-pulse"} />
+                  <span>Debugging</span>
                 </div>
                 {pausedNodeIds.length > 0 ? (
                   <>
-                    <Button variant="outline" size="sm" onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))} className="h-7 text-xs border-amber-200 hover:bg-amber-50">
-                      <StepForward size={14} className="mr-1" /> Step Over
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
+                      className="h-7 text-xs border-amber-200 hover:bg-amber-50"
+                      title="Ejecutar el paso actual e ir al siguiente (paso a paso)"
+                    >
+                      <StepForward size={14} className="mr-1" /> Paso a paso
                     </Button>
-                    <Button variant="primary" size="sm" onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))} className="h-7 text-xs bg-amber-600 hover:bg-amber-700">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
+                      className="h-7 text-xs bg-amber-600 hover:bg-amber-700"
+                      title="Continuar ejecución sin pausas"
+                    >
                       <PlayCircle size={14} className="mr-1" /> Continuar Todo
                     </Button>
                   </>
                 ) : (
-                  <span className="text-xs text-muted font-medium">Ejecutando...</span>
+                  <>
+                    <div className="flex items-center gap-1.5 text-xs text-muted font-medium px-1">
+                      <Loader2 size={13} className="animate-spin text-amber-600" />
+                      <span>Ejecutando...</span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => dispatch(pauseDebugExecution(currentFlow!.id))}
+                      className="h-7 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium"
+                      title="Pausar en el siguiente paso para retomar el control paso a paso"
+                    >
+                      <Pause size={13} className="mr-1 fill-amber-600" /> Pausar
+                    </Button>
+                  </>
                 )}
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={handleStopExecution}
+                  className="h-7 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
+                  title="Detener ejecución del flujo"
+                >
+                  <Square size={11} className="mr-1 fill-white" /> Detener
+                </Button>
               </div>
             )}
             <ReactFlow

@@ -31,9 +31,24 @@ export function stopFlowEngine(flowId: string, reason = 'Ejecución detenida por
   current.status = 'cancelled';
   current.cancelReason = reason;
   current.abortController.abort(reason);
+  if (current.resumeResolvers) {
+    Object.values(current.resumeResolvers).forEach(resolve => resolve('stop'));
+    current.resumeResolvers = {};
+  }
   setTimeout(() => {
     activeFlowExecutions.delete(flowId);
   }, 30000);
+  return true;
+}
+
+// Pause execution for debug mode
+export function pauseDebugExecution(flowId: string): boolean {
+  const current = activeFlowExecutions.get(flowId);
+  if (!current || current.status !== 'running') {
+    return false;
+  }
+  current.debugState = 'paused';
+  current.skipHttpPauseForNode = {};
   return true;
 }
 
@@ -208,6 +223,11 @@ export async function executeFlowEngine(
       let allDone = true;
 
       nodes.forEach(node => {
+        // Subgraph nodes are executed internally by forEachNode, not by the main Kahn loop
+        if (forEachManagedNodeIds.has(node.id)) {
+          return;
+        }
+
         if (!completedNodes.has(node.id) && !errorNodes.has(node.id)) {
           allDone = false;
           
@@ -322,6 +342,13 @@ export async function executeFlowEngine(
 
                 context[node.id] = output;
                 completedNodes.add(node.id);
+                if (node.type === 'forEach') {
+                  const endId = findForEachEndNode(node.id, adjList, nodes);
+                  if (endId) {
+                    const subIds = getForEachSubgraphNodes(node.id, endId, adjList, nodes);
+                    subIds.forEach(sid => completedNodes.add(sid));
+                  }
+                }
                 notifyProgress(node.id, 'completed', output);
 
                 // Unlock dependents
