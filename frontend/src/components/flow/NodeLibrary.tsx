@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Globe, Code, FileOutput, Database, Clock, FileSpreadsheet } from 'lucide-react';
+import { Play, Globe, Code, FileOutput, Database, Clock, FileSpreadsheet, List, Repeat, Square } from 'lucide-react';
 
 const NODE_TEMPLATES = [
   { type: 'start', label: 'Inicio de flujo', icon: Play, desc: 'Punto de entrada' },
@@ -9,6 +9,9 @@ const NODE_TEMPLATES = [
   { type: 'query', label: 'Consulta DB', icon: Database, desc: 'Ejecutar consulta SQL' },
   { type: 'scraping', label: 'Web Scraping', icon: Code, desc: 'Extraer HTML/XML' },
   { type: 'export', label: 'Exportar CSV/Excel', icon: FileOutput, desc: 'Generar archivo' },
+  { type: 'dataList', label: 'Lista de datos', icon: List, desc: 'Definir array de datos JSON' },
+  { type: 'forEach', label: 'Para cada elemento', icon: Repeat, desc: 'Inicio de bucle iterativo' },
+  { type: 'forEachEnd', label: 'Fin de bucle', icon: Square, desc: 'Cierre del bucle forEach' },
 ];
 
 export function NodeLibrary() {

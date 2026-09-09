@@ -43,6 +43,9 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
     delay: 'text-amber-600',
     dataSource: 'text-emerald-600',
     fileSource: 'text-emerald-600',
+    dataList: 'text-violet-600',
+    forEach: 'text-sky-600',
+    forEachEnd: 'text-sky-600',
   };
 
   const typeLabels: Record<string, string> = {
@@ -57,6 +60,9 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
     delay: 'Pausa programada',
     dataSource: 'Obtener datos (Excel/CSV)',
     fileSource: 'Obtener datos (Excel/CSV)',
+    dataList: 'Lista de datos',
+    forEach: 'Inicio de bucle',
+    forEachEnd: 'Fin de bucle',
   };
 
   const formatTimerDuration = (seconds: number) => {
@@ -135,7 +141,9 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
         selected ? 'border-accent shadow-focus' : 'border-border hover:border-muted',
         executing && (type === 'timer' || type === 'delay')
           ? 'border-amber-500'
-          : executing && 'border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10',
+          : executing && (type === 'forEach' || type === 'forEachEnd')
+            ? 'border-sky-500 ring-2 ring-sky-500/30'
+            : executing && 'border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10',
         completed && !hasError && 'border-success',
         hasError && !executing && 'border-red-500 ring-2 ring-red-500/30 bg-red-50'
       )}
@@ -336,6 +344,26 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
               ) : (
                 <span className="italic">Sin archivo configurado</span>
               )}
+            </div>
+          )}
+
+          {/* DataList item count */}
+          {type === 'dataList' && (
+            <div className="mt-1 text-[10px] text-muted">
+              {data.items ? (
+                <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                  {(() => { try { return JSON.parse(data.items).length; } catch { return 0; } })()} elementos
+                </span>
+              ) : (
+                <span className="italic">Sin datos configurados</span>
+              )}
+            </div>
+          )}
+
+          {/* ForEach progress info */}
+          {type === 'forEach' && executing && progress && (
+            <div className="mt-1 text-[10px] text-sky-600 font-medium">
+              Iteracion {progress.current} de {progress.total}
             </div>
           )}
 

@@ -96,6 +96,23 @@ export async function executeFlowEngine(
     }
   });
 
+  // ForEach sub-graph exclusion: mark nodes between forEach and forEachEnd
+  // with inDegree = Infinity so the main Kahn traversal ignores them.
+  // The forEach node will manage their execution internally.
+  const forEachNodes = nodes.filter(n => n.type === 'forEach');
+  const forEachManagedNodeIds = new Set<string>();
+
+  for (const feNode of forEachNodes) {
+    const endId = findForEachEndNode(feNode.id, adjList, nodes);
+    if (endId) {
+      const subIds = getForEachSubgraphNodes(feNode.id, endId, adjList, nodes);
+      subIds.forEach(sid => {
+        forEachManagedNodeIds.add(sid);
+        inDegree[sid] = Infinity; // Exclude from main DAG traversal
+      });
+    }
+  }
+
   const context: Record<string, any> = {};
   const runningPromises = new Map<string, Promise<void>>();
   const completedNodes = new Set<string>();
@@ -183,6 +200,27 @@ export async function executeFlowEngine(
                   case 'dataSource':
                   case 'fileSource':
                     output = await executeDataSourceNode(node, context, abortController.signal, edges, nodes);
+                    break;
+                  case 'dataList':
+                    output = executeDataListNode(node);
+                    break;
+                  case 'forEach':
+                    output = await executeForEachNode(
+                      node, context, edges, nodes, adjList, notifyProgress,
+                      abortController.signal, flowId
+                    );
+                    break;
+                  case 'forEachEnd':
+                    // Passthrough: inherit the accumulated results from the forEach node
+                    {
+                      const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+                      for (const uid of upstreamIds) {
+                        if (context[uid] !== undefined) {
+                          output = context[uid];
+                          break;
+                        }
+                      }
+                    }
                     break;
                   default:
                     output = { warning: 'Unknown node type' };
@@ -589,7 +627,11 @@ function flattenRows(data: any): any[] {
 
 // Export Node Handler
 async function executeExportNode(node: any, context: Record<string, any>) {
-  const fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0,10)}`;
+  let fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0,10)}`;
+  // Resolve template variables in fileName (e.g., {{_item.id_eds}} inside a forEach loop)
+  if (typeof fileName === 'string' && fileName.includes('{{')) {
+    fileName = resolveTemplate(context, fileName);
+  }
   const format = node.data?.format || 'CSV';
   const dataSource = node.data?.dataSource as string | undefined;
   const columns = node.data?.columns as { header: string, key: string }[] | undefined;
@@ -1089,4 +1131,315 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
   }
 
   return result.rows;
+}
+
+// DataList Node Handler: parses a static JSON array defined by the user in the node inspector
+function executeDataListNode(node: any): any[] {
+  const itemsStr = node.data?.items;
+  if (!itemsStr || (typeof itemsStr === 'string' && itemsStr.trim() === '')) {
+    return [];
+  }
+
+  let parsed: any;
+  if (typeof itemsStr === 'string') {
+    try {
+      parsed = JSON.parse(itemsStr);
+    } catch (e) {
+      throw new Error(`DataList: JSON invalido - ${(e as Error).message}`);
+    }
+  } else {
+    parsed = itemsStr;
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('DataList: El contenido debe ser un array JSON (ej: [{ "id": 1 }, { "id": 2 }])');
+  }
+
+  return parsed;
+}
+
+// Locate the paired forEachEnd node for a given forEach node using BFS through adjList
+function findForEachEndNode(
+  forEachNodeId: string,
+  adjList: Record<string, string[]>,
+  nodes: any[]
+): string | null {
+  const visited = new Set<string>();
+  const queue = [...(adjList[forEachNodeId] || [])];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    const node = nodes.find(n => n.id === current);
+    if (node && node.type === 'forEachEnd') {
+      return current;
+    }
+
+    // Continue BFS to descendants
+    for (const next of (adjList[current] || [])) {
+      if (!visited.has(next)) {
+        queue.push(next);
+      }
+    }
+  }
+
+  return null;
+}
+
+// Extract all node IDs that are strictly between a forEach and its forEachEnd (exclusive of both)
+function getForEachSubgraphNodes(
+  forEachNodeId: string,
+  forEachEndNodeId: string,
+  adjList: Record<string, string[]>,
+  nodes: any[]
+): string[] {
+  const subgraphNodes: string[] = [];
+  const visited = new Set<string>();
+  const queue = [...(adjList[forEachNodeId] || [])];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    // Don't include the forEachEnd itself in the subgraph body
+    if (current === forEachEndNodeId) continue;
+
+    subgraphNodes.push(current);
+
+    // Continue to descendants (but stop at forEachEnd)
+    for (const next of (adjList[current] || [])) {
+      if (!visited.has(next) && next !== forEachEndNodeId) {
+        queue.push(next);
+      }
+    }
+  }
+
+  return subgraphNodes;
+}
+
+// ForEach Node Handler: iterates over an array and re-executes the sub-graph for each item
+async function executeForEachNode(
+  node: any,
+  context: Record<string, any>,
+  edges: any[],
+  nodes: any[],
+  adjList: Record<string, string[]>,
+  onNodeProgress: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void,
+  signal: AbortSignal,
+  flowId: string
+): Promise<any[]> {
+  // Resolve the array to iterate over
+  const iterateOverExpr = node.data?.iterateOver;
+  let items: any[] = [];
+
+  if (iterateOverExpr && iterateOverExpr.trim() !== '') {
+    const resolved = resolveTemplate(context, iterateOverExpr);
+    if (Array.isArray(resolved)) {
+      items = resolved;
+    } else if (resolved !== undefined && resolved !== null) {
+      items = [resolved];
+    }
+  } else {
+    // Auto-detect: find first array in context from upstream nodes
+    const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+    for (const uid of upstreamIds) {
+      if (Array.isArray(context[uid])) {
+        items = context[uid];
+        break;
+      }
+    }
+  }
+
+  if (items.length === 0) {
+    onNodeProgress(node.id, 'completed', { iterations: 0, results: [] });
+    return [];
+  }
+
+  // Find the paired forEachEnd node
+  const forEachEndId = findForEachEndNode(node.id, adjList, nodes);
+  if (!forEachEndId) {
+    throw new Error('ForEach: No se encontro un nodo "Fin de bucle" conectado. Conecta un nodo forEachEnd despues del sub-flujo.');
+  }
+
+  // Get the sub-graph nodes (between forEach and forEachEnd)
+  const subgraphNodeIds = getForEachSubgraphNodes(node.id, forEachEndId, adjList, nodes);
+  const subgraphNodes = nodes.filter(n => subgraphNodeIds.includes(n.id));
+
+  if (subgraphNodes.length === 0) {
+    onNodeProgress(node.id, 'completed', { iterations: 0, results: [] });
+    return [];
+  }
+
+  // Build local adjList and compute base inDegree for the sub-graph
+  const subAdjList: Record<string, string[]> = {};
+  const baseInDegree: Record<string, number> = {};
+
+  subgraphNodes.forEach(n => {
+    subAdjList[n.id] = [];
+    baseInDegree[n.id] = 0;
+  });
+
+  // Only include edges whose source and target are both in the sub-graph
+  const subEdges = edges.filter(
+    e => subgraphNodeIds.includes(e.source) && subgraphNodeIds.includes(e.target)
+  );
+
+  // Also include edges from the forEach node to sub-graph nodes (these start with inDegree 0)
+  const forEachOutEdges = edges.filter(
+    e => e.source === node.id && subgraphNodeIds.includes(e.target)
+  );
+
+  subEdges.forEach(edge => {
+    if (subAdjList[edge.source]) {
+      subAdjList[edge.source].push(edge.target);
+      baseInDegree[edge.target] = (baseInDegree[edge.target] || 0) + 1;
+    }
+  });
+
+  // Nodes directly connected from forEach start with inDegree 0 (already initialized)
+  // No need to adjust because we excluded the forEach->subgraph edges from inDegree calc
+
+  const iterationResults: any[] = [];
+
+  // Sequential iteration over each item
+  for (let i = 0; i < items.length; i++) {
+    if (signal.aborted) {
+      throw new Error('Ejecucion detenida por el usuario');
+    }
+
+    const item = items[i];
+
+    // Emit progress for the forEach node itself
+    onNodeProgress(node.id, 'progress', { current: i + 1, total: items.length, item });
+
+    // Create a local context for this iteration
+    const localContext: Record<string, any> = { ...context, _item: item, _index: i, _total: items.length };
+
+    // Reset sub-graph state for this iteration
+    const localInDegree = { ...baseInDegree };
+    const localCompleted = new Set<string>();
+    const localRunning = new Map<string, Promise<void>>();
+    let iterationError = false;
+    let lastOutput: any = null;
+
+    // Mini-Kahn execution for the sub-graph
+    await new Promise<void>((resolve, reject) => {
+      const checkAndRunLocal = () => {
+        if (iterationError || signal.aborted) return;
+
+        let allDone = true;
+
+        subgraphNodes.forEach(subNode => {
+          if (!localCompleted.has(subNode.id) && !iterationError) {
+            allDone = false;
+
+            if (localInDegree[subNode.id] === 0 && !localRunning.has(subNode.id)) {
+              const p = (async () => {
+                if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
+
+                onNodeProgress(subNode.id, 'running');
+
+                // Animation delay
+                const delayMs = 300;
+                await new Promise<void>((res, rej) => {
+                  if (signal.aborted) return rej(new Error('Ejecucion detenida por el usuario'));
+                  const t = setTimeout(res, delayMs);
+                  const onAbort = () => { clearTimeout(t); signal.removeEventListener('abort', onAbort); rej(new Error('Ejecucion detenida por el usuario')); };
+                  signal.addEventListener('abort', onAbort, { once: true });
+                });
+
+                if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
+
+                try {
+                  let output: any = {};
+                  switch (subNode.type) {
+                    case 'start':
+                      output = { msg: 'Flow started' };
+                      break;
+                    case 'httpGet':
+                    case 'httpPost':
+                    case 'httpRequest':
+                      output = await executeHttpNode(subNode, localContext, onNodeProgress, signal);
+                      break;
+                    case 'scraping':
+                      output = await executeScrapingNode(subNode, localContext, signal);
+                      break;
+                    case 'export':
+                      output = await executeExportNode(subNode, localContext);
+                      break;
+                    case 'query':
+                      output = await executeQueryNode(subNode, localContext, signal);
+                      break;
+                    case 'timer':
+                    case 'delay':
+                      output = await executeTimerNode(subNode, (status, res) => onNodeProgress(subNode.id, status, res), signal);
+                      {
+                        const timerUpstreamIds = getEffectiveDataSources(subNode.id, edges, nodes);
+                        if (timerUpstreamIds.length > 0 && localContext[timerUpstreamIds[0]]) {
+                          output = localContext[timerUpstreamIds[0]];
+                        }
+                      }
+                      break;
+                    case 'dataSource':
+                    case 'fileSource':
+                      output = await executeDataSourceNode(subNode, localContext, signal, edges, nodes);
+                      break;
+                    case 'dataList':
+                      output = executeDataListNode(subNode);
+                      break;
+                    default:
+                      output = { warning: 'Unknown node type' };
+                  }
+
+                  localContext[subNode.id] = output;
+                  lastOutput = output;
+                  localCompleted.add(subNode.id);
+                  onNodeProgress(subNode.id, 'completed', output);
+
+                  // Unlock dependents within the sub-graph
+                  if (subAdjList[subNode.id]) {
+                    subAdjList[subNode.id].forEach(depId => {
+                      localInDegree[depId]--;
+                    });
+                  }
+                } catch (err: any) {
+                  iterationError = true;
+                  onNodeProgress(subNode.id, 'error', { error: err.message });
+                  throw err;
+                }
+              })();
+
+              localRunning.set(subNode.id, p);
+
+              p.then(() => {
+                localRunning.delete(subNode.id);
+                checkAndRunLocal();
+              }).catch(err => {
+                localRunning.delete(subNode.id);
+                reject(err);
+              });
+            }
+          }
+        });
+
+        if (allDone && localRunning.size === 0) {
+          resolve();
+        }
+      };
+
+      checkAndRunLocal();
+    });
+
+    // Collect the last meaningful output from this iteration
+    iterationResults.push(lastOutput);
+
+    // Propagate sub-graph results back to main context for the forEachEnd node
+    // Store intermediate results so they accumulate across iterations
+    context[node.id] = iterationResults;
+  }
+
+  return iterationResults;
 }
