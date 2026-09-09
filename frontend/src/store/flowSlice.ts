@@ -154,7 +154,8 @@ export const resumeDebugNode = createAsyncThunk('flows/resumeDebug', async ({ id
 export const pauseDebugExecution = createAsyncThunk('flows/pauseDebug', async (id: string) => {
   const res = await fetch(`${API_URL}/flows/${id}/debug/pause`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' }
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
   });
   const data = await res.json();
   return data.data;

@@ -161,10 +161,17 @@ function FlowCanvas() {
   
   const [showSaveNotification, setShowSaveNotification] = useState(false);
   const [isLiveExecuting, setIsLiveExecuting] = useState(false);
+  const [isPausing, setIsPausing] = useState(false);
   const isLiveExecutingRef = useRef(false);
   useEffect(() => {
     isLiveExecutingRef.current = isLiveExecuting;
   }, [isLiveExecuting]);
+
+  useEffect(() => {
+    if (pausedNodeIds.length > 0 || !isLiveExecuting) {
+      setIsPausing(false);
+    }
+  }, [pausedNodeIds.length, isLiveExecuting]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const downloadedUrlsRef = useRef(new Set<string>());
 
@@ -952,11 +959,23 @@ function FlowCanvas() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => dispatch(pauseDebugExecution(currentFlow!.id))}
-                      className="h-7 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium"
+                      disabled={isPausing}
+                      onClick={async () => {
+                        setIsPausing(true);
+                        await dispatch(pauseDebugExecution(currentFlow!.id));
+                      }}
+                      className="h-7 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
                       title="Pausar en el siguiente paso para retomar el control paso a paso"
                     >
-                      <Pause size={13} className="mr-1 fill-amber-600" /> Pausar
+                      {isPausing ? (
+                        <>
+                          <Loader2 size={13} className="mr-1 animate-spin text-amber-600" /> Pausando...
+                        </>
+                      ) : (
+                        <>
+                          <Pause size={13} className="mr-1 fill-amber-600" /> Pausar
+                        </>
+                      )}
                     </Button>
                   </>
                 )}

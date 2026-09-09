@@ -630,7 +630,8 @@ async function executeHttpNode(
     results.push(finalResult);
 
     // DEBUG MODE: Pause after receiving response if in debug step mode so user can inspect the response
-    if (shouldPause) {
+    const shouldPauseAfterResponse = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id];
+    if (shouldPause || shouldPauseAfterResponse) {
       const currentIterationInfo = itemsToIterate.length > 1
         ? { current: i + 1, total: itemsToIterate.length }
         : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
