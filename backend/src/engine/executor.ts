@@ -386,19 +386,25 @@ async function executeHttpNode(
   const iterateMode = node.data?.iterateMode;
   let itemsToIterate: any[] = [null]; // By default, run once with no item
 
-  if (iterateOver && iterateOver.trim() !== '' && iterateOver.trim() !== '{{ID_NODO}}') {
-    const resolved = resolveTemplate(context, iterateOver);
-    if (Array.isArray(resolved)) {
-      itemsToIterate = resolved;
-    }
-  }
+  // When executing inside a forEach loop, the outer loop already drives iteration item-by-item.
+  // Sub-nodes must run exactly once per item, never performing batch iteration over the parent list.
+  const isInsideForEach = context._item !== undefined || context._index !== undefined;
 
-  // Auto-detect: if iterateMode is enabled but array wasn't resolved, grab first array from context
-  if (iterateMode && (itemsToIterate.length === 1 && itemsToIterate[0] === null)) {
-    for (const ctxVal of Object.values(context)) {
-      if (Array.isArray(ctxVal) && ctxVal.length > 0) {
-        itemsToIterate = ctxVal;
-        break;
+  if (!isInsideForEach) {
+    if (iterateOver && iterateOver.trim() !== '' && iterateOver.trim() !== '{{ID_NODO}}') {
+      const resolved = resolveTemplate(context, iterateOver);
+      if (Array.isArray(resolved)) {
+        itemsToIterate = resolved;
+      }
+    }
+
+    // Auto-detect: if iterateMode is enabled but array wasn't resolved, grab first array from context
+    if (iterateMode && (itemsToIterate.length === 1 && itemsToIterate[0] === null)) {
+      for (const ctxVal of Object.values(context)) {
+        if (Array.isArray(ctxVal) && ctxVal.length > 0) {
+          itemsToIterate = ctxVal;
+          break;
+        }
       }
     }
   }
@@ -542,10 +548,14 @@ async function executeHttpNode(
     }
 
     if (onNodeProgress) {
-      onNodeProgress(node.id, 'running', {
-        current: i + 1,
-        total: itemsToIterate.length
-      });
+      if (itemsToIterate.length > 1) {
+        onNodeProgress(node.id, 'running', {
+          current: i + 1,
+          total: itemsToIterate.length
+        });
+      } else {
+        onNodeProgress(node.id, 'running');
+      }
     }
 
     // Combine user abort signal with a 30-second network timeout ONLY when actually fetching

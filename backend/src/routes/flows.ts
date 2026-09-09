@@ -47,7 +47,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
       if (name !== undefined) { updates.push('name = ?'); values.push(name); }
       if (description !== undefined) { updates.push('description = ?'); values.push(description); }
-      if (definition !== undefined) { updates.push('definition = ?'); values.push(definition); }
+      if (definition !== undefined) { updates.push('definition = ?'); values.push(typeof definition === 'object' ? JSON.stringify(definition) : definition); }
       if (status !== undefined) { updates.push('status = ?'); values.push(status); }
       if (is_locked !== undefined) { updates.push('is_locked = ?'); values.push(is_locked); }
       updates.push("updated_at = datetime('now')");

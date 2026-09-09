@@ -903,34 +903,43 @@ function DataSourceInspector({
                     </div>
 
                     <div className="space-y-1.5 pt-2 border-t border-border mt-3">
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id="iterateMode"
-                          className="w-3.5 h-3.5 accent-accent"
-                          checked={node.data?.iterateMode as boolean || false}
-                          onChange={(e) => updateNodeData('iterateMode', e.target.checked)}
-                        />
-                        <label htmlFor="iterateMode" className="text-xs font-medium cursor-pointer">
-                          Modo Iteración (Batch)
-                        </label>
-                      </div>
-                      {Boolean(node.data?.iterateMode) && (
-                        <div className="mt-2 pl-5 space-y-1">
-                          <label className="text-[10px] font-medium text-muted-foreground block">Array base a iterar</label>
-                          <div className="flex gap-1">
-                            <Input
-                              className="h-8 text-xs font-mono"
-                              value={node.data?.iterateOver as string || ''}
-                              onChange={(e) => updateNodeData('iterateOver', e.target.value)}
-                              placeholder="{{ID_NODO}}"
-                            />
-                            {upstreamDataNodes.map(upNode => (
-                              <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('iterateOver', val)} />
-                            ))}
-                          </div>
-                          <p className="text-[10px] text-muted">Extrae la lista completa con [*] y luego usa {'{{_item.propiedad}}'} en los demás campos.</p>
+                      {parentForEachNode ? (
+                        <div className="bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800/50 rounded p-2.5 text-[11px] text-sky-800 dark:text-sky-200">
+                          <span className="font-semibold block mb-0.5">Iteración controlada por el bucle: {parentForEachNode.data?.label || 'Para cada elemento'}</span>
+                          <span>Este nodo se ejecutará 1 vez por cada elemento de la lista usando {'{{_item}}'}. El modo batch interno está desactivado dentro del bucle.</span>
                         </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              id="iterateMode"
+                              className="w-3.5 h-3.5 accent-accent"
+                              checked={node.data?.iterateMode as boolean || false}
+                              onChange={(e) => updateNodeData('iterateMode', e.target.checked)}
+                            />
+                            <label htmlFor="iterateMode" className="text-xs font-medium cursor-pointer">
+                              Modo Iteración (Batch)
+                            </label>
+                          </div>
+                          {Boolean(node.data?.iterateMode) && (
+                            <div className="mt-2 pl-5 space-y-1">
+                              <label className="text-[10px] font-medium text-muted-foreground block">Array base a iterar</label>
+                              <div className="flex gap-1">
+                                <Input
+                                  className="h-8 text-xs font-mono"
+                                  value={node.data?.iterateOver as string || ''}
+                                  onChange={(e) => updateNodeData('iterateOver', e.target.value)}
+                                  placeholder="{{ID_NODO}}"
+                                />
+                                {upstreamDataNodes.map(upNode => (
+                                  <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('iterateOver', val)} />
+                                ))}
+                              </div>
+                              <p className="text-[10px] text-muted">Extrae la lista completa con [*] y luego usa {'{{_item.propiedad}}'} en los demás campos.</p>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                     <div className="space-y-1.5">
