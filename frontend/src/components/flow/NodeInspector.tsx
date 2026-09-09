@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
+import { DebugContextViewer } from './DebugContextViewer';
 import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2, Plus, Trash2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
@@ -355,7 +356,7 @@ function DataSourceInspector({
         <div className="space-y-3">
           <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-md text-emerald-800">
             <p className="text-xs font-semibold mb-1 flex items-center gap-2">
-              <span className="w-4 h-4 rounded-full bg-emerald-500/20 flex items-center justify-center text-xs">⚑</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
               Modo Unificador (Merge)
             </p>
             <p className="text-[11px] leading-relaxed opacity-90">
@@ -487,7 +488,7 @@ function DataSourceInspector({
 
           <div className="p-2.5 bg-bg border border-border rounded text-[11px] text-muted space-y-1">
             <p>
-              💡 Puedes referenciar este nodo unificador usando <code>{`{{${node.id}}}`}</code> en otros nodos (ej. "Iterar Sobre" de HTTP o en un nodo de Exportar).
+              Puedes referenciar este nodo unificador usando <code>{`{{${node.id}}}`}</code> en otros nodos (ej. "Iterar Sobre" de HTTP o en un nodo de Exportar).
             </p>
           </div>
         </div>
@@ -557,21 +558,40 @@ function DataSourceInspector({
               );
   };
 
-            if (!node) {
+  const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
+  const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
+  const debugRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
+  const debugResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
+  const currentFlow = useAppSelector(state => state.flows.currentFlow);
+  const isPaused = pausedNodeIds.includes(selectedNodeId);
+
+  if (!node) {
     return (
-            <div className="w-[380px] bg-surface border-l border-border flex flex-col p-4 z-10 shrink-0">
-              Nodo no encontrado
-            </div>
-            );
+      <div className="w-[380px] bg-surface border-l border-border flex flex-col p-4 z-10 shrink-0">
+        Nodo no encontrado
+      </div>
+    );
   }
 
-            return (
-            <div className="w-[380px] bg-surface border-l border-border flex flex-col h-full z-10 shrink-0">
-              <div className="p-4 border-b border-border font-medium flex items-center justify-between">
-                Configuración
-                <span className="text-xs text-muted px-2 py-1 bg-bg rounded-sm font-mono">{node.type || 'unknown'}</span>
-              </div>
-              <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-4">
+  return (
+    <div className="w-[380px] bg-surface border-l border-border flex flex-col h-full z-10 shrink-0">
+      <div className="p-4 border-b border-border font-medium flex items-center justify-between">
+        Configuración
+        <span className="text-xs text-muted px-2 py-1 bg-bg rounded-sm font-mono">{node.type || 'unknown'}</span>
+      </div>
+      <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-4">
+
+        {isPaused && (
+          <DebugContextViewer
+            node={node}
+            nodes={nodes}
+            edges={edges}
+            flowId={currentFlow?.id || ''}
+            context={intermediateContext || {}}
+            requestPreview={debugRequestPreview}
+            responsePreview={debugResponsePreview}
+          />
+        )}
 
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium">Etiqueta del nodo</label>
@@ -720,7 +740,22 @@ function DataSourceInspector({
                         <label className="text-xs font-medium">Endpoint URL</label>
                         <div className="flex gap-1">
                           {upstreamDataNodes.map(upNode => (
-                            <JsonSelectorTrigger key={upNode!.id} node={upNode} customLabel={`Mapear`} onSelectValue={(val) => updateNodeData('endpoint', ((node.data?.endpoint as string) || '') + val)} />
+                            <JsonSelectorTrigger
+                              key={upNode!.id}
+                              node={upNode}
+                              customLabel={`Mapear`}
+                              onSelectValue={(val) => {
+                                const current = (node.data?.endpoint as string) || '';
+                                if (current.includes('{') && current.includes('}')) {
+                                  updateNodeData('endpoint', current.replace(/\{[^{}]+\}/, val));
+                                } else if (current.includes(':')) {
+                                  updateNodeData('endpoint', current.replace(/:[a-zA-Z0-9_]+/, val));
+                                } else {
+                                  const sep = current.endsWith('/') || current === '' ? '' : '/';
+                                  updateNodeData('endpoint', current + sep + val);
+                                }
+                              }}
+                            />
                           ))}
                         </div>
                       </div>
@@ -767,6 +802,50 @@ function DataSourceInspector({
                         }}
                         placeholder="https://api.example.com/v1/users/{{start.data.id}}"
                       />
+
+                      {/* Path Parameters in URL Detector */}
+                      {(() => {
+                        const currentUrl = (node.data?.endpoint as string) || '';
+                        // Only match single braces {param} that are NOT double braces {{...}}, and :param
+                        const singleBraceTokens = currentUrl.match(/(?<!\{)\{([^{}]+)\}(?!\})/g) || [];
+                        const routeParamTokens = currentUrl.match(/:([a-zA-Z0-9_]+)/g) || [];
+                        const pathTokens = Array.from(new Set([...singleBraceTokens, ...routeParamTokens]));
+                        if (pathTokens.length === 0) return null;
+
+                        return (
+                          <div className="p-2.5 bg-bg border border-border rounded-md space-y-2 mt-2">
+                            <div className="flex items-center justify-between text-xs font-medium text-fg">
+                              <span className="flex items-center gap-1.5">
+                                <span className="text-[10px] bg-accent/10 text-accent font-mono px-1.5 py-0.2 rounded border border-accent/20">Ruta</span>
+                                Parámetros de ruta detectados en la URL ({pathTokens.length})
+                              </span>
+                            </div>
+                            <div className="space-y-1.5">
+                              {pathTokens.map(token => (
+                                <div key={token} className="flex items-center gap-2 bg-surface p-1.5 rounded border border-border">
+                                  <span className="text-xs font-mono font-semibold text-accent shrink-0 px-1.5 py-0.5 bg-accent/5 rounded border border-border">
+                                    {token}
+                                  </span>
+                                  <span className="text-[11px] text-muted shrink-0">Mapear con:</span>
+                                  <div className="flex-1 flex gap-1 items-center justify-end">
+                                    {upstreamDataNodes.map(upNode => (
+                                      <JsonSelectorTrigger
+                                        key={upNode!.id}
+                                        node={upNode}
+                                        customLabel={`Seleccionar campo`}
+                                        onSelectValue={(val) => {
+                                          const nextUrl = currentUrl.replace(token, val);
+                                          updateNodeData('endpoint', nextUrl);
+                                        }}
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <div className="space-y-1.5">
@@ -1091,7 +1170,9 @@ function DataSourceInspector({
                               id: node.id,
                               label: node.data?.label || 'Exportar',
                               fileName: node.data?.fileName,
-                              format: node.data?.format
+                              format: node.data?.format,
+                              result: selectedNodeResult,
+                              completed: Boolean(selectedNodeResult)
                             }
                           })
                         );
@@ -1428,7 +1509,7 @@ function DataSourceInspector({
               const [extractArray, setExtractArray] = useState(false);
               const [extractIterate, setExtractIterate] = useState(false);
   
-  const cachedResult = useAppSelector(state => (state as any).flows?.nodeResults?.[node.id]);
+  const cachedResult = useAppSelector(state => (state as any).flows?.nodeResults?.[node.id] || (state as any).flows?.intermediateContext?.[node.id]);
 
               // Multi-select state for column auto-mapping
               const [selectedPaths, setSelectedPaths] = useState<string[]>([]);

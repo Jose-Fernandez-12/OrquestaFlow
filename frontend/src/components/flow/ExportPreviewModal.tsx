@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import type { Node, Edge } from '@xyflow/react';
 import {
   X,
   Download,
@@ -9,11 +10,12 @@ import {
   ChevronLeft,
   ChevronRight,
   AlertCircle,
-  CheckCircle2
+  CheckCircle2,
+  Database
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { triggerBrowserDownload } from '../../lib/exportUtils';
+import { triggerBrowserDownload, downloadAsCSV, downloadAsXMLSpreadsheet } from '../../lib/exportUtils';
 
 interface ExportPreviewModalProps {
   isOpen: boolean;
@@ -26,6 +28,64 @@ interface ExportPreviewModalProps {
   onExecuteFlow: () => void;
   fileName?: string;
   format?: string;
+  node?: Node;
+  nodes?: Node[];
+  edges?: Edge[];
+  context?: Record<string, any>;
+}
+
+function resolveDotPath(obj: any, path: string): any {
+  if (!obj || !path) return undefined;
+  return path.split('.').reduce((acc, part) => {
+    if (acc == null) return undefined;
+    const bracketMatch = part.match(/^([^\[]*)\[(\d+)\]$/);
+    if (bracketMatch) {
+      const key = bracketMatch[1];
+      const idx = parseInt(bracketMatch[2], 10);
+      const nested = key ? acc[key] : acc;
+      return nested != null ? nested[idx] : undefined;
+    }
+    return acc[part];
+  }, obj);
+}
+
+function flattenDataRows(data: any): any[] {
+  if (!data) return [];
+  if (!Array.isArray(data)) {
+    if (typeof data === 'object' && data !== null) {
+      if (Array.isArray(data.rows)) return flattenDataRows(data.rows);
+      if (Array.isArray(data.data)) return flattenDataRows(data.data);
+      if (Array.isArray(data.items)) return flattenDataRows(data.items);
+      if (data.data && typeof data.data === 'object' && Object.keys(data.data).length > 0) {
+        return [data.data];
+      }
+      const arr = Object.values(data).find(v => Array.isArray(v));
+      if (arr) return flattenDataRows(arr);
+      return [data];
+    }
+    return [];
+  }
+
+  const result: any[] = [];
+  for (const item of data) {
+    if (!item) continue;
+    if (Array.isArray(item)) {
+      result.push(...flattenDataRows(item));
+    } else if (typeof item === 'object') {
+      if (Array.isArray(item.data)) {
+        result.push(...flattenDataRows(item.data));
+      } else if (Array.isArray(item.rows)) {
+        result.push(...flattenDataRows(item.rows));
+      } else if (Array.isArray(item.items)) {
+        result.push(...flattenDataRows(item.items));
+      } else if (item.data && typeof item.data === 'object' && Object.keys(item.data).length > 0) {
+        result.push({ ...item.data });
+      } else {
+        result.push(item);
+      }
+    }
+  }
+  return result;
 }
 
 export function ExportPreviewModal({
@@ -39,6 +99,10 @@ export function ExportPreviewModal({
   onExecuteFlow,
   fileName: configuredFileName,
   format: configuredFormat,
+  node,
+  nodes = [],
+  edges = [],
+  context = {},
 }: ExportPreviewModalProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [page, setPage] = useState(1);
@@ -66,6 +130,93 @@ export function ExportPreviewModal({
     }
   }, [isOpen, nodeResult?.filePath, nodeResult?.previewRows]);
 
+  const inMemoryPreview = useMemo(() => {
+    if (nodeResult?.previewRows && nodeResult.previewRows.length > 0) return null;
+    if (fetchedData?.rows && fetchedData.rows.length > 0) return null;
+    if (!context || Object.keys(context).length === 0) return null;
+
+    // 1. Identify upstream producer nodes
+    const incomingEdgeSourceIds = edges
+      ? edges.filter(e => e.target === nodeId).map(e => e.source)
+      : [];
+
+    const resolvedIds = new Set<string>();
+    const queue = [...incomingEdgeSourceIds];
+
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      resolvedIds.add(currentId);
+      const srcNode = nodes?.find(n => n.id === currentId);
+      if (srcNode && (srcNode.type === 'timer' || srcNode.type === 'delay')) {
+        const parentsOfTimer = edges?.filter(e => e.target === currentId).map(e => e.source) || [];
+        for (const p of parentsOfTimer) {
+          if (!resolvedIds.has(p)) queue.push(p);
+        }
+      }
+    }
+
+    const upstreamNodes = nodes ? nodes.filter(n => resolvedIds.has(n.id)) : [];
+
+    // 2. Resolve raw data
+    let rawData: any = null;
+    let sourceLabel = '';
+
+    const dataSource = node?.data?.dataSource as string | undefined;
+    if (dataSource && dataSource.trim() !== '') {
+      const match = dataSource.match(/^\{\{(.+)\}\}$/);
+      const pathStr = match ? match[1] : dataSource;
+      rawData = resolveDotPath(context, pathStr);
+      sourceLabel = dataSource;
+    } else if (upstreamNodes.length > 0) {
+      for (const up of upstreamNodes) {
+        if (context[up.id] !== undefined && context[up.id] !== null) {
+          rawData = context[up.id];
+          sourceLabel = (up.data?.label as string) || up.type;
+          break;
+        }
+      }
+    }
+
+    if (!rawData) {
+      for (const [key, val] of Object.entries(context)) {
+        if (!key.startsWith('start') && val !== undefined && val !== null) {
+          rawData = val;
+          const matchNode = nodes?.find(n => n.id === key);
+          sourceLabel = (matchNode?.data?.label as string) || matchNode?.type || key;
+          break;
+        }
+      }
+    }
+
+    if (!rawData) return null;
+
+    const baseRows = flattenDataRows(rawData);
+    if (baseRows.length === 0) return null;
+
+    // Apply column mapping if defined
+    const columnsConfig = (node?.data?.columns as { header: string; key: string }[]) || [];
+    let mappedRows = baseRows;
+
+    if (columnsConfig.length > 0) {
+      mappedRows = baseRows.map(item => {
+        const row: Record<string, any> = {};
+        for (const col of columnsConfig) {
+          if (col.header && col.key) {
+            const val = resolveDotPath(item, col.key);
+            row[col.header] = val !== undefined && val !== null ? val : '';
+          }
+        }
+        return row;
+      });
+    }
+
+    return {
+      rows: mappedRows,
+      sourceLabel,
+      totalRows: mappedRows.length
+    };
+  }, [nodeResult, fetchedData, context, edges, nodes, nodeId, node]);
+
   const rows: any[] = useMemo(() => {
     if (nodeResult?.previewRows && Array.isArray(nodeResult.previewRows) && nodeResult.previewRows.length > 0) {
       return nodeResult.previewRows;
@@ -73,8 +224,11 @@ export function ExportPreviewModal({
     if (fetchedData?.rows && Array.isArray(fetchedData.rows)) {
       return fetchedData.rows;
     }
+    if (inMemoryPreview?.rows && Array.isArray(inMemoryPreview.rows)) {
+      return inMemoryPreview.rows;
+    }
     return [];
-  }, [nodeResult, fetchedData]);
+  }, [nodeResult, fetchedData, inMemoryPreview]);
 
   const columns: string[] = useMemo(() => {
     if (nodeResult?.headers && Array.isArray(nodeResult.headers) && nodeResult.headers.length > 0) {
@@ -112,13 +266,20 @@ export function ExportPreviewModal({
   const displayFormat = nodeResult?.format || configuredFormat || 'CSV';
   const displayFileName =
     nodeResult?.filePath ? nodeResult.filePath.split(/[/\\]/).pop() : (configuredFileName || 'export');
-  const totalRecords = nodeResult?.records ?? (fetchedData?.totalRows ?? rows.length);
-  const isReady = (completed || Boolean(nodeResult?.filePath)) && rows.length > 0;
+  const totalRecords = nodeResult?.records ?? (fetchedData?.totalRows ?? inMemoryPreview?.totalRows ?? rows.length);
+  const isReady = (completed || Boolean(nodeResult?.filePath) || Boolean(inMemoryPreview)) && rows.length > 0;
 
   const handleDownload = () => {
     if (nodeResult?.filePath) {
       const fileName = nodeResult.filePath.split(/[/\\]/).pop();
       triggerBrowserDownload(`http://localhost:3001/api/files/${fileName}`, fileName);
+    } else if (rows.length > 0) {
+      const cols = columns.map(c => ({ header: c, key: c }));
+      if (displayFormat.toLowerCase().includes('excel') || displayFormat.toLowerCase().includes('xlsx')) {
+        downloadAsXMLSpreadsheet(rows, cols, displayFileName);
+      } else {
+        downloadAsCSV(rows, cols, displayFileName);
+      }
     }
   };
 
@@ -219,6 +380,13 @@ export function ExportPreviewModal({
                 </div>
 
                 <div className="flex items-center gap-3">
+                  {inMemoryPreview && (
+                    <span className="text-[11px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 px-2.5 py-1 rounded border border-emerald-500/20 font-medium flex items-center gap-1.5">
+                      <Database size={12} className="text-emerald-600" />
+                      <span>Datos en memoria: {inMemoryPreview.sourceLabel}</span>
+                    </span>
+                  )}
+
                   <span className="text-xs text-muted">
                     Total:{' '}
                     <strong className="text-fg font-semibold">
@@ -231,7 +399,7 @@ export function ExportPreviewModal({
                     columnas
                   </span>
 
-                  {nodeResult?.filePath && (
+                  {(Boolean(nodeResult?.filePath) || rows.length > 0) && (
                     <Button
                       variant="default"
                       size="sm"
