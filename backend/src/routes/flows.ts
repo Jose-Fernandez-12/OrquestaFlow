@@ -47,7 +47,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
       if (name !== undefined) { updates.push('name = ?'); values.push(name); }
       if (description !== undefined) { updates.push('description = ?'); values.push(description); }
-      if (definition !== undefined) { updates.push('definition = ?'); values.push(definition); }
+      if (definition !== undefined) { updates.push('definition = ?'); values.push(typeof definition === 'object' ? JSON.stringify(definition) : definition); }
       if (status !== undefined) { updates.push('status = ?'); values.push(status); }
       if (is_locked !== undefined) { updates.push('is_locked = ?'); values.push(is_locked); }
       updates.push("updated_at = datetime('now')");
@@ -123,6 +123,16 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Failed to resume execution (invalid node or not in debug mode)' });
     }
     return { data: { resumed: true } };
+  });
+
+  // Pause debug execution
+  app.post<{ Params: { id: string } }>('/:id/debug/pause', async (request, reply) => {
+    const { pauseDebugExecution } = await import('../engine/executor.js');
+    const paused = pauseDebugExecution(request.params.id);
+    if (!paused) {
+      return reply.status(400).send({ error: 'Failed to pause execution (not running in debug mode)' });
+    }
+    return { data: { paused: true } };
   });
 
   // Execute flow (using DAG engine)

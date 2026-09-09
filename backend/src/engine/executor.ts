@@ -31,9 +31,24 @@ export function stopFlowEngine(flowId: string, reason = 'Ejecución detenida por
   current.status = 'cancelled';
   current.cancelReason = reason;
   current.abortController.abort(reason);
+  if (current.resumeResolvers) {
+    Object.values(current.resumeResolvers).forEach(resolve => resolve('stop'));
+    current.resumeResolvers = {};
+  }
   setTimeout(() => {
     activeFlowExecutions.delete(flowId);
   }, 30000);
+  return true;
+}
+
+// Pause execution for debug mode
+export function pauseDebugExecution(flowId: string): boolean {
+  const current = activeFlowExecutions.get(flowId);
+  if (!current || current.status !== 'running') {
+    return false;
+  }
+  current.debugState = 'paused';
+  current.skipHttpPauseForNode = {};
   return true;
 }
 
@@ -161,6 +176,25 @@ export async function executeFlowEngine(
         forEachManagedNodeIds.add(sid);
         inDegree[sid] = Infinity; // Exclude from main DAG traversal
       });
+
+      // Crucial fix: The subgraph nodes between feNode and endId execute inside executeForEachNode,
+      // NOT in the main Kahn traversal loop.
+      // Therefore, edges from subIds to endId will never decrement inDegree[endId] in the main DAG.
+      // We must remove their inDegree contribution:
+      normalizedEdges.forEach(edge => {
+        if (edge.target === endId && subIds.includes(edge.source)) {
+          inDegree[endId] = Math.max(0, (inDegree[endId] || 0) - 1);
+        }
+      });
+
+      // Instead, feNode's completion in the main DAG must unlock endId:
+      if (!adjList[feNode.id]) {
+        adjList[feNode.id] = [];
+      }
+      if (!adjList[feNode.id].includes(endId)) {
+        adjList[feNode.id].push(endId);
+        inDegree[endId] = (inDegree[endId] || 0) + 1;
+      }
     }
   }
 
@@ -189,6 +223,11 @@ export async function executeFlowEngine(
       let allDone = true;
 
       nodes.forEach(node => {
+        // Subgraph nodes are executed internally by forEachNode, not by the main Kahn loop
+        if (forEachManagedNodeIds.has(node.id)) {
+          return;
+        }
+
         if (!completedNodes.has(node.id) && !errorNodes.has(node.id)) {
           allDone = false;
           
@@ -245,7 +284,7 @@ export async function executeFlowEngine(
                     output = await executeScrapingNode(node, context, abortController.signal);
                     break;
                   case 'export':
-                    output = await executeExportNode(node, context);
+                    output = await executeExportNode(node, context, edges, nodes);
                     break;
                   case 'query':
                     output = await executeQueryNode(node, context, abortController.signal);
@@ -274,14 +313,26 @@ export async function executeFlowEngine(
                     );
                     break;
                   case 'forEachEnd':
-                    // Passthrough: inherit the accumulated results from the forEach node
+                    // Passthrough: inherit the accumulated results from the paired forEach node
                     {
-                      const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
-                      for (const uid of upstreamIds) {
-                        if (context[uid] !== undefined) {
-                          output = context[uid];
-                          break;
+                      const pairedForEach = nodes.find(
+                        n => n.type === 'forEach' && findForEachEndNode(n.id, adjList, nodes) === node.id
+                      );
+                      if (pairedForEach && context[pairedForEach.id] !== undefined) {
+                        output = context[pairedForEach.id];
+                      } else if (context[node.id] !== undefined) {
+                        output = context[node.id];
+                      } else {
+                        const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+                        for (const uid of upstreamIds) {
+                          if (context[uid] !== undefined) {
+                            output = context[uid];
+                            break;
+                          }
                         }
+                      }
+                      if (Array.isArray(output)) {
+                        output = flattenRows(output);
                       }
                     }
                     break;
@@ -291,6 +342,13 @@ export async function executeFlowEngine(
 
                 context[node.id] = output;
                 completedNodes.add(node.id);
+                if (node.type === 'forEach') {
+                  const endId = findForEachEndNode(node.id, adjList, nodes);
+                  if (endId) {
+                    const subIds = getForEachSubgraphNodes(node.id, endId, adjList, nodes);
+                    subIds.forEach(sid => completedNodes.add(sid));
+                  }
+                }
                 notifyProgress(node.id, 'completed', output);
 
                 // Unlock dependents
@@ -355,19 +413,25 @@ async function executeHttpNode(
   const iterateMode = node.data?.iterateMode;
   let itemsToIterate: any[] = [null]; // By default, run once with no item
 
-  if (iterateOver && iterateOver.trim() !== '' && iterateOver.trim() !== '{{ID_NODO}}') {
-    const resolved = resolveTemplate(context, iterateOver);
-    if (Array.isArray(resolved)) {
-      itemsToIterate = resolved;
-    }
-  }
+  // When executing inside a forEach loop, the outer loop already drives iteration item-by-item.
+  // Sub-nodes must run exactly once per item, never performing batch iteration over the parent list.
+  const isInsideForEach = context._item !== undefined || context._index !== undefined;
 
-  // Auto-detect: if iterateMode is enabled but array wasn't resolved, grab first array from context
-  if (iterateMode && (itemsToIterate.length === 1 && itemsToIterate[0] === null)) {
-    for (const ctxVal of Object.values(context)) {
-      if (Array.isArray(ctxVal) && ctxVal.length > 0) {
-        itemsToIterate = ctxVal;
-        break;
+  if (!isInsideForEach) {
+    if (iterateOver && iterateOver.trim() !== '' && iterateOver.trim() !== '{{ID_NODO}}') {
+      const resolved = resolveTemplate(context, iterateOver);
+      if (Array.isArray(resolved)) {
+        itemsToIterate = resolved;
+      }
+    }
+
+    // Auto-detect: if iterateMode is enabled but array wasn't resolved, grab first array from context
+    if (iterateMode && (itemsToIterate.length === 1 && itemsToIterate[0] === null)) {
+      for (const ctxVal of Object.values(context)) {
+        if (Array.isArray(ctxVal) && ctxVal.length > 0) {
+          itemsToIterate = ctxVal;
+          break;
+        }
       }
     }
   }
@@ -475,24 +539,26 @@ async function executeHttpNode(
                         !currentExec?.skipHttpPauseForNode?.[node.id];
 
     if (shouldPause) {
+      const effectiveItem = item ?? context._item;
+      const currentIterationInfo = itemsToIterate.length > 1
+        ? { current: i + 1, total: itemsToIterate.length }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+
       const requestPreview = {
         method,
         endpoint,
         headers,
         body: requestBody || null,
         params: node.data?.params || null,
-        iteration: {
-          current: i + 1,
-          total: itemsToIterate.length
-        },
-        item
+        iteration: currentIterationInfo,
+        item: effectiveItem
       };
 
       if (onNodeProgress) {
         onNodeProgress(node.id, 'paused', {
           debugType: 'http_request',
           requestPreview,
-          context: { ...context, _item: item }
+          context: { ...context, _item: effectiveItem }
         });
       }
 
@@ -509,10 +575,14 @@ async function executeHttpNode(
     }
 
     if (onNodeProgress) {
-      onNodeProgress(node.id, 'running', {
-        current: i + 1,
-        total: itemsToIterate.length
-      });
+      if (itemsToIterate.length > 1) {
+        onNodeProgress(node.id, 'running', {
+          current: i + 1,
+          total: itemsToIterate.length
+        });
+      } else {
+        onNodeProgress(node.id, 'running');
+      }
     }
 
     // Combine user abort signal with a 30-second network timeout ONLY when actually fetching
@@ -560,7 +630,12 @@ async function executeHttpNode(
     results.push(finalResult);
 
     // DEBUG MODE: Pause after receiving response if in debug step mode so user can inspect the response
-    if (shouldPause) {
+    const shouldPauseAfterResponse = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id];
+    if (shouldPause || shouldPauseAfterResponse) {
+      const currentIterationInfo = itemsToIterate.length > 1
+        ? { current: i + 1, total: itemsToIterate.length }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+
       const responsePreview = {
         status: response.status,
         statusText: response.statusText,
@@ -568,14 +643,15 @@ async function executeHttpNode(
         durationMs,
         headers: responseHeaders,
         data: parsedBody,
-        iteration: itemsToIterate.length > 1 ? { current: i + 1, total: itemsToIterate.length } : undefined
+        iteration: currentIterationInfo
       };
       if (onNodeProgress) {
         onNodeProgress(node.id, 'paused', {
           debugType: 'http_response',
           responsePreview,
-          current: i + 1,
-          total: itemsToIterate.length
+          current: context._index !== undefined ? context._index + 1 : (i + 1),
+          total: context._total !== undefined ? context._total : itemsToIterate.length,
+          context: { ...context, _item: item ?? context._item }
         });
       }
       const resumeActionAfter = await new Promise<string>((resolve) => {
@@ -903,7 +979,7 @@ function flattenRows(data: any): any[] {
 }
 
 // Export Node Handler
-async function executeExportNode(node: any, context: Record<string, any>) {
+async function executeExportNode(node: any, context: Record<string, any>, edges?: any[], nodes?: any[]) {
   let fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0,10)}`;
   // Resolve template variables in fileName (e.g., {{_item.id_eds}} inside a forEach loop)
   if (typeof fileName === 'string' && fileName.includes('{{')) {
@@ -920,14 +996,27 @@ async function executeExportNode(node: any, context: Record<string, any>) {
     const pathStr = match ? match[1] : dataSource;
     rawData = resolvePath(context, pathStr);
   } else {
-    // Auto-detect: reverse context keys to prioritize the latest executed upstream node (HTTP Request)
-    const contextKeys = Object.keys(context).reverse();
-    for (const key of contextKeys) {
-      if (key.startsWith('start')) continue;
-      const val = context[key];
-      if (val !== undefined && val !== null) {
-        rawData = val;
-        break;
+    // 1. Direct upstream from edges (e.g. forEachEnd -> export)
+    if (edges && nodes) {
+      const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+      for (const uid of upstreamIds) {
+        if (context[uid] !== undefined && context[uid] !== null) {
+          rawData = context[uid];
+          break;
+        }
+      }
+    }
+
+    // 2. Fallback: reverse context keys to prioritize the latest executed upstream node (HTTP Request, forEachEnd, etc.)
+    if (!rawData) {
+      const contextKeys = Object.keys(context).reverse();
+      for (const key of contextKeys) {
+        if (key.startsWith('start')) continue;
+        const val = context[key];
+        if (val !== undefined && val !== null) {
+          rawData = val;
+          break;
+        }
       }
     }
   }
@@ -1103,9 +1192,17 @@ async function executeExportNode(node: any, context: Record<string, any>) {
       // Single Sheet Mode
       const sheet = workbook.addWorksheet('Datos');
 
-      if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
-        const headers = Object.keys(exportData[0]);
+      const allKeysSet = new Set<string>();
+      for (const row of exportData) {
+        if (typeof row === 'object' && row !== null) {
+          Object.keys(row).forEach(k => allKeysSet.add(k));
+        }
+      }
+      const headers = allKeysSet.size > 0 
+        ? Array.from(allKeysSet) 
+        : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
 
+      if (exportData.length > 0 && headers.length > 0) {
         // Add styled header row - per cell to avoid coloring the entire row
         sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
         const headerRow = sheet.getRow(1);
@@ -1119,7 +1216,7 @@ async function executeExportNode(node: any, context: Record<string, any>) {
         // Add data rows - plain, no background color
         exportData.forEach(row => {
           const dataRow = sheet.addRow(headers.map(h => {
-            const v = row[h];
+            const v = (typeof row === 'object' && row !== null) ? row[h] : row;
             return (v === null || v === undefined) ? '' : v;
           }));
           dataRow.height = 18;
@@ -1131,13 +1228,22 @@ async function executeExportNode(node: any, context: Record<string, any>) {
 
   } else {
     // Generate CSV
-    if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
-      const headers = Object.keys(exportData[0]);
+    const allKeysSet = new Set<string>();
+    for (const row of exportData) {
+      if (typeof row === 'object' && row !== null) {
+        Object.keys(row).forEach(k => allKeysSet.add(k));
+      }
+    }
+    const headers = allKeysSet.size > 0 
+      ? Array.from(allKeysSet) 
+      : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
+
+    if (exportData.length > 0 && headers.length > 0) {
       const csvRows = [headers.join(',')];
 
       for (const row of exportData) {
         const values = headers.map(header => {
-          const val = row[header];
+          const val = (typeof row === 'object' && row !== null) ? row[header] : row;
           const strVal = (val === null || val === undefined) ? '' : String(val);
           if (strVal.includes(',') || strVal.includes('"') || strVal.includes('\n')) {
             return `"${strVal.replace(/"/g, '""')}"`;
@@ -1504,7 +1610,7 @@ async function executeForEachNode(
   edges: any[],
   nodes: any[],
   adjList: Record<string, string[]>,
-  onNodeProgress: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void,
+  onNodeProgress: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
   signal: AbortSignal,
   flowId: string
 ): Promise<any[]> {
@@ -1532,6 +1638,11 @@ async function executeForEachNode(
 
   if (items.length === 0) {
     onNodeProgress(node.id, 'completed', { iterations: 0, results: [] });
+    context[node.id] = [];
+    const forEachEndId = findForEachEndNode(node.id, adjList, nodes);
+    if (forEachEndId) {
+      context[forEachEndId] = [];
+    }
     return [];
   }
 
@@ -1547,8 +1658,18 @@ async function executeForEachNode(
 
   if (subgraphNodes.length === 0) {
     onNodeProgress(node.id, 'completed', { iterations: 0, results: [] });
+    context[node.id] = [];
+    if (forEachEndId) {
+      context[forEachEndId] = [];
+    }
     return [];
   }
+
+  // Identify the terminal node inside the subgraph that connects to forEachEnd
+  const terminalEdge = edges.find(
+    e => e.target === forEachEndId && subgraphNodeIds.includes(e.source)
+  );
+  const terminalSubNodeId = terminalEdge ? terminalEdge.source : null;
 
   // Build local adjList and compute base inDegree for the sub-graph
   const subAdjList: Record<string, string[]> = {};
@@ -1579,6 +1700,23 @@ async function executeForEachNode(
   // Nodes directly connected from forEach start with inDegree 0 (already initialized)
   // No need to adjust because we excluded the forEach->subgraph edges from inDegree calc
 
+  const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+  if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
+    onNodeProgress(node.id, 'paused', {
+      debugType: 'forEach_start',
+      items,
+      totalItems: items.length,
+      current: 0,
+      total: items.length,
+      context: { ...context, [node.id]: items, _items: items }
+    });
+    await new Promise<void>((resolve) => {
+      if (currentExec.resumeResolvers) {
+        currentExec.resumeResolvers[node.id] = () => resolve();
+      }
+    });
+  }
+
   const iterationResults: any[] = [];
 
   // Sequential iteration over each item
@@ -1593,7 +1731,14 @@ async function executeForEachNode(
     onNodeProgress(node.id, 'progress', { current: i + 1, total: items.length, item });
 
     // Create a local context for this iteration
-    const localContext: Record<string, any> = { ...context, _item: item, _index: i, _total: items.length };
+    const localContext: Record<string, any> = {
+      ...context,
+      _item: item,
+      item: item,
+      _index: i,
+      _total: items.length,
+      [node.id]: item
+    };
 
     // Reset sub-graph state for this iteration
     const localInDegree = { ...baseInDegree };
@@ -1617,6 +1762,20 @@ async function executeForEachNode(
               const p = (async () => {
                 if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
 
+                const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(subNode.type);
+                const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+                if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
+                  onNodeProgress(subNode.id, 'paused', {
+                    context: { ...localContext },
+                    iteration: { current: i + 1, total: items.length, item }
+                  });
+                  await new Promise<void>((resolve) => {
+                    if (currentExec.resumeResolvers) {
+                      currentExec.resumeResolvers[subNode.id] = () => resolve();
+                    }
+                  });
+                }
+
                 onNodeProgress(subNode.id, 'running');
 
                 // Animation delay
@@ -1639,13 +1798,13 @@ async function executeForEachNode(
                     case 'httpGet':
                     case 'httpPost':
                     case 'httpRequest':
-                      output = await executeHttpNode(subNode, localContext, onNodeProgress, signal);
+                      output = await executeHttpNode(subNode, localContext, onNodeProgress, signal, flowId);
                       break;
                     case 'scraping':
                       output = await executeScrapingNode(subNode, localContext, signal);
                       break;
                     case 'export':
-                      output = await executeExportNode(subNode, localContext);
+                      output = await executeExportNode(subNode, localContext, edges, nodes);
                       break;
                     case 'query':
                       output = await executeQueryNode(subNode, localContext, signal);
@@ -1710,12 +1869,43 @@ async function executeForEachNode(
       checkAndRunLocal();
     });
 
-    // Collect the last meaningful output from this iteration
-    iterationResults.push(lastOutput);
+    // Collect the output from the terminal subgraph node (or fallback to lastOutput)
+    const subResult = (terminalSubNodeId && localContext[terminalSubNodeId] !== undefined)
+      ? localContext[terminalSubNodeId]
+      : lastOutput;
 
-    // Propagate sub-graph results back to main context for the forEachEnd node
-    // Store intermediate results so they accumulate across iterations
+    // Flatten rows from subResult and enrich with parent item metadata
+    const flatSub = flattenRows(subResult);
+    if (flatSub.length > 0) {
+      const mergedRows = flatSub.map(row => {
+        if (typeof row === 'object' && row !== null && typeof item === 'object' && item !== null && !Array.isArray(item)) {
+          return { ...item, ...row };
+        }
+        return row;
+      });
+      iterationResults.push(...mergedRows);
+    } else if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+      if (typeof subResult === 'object' && subResult !== null) {
+        iterationResults.push({ ...item, ...subResult });
+      } else if (subResult !== undefined && subResult !== null) {
+        iterationResults.push({ ...item, resultado: subResult });
+      } else {
+        iterationResults.push({ ...item });
+      }
+    } else {
+      iterationResults.push(subResult);
+    }
+
+    // Propagate accumulated results back to main context for both forEach and forEachEnd
     context[node.id] = iterationResults;
+    if (forEachEndId) {
+      context[forEachEndId] = iterationResults;
+    }
+  }
+
+  context[node.id] = iterationResults;
+  if (forEachEndId) {
+    context[forEachEndId] = iterationResults;
   }
 
   return iterationResults;

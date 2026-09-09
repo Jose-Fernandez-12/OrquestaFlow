@@ -151,6 +151,16 @@ export const resumeDebugNode = createAsyncThunk('flows/resumeDebug', async ({ id
   return data.data;
 });
 
+export const pauseDebugExecution = createAsyncThunk('flows/pauseDebug', async (id: string) => {
+  const res = await fetch(`${API_URL}/flows/${id}/debug/pause`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  });
+  const data = await res.json();
+  return data.data;
+});
+
 export const stopFlow = createAsyncThunk('flows/stop', async (id: string) => {
   const res = await fetch(`${API_URL}/flows/${id}/stop`, {
     method: 'POST',
