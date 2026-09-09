@@ -114,12 +114,12 @@ export function DebugContextViewer({
     }
 
     return nodes
-      .filter(n => ancestorIds.has(n.id) && context[n.id] !== undefined && n.type !== 'start')
+      .filter(n => ancestorIds.has(n.id) && (context[n.id] !== undefined || (n.type === 'forEach' && context._item !== undefined)) && n.type !== 'start')
       .map(n => ({
         id: n.id,
         label: (n.data?.label as string) || n.type,
         type: n.type,
-        data: context[n.id]
+        data: context[n.id] !== undefined ? context[n.id] : context._item
       }));
   }, [node.id, edges, nodes, context]);
 

@@ -3,14 +3,15 @@ import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
 import { DebugContextViewer } from './DebugContextViewer';
-import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2, Plus, Trash2 } from 'lucide-react';
+import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2, Plus, Trash2, Repeat, Copy, Layers, ListOrdered, Table, Sparkles, Info } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
 import { useAppSelector } from '../../store/hooks';
+import { cn } from '../../lib/utils';
 
 const isDataProducerNode = (type?: string) => {
   if (!type) return false;
-  return type.startsWith('http') || type === 'query' || type === 'dataSource' || type === 'fileSource';
+  return type.startsWith('http') || type === 'query' || type === 'dataSource' || type === 'fileSource' || type === 'dataList' || type === 'forEach' || type === 'forEachEnd';
 };
 
 const getUpstreamNodes = (node: Node, edges: Edge[] = [], nodes: Node[] = []): Node[] => {
@@ -68,6 +69,62 @@ const getUpstreamNodes = (node: Node, edges: Edge[] = [], nodes: Node[] = []): N
   const revProducers = findReverseProducers(node.id);
   return Array.from(new Map(revProducers.map(n => [n.id, n])).values());
 };
+
+export function getForEachItems(
+  forEachNode: Node,
+  nodes: Node[] = [],
+  edges: Edge[] = [],
+  nodeResults: Record<string, any> = {},
+  intermediateContext: Record<string, any> = {}
+): any[] {
+  // 1. Check if iterateOver is explicitly set, e.g. {{dataList_1}}
+  const expr = forEachNode.data?.iterateOver as string;
+  if (expr && expr.trim()) {
+    const match = expr.match(/\{\{([^}]+)\}\}/);
+    const key = match ? match[1].trim() : expr.trim();
+    const resolved = intermediateContext?.[key] ?? nodeResults?.[key];
+    if (Array.isArray(resolved)) return resolved;
+    if (resolved && typeof resolved === 'object') {
+      if (Array.isArray(resolved.rows)) return resolved.rows;
+      if (Array.isArray(resolved.data)) return resolved.data;
+      if (Array.isArray(resolved.items)) return resolved.items;
+    }
+    const targetNode = nodes.find(n => n.id === key);
+    if (targetNode?.type === 'dataList' && targetNode.data?.items) {
+      try {
+        const parsed = typeof targetNode.data.items === 'string' ? JSON.parse(targetNode.data.items) : targetNode.data.items;
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+  }
+
+  // 2. Look at incoming nodes to forEachNode
+  const incomingEdges = edges.filter(e => e.target === forEachNode.id);
+  for (const edge of incomingEdges) {
+    const src = nodes.find(n => n.id === edge.source);
+    if (!src) continue;
+    if (src.type === 'dataList' && src.data?.items) {
+      try {
+        const parsed = typeof src.data.items === 'string' ? JSON.parse(src.data.items) : src.data.items;
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+    const res = nodeResults?.[src.id] ?? intermediateContext?.[src.id];
+    if (Array.isArray(res)) return res;
+    if (res && typeof res === 'object') {
+      if (Array.isArray(res.rows)) return res.rows;
+      if (Array.isArray(res.data)) return res.data;
+      if (Array.isArray(res.items)) return res.items;
+    }
+  }
+
+  // 3. Fallback: intermediateContext or nodeResults for forEachNode
+  if (Array.isArray(intermediateContext?.[forEachNode.id])) return intermediateContext[forEachNode.id];
+  if (Array.isArray(intermediateContext?._items)) return intermediateContext._items;
+  if (Array.isArray(nodeResults?.[forEachNode.id])) return nodeResults[forEachNode.id];
+
+  return [];
+}
 
 function DataSourceInspector({
   node,
@@ -563,7 +620,72 @@ function DataSourceInspector({
   const debugRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
   const debugResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
   const currentFlow = useAppSelector(state => state.flows.currentFlow);
+  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults || {});
   const isPaused = pausedNodeIds.includes(selectedNodeId);
+
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const copyVariable = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedKey(text);
+    setTimeout(() => setCopiedKey(null), 1800);
+  };
+
+  const parentForEachNode = React.useMemo(() => {
+    if (!node || node.type === 'forEach') return null;
+    const visited = new Set<string>();
+    const queue = [node.id];
+    while (queue.length > 0) {
+      const currId = queue.shift()!;
+      const incoming = edges.filter(e => e.target === currId);
+      for (const edge of incoming) {
+        if (!visited.has(edge.source)) {
+          visited.add(edge.source);
+          const srcNode = nodes.find(n => n.id === edge.source);
+          if (srcNode?.type === 'forEach') {
+            return srcNode;
+          }
+          if (srcNode && srcNode.type !== 'forEachEnd') {
+            queue.push(srcNode.id);
+          }
+        }
+      }
+    }
+    return null;
+  }, [node, edges, nodes]);
+
+  const parentLoopItems = React.useMemo(() => {
+    if (!parentForEachNode) return [];
+    return getForEachItems(parentForEachNode, nodes, edges, nodeResults, intermediateContext);
+  }, [parentForEachNode, nodes, edges, nodeResults, intermediateContext]);
+
+  const parentLoopKeys = React.useMemo(() => {
+    if (!parentLoopItems || parentLoopItems.length === 0) return [];
+    const first = parentLoopItems[0];
+    if (first && typeof first === 'object' && !Array.isArray(first)) {
+      return Object.keys(first);
+    }
+    return [];
+  }, [parentLoopItems]);
+
+  const currentLoopItems = React.useMemo(() => {
+    if (node?.type !== 'forEach') return [];
+    return getForEachItems(node, nodes, edges, nodeResults, intermediateContext);
+  }, [node, nodes, edges, nodeResults, intermediateContext]);
+
+  const currentLoopKeys = React.useMemo(() => {
+    if (!currentLoopItems || currentLoopItems.length === 0) return [];
+    const first = currentLoopItems[0];
+    if (first && typeof first === 'object' && !Array.isArray(first)) {
+      return Object.keys(first);
+    }
+    return [];
+  }, [currentLoopItems]);
+
+  const forEachIncomingProducers = React.useMemo(() => {
+    if (node?.type !== 'forEach') return [];
+    const incoming = edges.filter(e => e.target === node.id);
+    return incoming.map(e => nodes.find(n => n.id === e.source)).filter(Boolean) as Node[];
+  }, [node, edges, nodes]);
 
   if (!node) {
     return (
@@ -591,6 +713,82 @@ function DataSourceInspector({
             requestPreview={debugRequestPreview}
             responsePreview={debugResponsePreview}
           />
+        )}
+
+        {/* Helper Banner for Nodes Inside a forEach Loop */}
+        {parentForEachNode && (
+          <div className="p-3 bg-accent/10 border border-accent/20 rounded-md text-xs space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-semibold text-accent">
+                <Repeat size={14} />
+                <span>Dentro del bucle: {parentForEachNode.data?.label || parentForEachNode.id}</span>
+              </div>
+              <span className="text-[10px] font-mono bg-accent/20 text-accent px-1.5 py-0.5 rounded font-medium">
+                {parentLoopItems.length > 0 ? `${parentLoopItems.length} elementos` : 'Iterando'}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted leading-relaxed">
+              Este nodo se ejecuta una vez por cada elemento del bucle. Puedes insertar o copiar las variables dinámicas del elemento actual:
+            </p>
+            {parentLoopKeys.length > 0 ? (
+              <div className="space-y-1">
+                <span className="text-[10px] font-medium text-muted block">Campos disponibles del elemento actual (haz clic para copiar):</span>
+                <div className="flex flex-wrap gap-1">
+                  {parentLoopKeys.map(k => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => copyVariable(`{{_item.${k}}}`)}
+                      className="flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-surface border border-accent/30 text-accent hover:bg-accent/20 transition-colors"
+                      title={`Copiar {{_item.${k}}}`}
+                    >
+                      <span>{`{{_item.${k}}}`}</span>
+                      {copiedKey === `{{_item.${k}}}` ? (
+                        <Check size={10} className="text-emerald-500" />
+                      ) : (
+                        <Copy size={10} className="text-muted opacity-70" />
+                      )}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => copyVariable('{{_index}}')}
+                    className="flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-surface border border-border text-muted hover:bg-bg transition-colors"
+                    title="Copiar {{_index}}"
+                  >
+                    <span>{'{{_index}}'}</span>
+                    {copiedKey === '{{_index}}' && <Check size={10} className="text-emerald-500" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => copyVariable('{{_total}}')}
+                    className="flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-surface border border-border text-muted hover:bg-bg transition-colors"
+                    title="Copiar {{_total}}"
+                  >
+                    <span>{'{{_total}}'}</span>
+                    {copiedKey === '{{_total}}' && <Check size={10} className="text-emerald-500" />}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-1 font-mono text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => copyVariable('{{_item.campo}}')}
+                  className="px-1.5 py-0.5 bg-surface border border-border rounded text-accent hover:border-accent"
+                >
+                  {'{{_item.campo}}'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => copyVariable('{{_index}}')}
+                  className="px-1.5 py-0.5 bg-surface border border-border rounded text-muted hover:border-border-hover"
+                >
+                  {'{{_index}}'}
+                </button>
+              </div>
+            )}
+          </div>
         )}
 
                 <div className="space-y-1.5">
@@ -1409,14 +1607,184 @@ function DataSourceInspector({
 
                 {node.type === 'forEach' && (
                   <div className="space-y-4">
+                    {/* Source Selector */}
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium">Iterar sobre</label>
+                      <label className="text-xs font-medium flex items-center justify-between">
+                        <span>Origen de los datos (Array)</span>
+                        {forEachIncomingProducers.length > 0 && (
+                          <span className="text-[10px] text-muted font-normal">
+                            {forEachIncomingProducers.length} conectado(s)
+                          </span>
+                        )}
+                      </label>
+
+                      {forEachIncomingProducers.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-1.5">
+                          {forEachIncomingProducers.map(src => {
+                            const val = `{{${src.id}}}`;
+                            const isSelected = (node.data?.iterateOver as string) === val || (!node.data?.iterateOver && src.id === forEachIncomingProducers[0]?.id);
+                            return (
+                              <button
+                                key={src.id}
+                                type="button"
+                                onClick={() => updateNodeData('iterateOver', val)}
+                                className={cn(
+                                  "text-[10px] px-2 py-1 rounded border font-mono transition-colors",
+                                  isSelected
+                                    ? "bg-accent/15 border-accent text-accent font-semibold"
+                                    : "bg-surface border-border text-muted hover:text-fg hover:border-border-hover"
+                                )}
+                              >
+                                {src.data?.label || src.id} ({src.type})
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
                       <Input
                         value={node.data?.iterateOver as string || ''}
                         onChange={(e) => updateNodeData('iterateOver', e.target.value)}
-                        placeholder="{{dataList_1}}"
+                        placeholder={forEachIncomingProducers[0] ? `{{${forEachIncomingProducers[0].id}}}` : '{{dataList_1}}'}
+                        className="font-mono text-xs"
                       />
-                      <p className="text-[10px] text-muted">Referencia al nodo que contiene el array. Ej: {'{{dataList_1}}'}</p>
+                      <p className="text-[10px] text-muted">
+                        {node.data?.iterateOver
+                          ? `Iterando sobre la referencia: ${node.data.iterateOver}`
+                          : forEachIncomingProducers[0]
+                            ? `Auto-detectando array de '${forEachIncomingProducers[0].data?.label || forEachIncomingProducers[0].id}'`
+                            : 'Referencia al nodo con el array. Ej: {{dataList_1}}'}
+                      </p>
+                    </div>
+
+                    {/* Initial Loop Data Visualizer */}
+                    <div className="border border-border rounded-md bg-surface p-3 space-y-3">
+                      <div className="flex items-center justify-between border-b border-border pb-2">
+                        <div className="flex items-center gap-1.5 font-medium text-xs text-fg">
+                          <Table size={14} className="text-accent" />
+                          <span>Datos Iniciales del Bucle</span>
+                        </div>
+                        {currentLoopItems.length > 0 ? (
+                          <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 border border-emerald-500/20">
+                            {currentLoopItems.length} elemento{currentLoopItems.length === 1 ? '' : 's'}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-bg text-muted border border-border">
+                            0 elementos
+                          </span>
+                        )}
+                      </div>
+
+                      {currentLoopItems.length > 0 ? (
+                        <div className="space-y-2.5">
+                          {/* Detected Fields / Schema */}
+                          {currentLoopKeys.length > 0 && (
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-medium text-muted block">
+                                Campos detectados (haz clic para copiar variable):
+                              </label>
+                              <div className="flex flex-wrap gap-1">
+                                {currentLoopKeys.map(k => (
+                                  <button
+                                    key={k}
+                                    type="button"
+                                    onClick={() => copyVariable(`{{_item.${k}}}`)}
+                                    className="flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-bg border border-border text-fg hover:border-accent hover:text-accent transition-colors"
+                                    title={`Copiar {{_item.${k}}}`}
+                                  >
+                                    <span>{k}</span>
+                                    {copiedKey === `{{_item.${k}}}` ? (
+                                      <Check size={10} className="text-emerald-500" />
+                                    ) : (
+                                      <Copy size={10} className="text-muted opacity-70" />
+                                    )}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Sample Rows Table Preview */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-medium text-muted block">
+                              Muestra de elementos que recibirá el bucle:
+                            </label>
+                            <div className="border border-border rounded overflow-x-auto max-h-44 text-[10px] font-mono bg-bg">
+                              {currentLoopKeys.length > 0 ? (
+                                <table className="w-full text-left border-collapse">
+                                  <thead className="bg-surface border-b border-border text-muted sticky top-0">
+                                    <tr>
+                                      <th className="p-1.5 border-r border-border w-8 text-center">#</th>
+                                      {currentLoopKeys.slice(0, 5).map(col => (
+                                        <th key={col} className="p-1.5 border-r border-border last:border-r-0 whitespace-nowrap">
+                                          {col}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {currentLoopItems.slice(0, 5).map((row, idx) => (
+                                      <tr key={idx} className="border-b border-border last:border-b-0 hover:bg-surface/50">
+                                        <td className="p-1.5 border-r border-border text-center text-muted">{idx + 1}</td>
+                                        {currentLoopKeys.slice(0, 5).map(col => (
+                                          <td key={col} className="p-1.5 border-r border-border last:border-r-0 whitespace-nowrap max-w-[120px] truncate">
+                                            {typeof row?.[col] === 'object' && row?.[col] !== null
+                                              ? JSON.stringify(row[col])
+                                              : String(row?.[col] ?? '')}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ) : (
+                                <pre className="p-2 text-[10px] select-text">
+                                  {JSON.stringify(currentLoopItems.slice(0, 3), null, 2)}
+                                </pre>
+                              )}
+                            </div>
+                            {currentLoopItems.length > 5 && (
+                              <p className="text-[9px] text-muted text-right">Mostrando primeros 5 de {currentLoopItems.length} elementos</p>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-muted p-2.5 bg-bg/50 border border-border border-dashed rounded text-center space-y-1">
+                          <p>No se han detectado datos de entrada en memoria todavía.</p>
+                          <p className="text-[10px] text-muted/80">
+                            Conecta un nodo previo (Lista de Datos, Consulta SQL o HTTP) y ejecuta el flujo o activa el Modo Debug para capturarlos automáticamente.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Mapping Guide */}
+                    <div className="p-3 bg-bg border border-border rounded-md text-xs space-y-2">
+                      <div className="flex items-center gap-1.5 font-medium text-fg">
+                        <Sparkles size={13} className="text-accent" />
+                        <span>Mapeo en los nodos siguientes</span>
+                      </div>
+                      <p className="text-[11px] text-muted leading-relaxed">
+                        Los nodos dentro del bucle se ejecutarán una vez por cada elemento. Puedes usar estas expresiones en URLs, Parámetros o Payload:
+                      </p>
+                      <div className="space-y-1 font-mono text-[10px]">
+                        <div className="flex items-center justify-between p-1 bg-surface rounded border border-border">
+                          <span className="text-accent">{`{{_item.campo}}`}</span>
+                          <span className="text-muted text-[9px]">Valor del campo en la iteración</span>
+                        </div>
+                        <div className="flex items-center justify-between p-1 bg-surface rounded border border-border">
+                          <span className="text-accent">{`{{_item}}`}</span>
+                          <span className="text-muted text-[9px]">Objeto completo del elemento</span>
+                        </div>
+                        <div className="flex items-center justify-between p-1 bg-surface rounded border border-border">
+                          <span className="text-accent">{`{{_index}}`}</span>
+                          <span className="text-muted text-[9px]">Índice actual (0, 1, 2...)</span>
+                        </div>
+                        <div className="flex items-center justify-between p-1 bg-surface rounded border border-border">
+                          <span className="text-accent">{`{{_total}}`}</span>
+                          <span className="text-muted text-[9px]">Total de elementos a procesar</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1566,6 +1934,32 @@ function DataSourceInspector({
                 return;
               }
 
+              // Si es dataList
+              if (node.type === 'dataList') {
+                if (node.data?.items) {
+                  try {
+                    const parsed = typeof node.data.items === 'string' ? JSON.parse(node.data.items) : node.data.items;
+                    setJsonData(truncateArrays(parsed));
+                    return;
+                  } catch (e) {
+                    setError('El JSON de la lista de datos no es válido.');
+                    return;
+                  }
+                }
+                setError('Configura los elementos JSON en el nodo Lista de Datos para visualizarlos aquí.');
+                return;
+              }
+
+              // Si es forEach o forEachEnd
+              if (node.type === 'forEach' || node.type === 'forEachEnd') {
+                if (cachedResult) {
+                  setJsonData(truncateArrays(cachedResult));
+                  return;
+                }
+                setError('Ejecuta el flujo o inicia el Modo Debug para capturar los datos del bucle en tiempo real.');
+                return;
+              }
+
               // 2. Si no hay caché, intentar hacer una petición en vivo
               let endpoint = node.data?.endpoint || '';
               if (node.type === 'query') {
@@ -1668,7 +2062,7 @@ function DataSourceInspector({
   const handleSelectKey = (path: string) => {
                 // path already starts with nodeId (it's the currentPath)
                 let formattedPath = path;
-              if (extractIterate) {
+              if (extractIterate || node.type === 'forEach') {
       const lastBracket = path.lastIndexOf('].');
               if (lastBracket !== -1) {
                 formattedPath = '_item.' + path.substring(lastBracket + 2);

@@ -475,24 +475,26 @@ async function executeHttpNode(
                         !currentExec?.skipHttpPauseForNode?.[node.id];
 
     if (shouldPause) {
+      const effectiveItem = item ?? context._item;
+      const currentIterationInfo = itemsToIterate.length > 1
+        ? { current: i + 1, total: itemsToIterate.length }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+
       const requestPreview = {
         method,
         endpoint,
         headers,
         body: requestBody || null,
         params: node.data?.params || null,
-        iteration: {
-          current: i + 1,
-          total: itemsToIterate.length
-        },
-        item
+        iteration: currentIterationInfo,
+        item: effectiveItem
       };
 
       if (onNodeProgress) {
         onNodeProgress(node.id, 'paused', {
           debugType: 'http_request',
           requestPreview,
-          context: { ...context, _item: item }
+          context: { ...context, _item: effectiveItem }
         });
       }
 
@@ -561,6 +563,10 @@ async function executeHttpNode(
 
     // DEBUG MODE: Pause after receiving response if in debug step mode so user can inspect the response
     if (shouldPause) {
+      const currentIterationInfo = itemsToIterate.length > 1
+        ? { current: i + 1, total: itemsToIterate.length }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+
       const responsePreview = {
         status: response.status,
         statusText: response.statusText,
@@ -568,14 +574,15 @@ async function executeHttpNode(
         durationMs,
         headers: responseHeaders,
         data: parsedBody,
-        iteration: itemsToIterate.length > 1 ? { current: i + 1, total: itemsToIterate.length } : undefined
+        iteration: currentIterationInfo
       };
       if (onNodeProgress) {
         onNodeProgress(node.id, 'paused', {
           debugType: 'http_response',
           responsePreview,
-          current: i + 1,
-          total: itemsToIterate.length
+          current: context._index !== undefined ? context._index + 1 : (i + 1),
+          total: context._total !== undefined ? context._total : itemsToIterate.length,
+          context: { ...context, _item: item ?? context._item }
         });
       }
       const resumeActionAfter = await new Promise<string>((resolve) => {
@@ -1579,6 +1586,23 @@ async function executeForEachNode(
   // Nodes directly connected from forEach start with inDegree 0 (already initialized)
   // No need to adjust because we excluded the forEach->subgraph edges from inDegree calc
 
+  const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+  if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
+    onNodeProgress(node.id, 'paused', {
+      debugType: 'forEach_start',
+      items,
+      totalItems: items.length,
+      current: 0,
+      total: items.length,
+      context: { ...context, [node.id]: items, _items: items }
+    });
+    await new Promise<void>((resolve) => {
+      if (currentExec.resumeResolvers) {
+        currentExec.resumeResolvers[node.id] = () => resolve();
+      }
+    });
+  }
+
   const iterationResults: any[] = [];
 
   // Sequential iteration over each item
@@ -1593,7 +1617,14 @@ async function executeForEachNode(
     onNodeProgress(node.id, 'progress', { current: i + 1, total: items.length, item });
 
     // Create a local context for this iteration
-    const localContext: Record<string, any> = { ...context, _item: item, _index: i, _total: items.length };
+    const localContext: Record<string, any> = {
+      ...context,
+      _item: item,
+      item: item,
+      _index: i,
+      _total: items.length,
+      [node.id]: item
+    };
 
     // Reset sub-graph state for this iteration
     const localInDegree = { ...baseInDegree };
@@ -1617,6 +1648,20 @@ async function executeForEachNode(
               const p = (async () => {
                 if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
 
+                const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(subNode.type);
+                const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+                if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
+                  onNodeProgress(subNode.id, 'paused', {
+                    context: { ...localContext },
+                    iteration: { current: i + 1, total: items.length, item }
+                  });
+                  await new Promise<void>((resolve) => {
+                    if (currentExec.resumeResolvers) {
+                      currentExec.resumeResolvers[subNode.id] = () => resolve();
+                    }
+                  });
+                }
+
                 onNodeProgress(subNode.id, 'running');
 
                 // Animation delay
@@ -1639,7 +1684,7 @@ async function executeForEachNode(
                     case 'httpGet':
                     case 'httpPost':
                     case 'httpRequest':
-                      output = await executeHttpNode(subNode, localContext, onNodeProgress, signal);
+                      output = await executeHttpNode(subNode, localContext, onNodeProgress, signal, flowId);
                       break;
                     case 'scraping':
                       output = await executeScrapingNode(subNode, localContext, signal);
