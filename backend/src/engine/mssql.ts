@@ -45,8 +45,8 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
 
     // Map named parameters from :param to MS SQL format (@param)
     // MS SQL does not support colon parameters natively, so we replace them and inject variables.
-    // Replace :param inside string literals (like '%:param%') with string concatenation
-    let parsedSql = sqlText.replace(/'(%?):([a-zA-Z0-9_]+)(%?)'/g, (match, leading, paramName, trailing) => {
+    // Replace #param_param inside string literals (like '%#param_param%') with string concatenation
+    let parsedSql = sqlText.replace(/'(%?)#param_([a-zA-Z0-9_]+)(%?)'/g, (match, leading, paramName, trailing) => {
       let concatArgs = [];
       if (leading) concatArgs.push("'%'");
       concatArgs.push(`@${paramName}`);
@@ -55,13 +55,13 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
       return concatArgs.join(' + ');
     });
     
-    // Replace remaining normal :param with @param
-    parsedSql = parsedSql.replace(/(^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (match, prefix, paramName) => {
+    // Replace remaining normal #param_param with @param
+    parsedSql = parsedSql.replace(/(^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (match, prefix, paramName) => {
       return prefix + '@' + paramName;
     });
 
     // Extract all unique parameters from original SQL
-    const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
+    const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
     const uniqueParams = [...new Set(paramMatches.map(m => m[1]))];
 
     uniqueParams.forEach(key => {

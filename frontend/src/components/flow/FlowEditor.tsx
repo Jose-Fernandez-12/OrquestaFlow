@@ -8,6 +8,8 @@ import {
   useEdgesState,
   addEdge,
   ReactFlowProvider,
+  ConnectionMode,
+  MarkerType,
   type Connection,
   type Edge,
   type Node
@@ -34,9 +36,13 @@ import {
   Download,
   Trash2,
   AlertTriangle,
-  Loader2,
   History,
-  Square
+  Square,
+  Bug,
+  StepForward,
+  PlayCircle,
+  Loader2,
+  Pause
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -59,7 +65,12 @@ import {
   setNodeCompleted,
   setNodeError,
   setNodeProgress,
-  resetNodeStates
+  setNodeTimer,
+  resetNodeStates,
+  setNodePaused,
+  setExecutionMode,
+  resumeDebugNode,
+  pauseDebugExecution
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
 import { fetchQueries } from '../../store/querySlice';
@@ -67,6 +78,8 @@ import { Button } from '../ui/button';
 import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
 import { NodeInspector } from './NodeInspector';
+import { ExportPreviewModal } from './ExportPreviewModal';
+import { DataSourcePreviewModal } from './DataSourcePreviewModal';
 import { cn } from '../../lib/utils';
 import { downloadAsXMLSpreadsheet, downloadAsCSV, resolveExportData, triggerBrowserDownload } from '../../lib/exportUtils';
 
@@ -80,6 +93,10 @@ function FlowCanvas() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
   const completedNodeIds = useAppSelector(state => state.flows.completedNodeIds);
   const errorNodeIds = useAppSelector(state => state.flows.errorNodeIds);
+  const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
+  const executionMode = useAppSelector(state => state.flows.executionMode);
+  const nodeResults = useAppSelector(state => state.flows.nodeResults);
+  const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
   const queries = useAppSelector(state => (state as any).queries.queries || []);
 
   const flowSchedules = currentFlow 
@@ -114,21 +131,57 @@ function FlowCanvas() {
     hasError: boolean;
   } | null>(null);
 
+  const [previewExportData, setPreviewExportData] = useState<{
+    id: string;
+    label: string;
+    result: any;
+    completed: boolean;
+    hasError: boolean;
+    fileName?: string;
+    format?: string;
+  } | null>(null);
+
+  const [previewDataSourceData, setPreviewDataSourceData] = useState<{
+    id: string;
+    label: string;
+    filePath?: string;
+    fileName?: string;
+    format?: string;
+    sheetName?: string;
+    sheets?: string[];
+    sampleRows?: any[];
+    totalRows?: number;
+    result?: any;
+    completed?: boolean;
+  } | null>(null);
+
   const [missingParamsContext, setMissingParamsContext] = useState<{
     nodesWithMissing: { node: Node, missing: string[], currentParams: Record<string, string> }[];
   } | null>(null);
   
   const [showSaveNotification, setShowSaveNotification] = useState(false);
   const [isLiveExecuting, setIsLiveExecuting] = useState(false);
+  const [isPausing, setIsPausing] = useState(false);
+  const isLiveExecutingRef = useRef(false);
+  useEffect(() => {
+    isLiveExecutingRef.current = isLiveExecuting;
+  }, [isLiveExecuting]);
+
+  useEffect(() => {
+    if (pausedNodeIds.length > 0 || !isLiveExecuting) {
+      setIsPausing(false);
+    }
+  }, [pausedNodeIds.length, isLiveExecuting]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const downloadedUrlsRef = useRef(new Set<string>());
 
   const autoDownloadFile = (downloadUrl: string, fileName: string) => {
-    if (downloadedUrlsRef.current.has(downloadUrl)) return;
-    downloadedUrlsRef.current.add(downloadUrl);
+    const key = `${downloadUrl}_${fileName}`;
+    if (downloadedUrlsRef.current.has(key)) return;
+    downloadedUrlsRef.current.add(key);
     triggerBrowserDownload(downloadUrl, fileName);
     setTimeout(() => {
-      downloadedUrlsRef.current.delete(downloadUrl);
+      downloadedUrlsRef.current.delete(key);
     }, 15000);
   };
 
@@ -150,9 +203,38 @@ function FlowCanvas() {
     const handleInspect = (e: any) => {
       setInspectNodeData(e.detail);
     };
+    const handlePreviewExport = (e: any) => {
+      setPreviewExportData(e.detail);
+    };
+    const handlePreviewDataSource = (e: any) => {
+      setPreviewDataSourceData(e.detail);
+    };
     window.addEventListener('inspect-node-result', handleInspect);
-    return () => window.removeEventListener('inspect-node-result', handleInspect);
+    window.addEventListener('preview-export-node', handlePreviewExport);
+    window.addEventListener('preview-data-source-node', handlePreviewDataSource);
+    return () => {
+      window.removeEventListener('inspect-node-result', handleInspect);
+      window.removeEventListener('preview-export-node', handlePreviewExport);
+      window.removeEventListener('preview-data-source-node', handlePreviewDataSource);
+    };
   }, []);
+
+  // Sync previewExportData with latest node result if preview modal is open
+  useEffect(() => {
+    if (previewExportData) {
+      const latestResult = nodeResults[previewExportData.id];
+      const isCompleted = completedNodeIds.includes(previewExportData.id);
+      const isError = errorNodeIds.includes(previewExportData.id);
+      if (latestResult && latestResult !== previewExportData.result) {
+        setPreviewExportData(prev => prev ? {
+          ...prev,
+          result: latestResult,
+          completed: isCompleted,
+          hasError: isError
+        } : null);
+      }
+    }
+  }, [nodeResults, completedNodeIds, errorNodeIds, previewExportData]);
 
   useEffect(() => {
     if (currentFlow) setEditingName(currentFlow.name);
@@ -194,17 +276,43 @@ function FlowCanvas() {
 
     const socket = io('http://localhost:3001');
 
-    socket.on('flow-progress', (data: { flowId: string; nodeId: string; status: 'running' | 'completed' | 'error' | 'progress', result?: any, current?: number, total?: number }) => {
+    socket.on('flow-progress', (data: { 
+      flowId: string; 
+      nodeId: string; 
+      status: 'running' | 'completed' | 'error' | 'progress' | 'paused'; 
+      result?: any; 
+      current?: number; 
+      total?: number;
+      remainingSeconds?: number;
+      totalSeconds?: number;
+      context?: any;
+    }) => {
       if (data.flowId === flowId) {
         if (data.status === 'running') {
           setIsLiveExecuting(true);
           dispatch(setNodeExecuting(data.nodeId));
+        } else if (data.status === 'paused') {
+          setIsLiveExecuting(true);
+          dispatch(setNodePaused({ 
+            nodeId: data.nodeId, 
+            context: data.context || data.result?.context,
+            requestPreview: data.result?.requestPreview,
+            responsePreview: data.result?.responsePreview
+          }));
+          dispatch(selectNode(data.nodeId));
         } else if (data.status === 'completed') {
           dispatch(setNodeCompleted({ nodeId: data.nodeId, result: data.result }));
         } else if (data.status === 'error') {
           dispatch(setNodeError({ nodeId: data.nodeId, error: data.result }));
-        } else if (data.status === 'progress' && data.current && data.total) {
-          dispatch(setNodeProgress({ nodeId: data.nodeId, current: data.current, total: data.total }));
+        } else if (data.status === 'progress') {
+          if (data.current !== undefined && data.total !== undefined) {
+            dispatch(setNodeProgress({ nodeId: data.nodeId, current: data.current, total: data.total }));
+          }
+          if (data.remainingSeconds !== undefined && data.totalSeconds !== undefined) {
+            dispatch(setNodeTimer({ nodeId: data.nodeId, remainingSeconds: data.remainingSeconds, totalSeconds: data.totalSeconds }));
+          } else if (data.result?.remainingSeconds !== undefined && data.result?.totalSeconds !== undefined) {
+            dispatch(setNodeTimer({ nodeId: data.nodeId, remainingSeconds: data.result.remainingSeconds, totalSeconds: data.result.totalSeconds }));
+          }
         }
       }
     });
@@ -227,8 +335,18 @@ function FlowCanvas() {
       }
     });
 
-    socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string; filePath?: string }) => {
+    socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string; filePath?: string; source?: string }) => {
       if (data.flowId === flowId) {
+        // Do not auto-download if this was triggered in the background by a scheduler
+        if (data.source === 'scheduler') {
+          return;
+        }
+
+        // Do not auto-download if the execution was stopped or is not actively executing
+        if (!isLiveExecutingRef.current) {
+          return;
+        }
+
         const id = Date.now() + Math.random();
         setExportNotification(prev => [...prev, { ...data, id }]);
         
@@ -259,10 +377,11 @@ function FlowCanvas() {
           expectedStroke = '#22c55e'; // green
         }
         
-        if (!edge.style || edge.style.stroke !== expectedStroke) {
+        if (!edge.style || edge.style.stroke !== expectedStroke || !edge.markerEnd) {
           changed = true;
           return {
             ...edge,
+            markerEnd: { type: MarkerType.ArrowClosed, color: expectedStroke },
             style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2 },
             interactionWidth: 20
           };
@@ -273,13 +392,37 @@ function FlowCanvas() {
     });
   }, [completedNodeIds, errorNodeIds, setEdges]);
 
+
+
+  const handleEdgeDoubleClick = useCallback((event: React.MouseEvent, edge: Edge) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isLocked) return;
+    setEdges(eds => eds.map(e => {
+      if (e.id === edge.id) {
+        return {
+          ...e,
+          source: e.target,
+          target: e.source,
+          sourceHandle: undefined,
+          targetHandle: undefined,
+        };
+      }
+      return e;
+    }));
+  }, [isLocked, setEdges]);
+
   // Load flow definition when currentFlow changes
   useEffect(() => {
     if (currentFlow && currentFlow.definition) {
       try {
         const def = JSON.parse(currentFlow.definition);
         setNodes(def.nodes || []);
-        setEdges(def.edges || []);
+        const loadedEdges = (def.edges || []).map((e: Edge) => ({
+          ...e,
+          markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
+        }));
+        setEdges(loadedEdges);
       } catch (e) {
         console.error("Failed to parse flow definition", e);
       }
@@ -290,15 +433,28 @@ function FlowCanvas() {
   }, [currentFlow, setNodes, setEdges]);
 
   const onConnect = useCallback(
-    (params: Connection | Edge) => setEdges((eds) => {
-      // Prevent duplicate edges between the same source and target
-      if (eds.some(e => e.source === params.source && e.target === params.target)) {
-        return eds;
-      }
-      return addEdge(params, eds);
-    }),
+    (params: Connection | Edge) => {
+      if (params.source === params.target) return;
+
+      setEdges((eds) => {
+        // Remover cualquier conexión previa entre estos dos nodos para reemplazarla limpiamente
+        const filtered = eds.filter(e => 
+          !( (e.source === params.source && e.target === params.target) || 
+             (e.source === params.target && e.target === params.source) )
+        );
+        return addEdge({
+          id: `e_${params.source}_${params.target}_${Date.now()}`,
+          ...params,
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6' }
+        }, filtered);
+      });
+    },
     [setEdges]
   );
+
+  const isValidConnection = useCallback((connection: Connection | Edge) => {
+    return connection.source !== connection.target;
+  }, []);
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
@@ -340,6 +496,48 @@ function FlowCanvas() {
       dispatch(selectNode(null));
     }
   }, [dispatch]);
+
+  const handleNodeDoubleClick = useCallback((event: React.MouseEvent, node: Node) => {
+    event.stopPropagation();
+    if (node.type === 'export') {
+      setPreviewExportData({
+        id: node.id,
+        label: (node.data?.label as string) || 'Exportar',
+        result: nodeResults[node.id],
+        completed: completedNodeIds.includes(node.id),
+        hasError: errorNodeIds.includes(node.id),
+        fileName: node.data?.fileName as string,
+        format: node.data?.format as string,
+      });
+      return;
+    }
+
+    if (node.type === 'dataSource' || node.type === 'fileSource') {
+      setPreviewDataSourceData({
+        id: node.id,
+        label: (node.data?.label as string) || 'Obtener datos',
+        filePath: node.data?.filePath as string,
+        fileName: node.data?.fileName as string,
+        format: node.data?.format as string,
+        sheetName: node.data?.sheetName as string,
+        sheets: node.data?.sheets as string[],
+        sampleRows: node.data?.sampleRows as any[],
+        totalRows: node.data?.totalRows as number,
+        result: nodeResults[node.id],
+        completed: completedNodeIds.includes(node.id),
+      });
+      return;
+    }
+
+    if (completedNodeIds.includes(node.id) || errorNodeIds.includes(node.id)) {
+      setInspectNodeData({
+        id: node.id,
+        label: (node.data?.label as string) || (node.type ? String(node.type) : 'Nodo'),
+        result: nodeResults[node.id],
+        hasError: errorNodeIds.includes(node.id),
+      });
+    }
+  }, [nodeResults, completedNodeIds, errorNodeIds]);
 
   const handleSave = () => {
     if (!currentFlow || isLocked) return;
@@ -404,8 +602,9 @@ function FlowCanvas() {
     }
   };
 
-  const handleExecute = async () => {
+  const handleExecute = async (mode: 'normal' | 'debug' = 'normal') => {
     if (!currentFlow) return;
+    dispatch(setExecutionMode(mode));
     dispatch(resetNodeStates());
     
     // Check for missing parameters
@@ -437,66 +636,72 @@ function FlowCanvas() {
       return; // Stop here and wait for the user to fill the modal
     }
 
-    await performExecution(nodes);
+    await performExecution(nodes, mode);
   };
 
-  const performExecution = async (nodesToExecute: Node[]) => {
+  const performExecution = async (nodesToExecute: Node[], mode: 'normal' | 'debug' = 'normal') => {
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
     const definition = JSON.stringify({ nodes: nodesToExecute, edges });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
     
-    const result = await dispatch(executeFlow(currentFlow!.id));
-    
-    // Check for exported files returned by backend execution
-    const payload = (result as any)?.payload;
-    const exportedFiles = payload?.exportedFiles || [];
-    if (exportedFiles.length > 0) {
-      exportedFiles.forEach((file: any, index: number) => {
-        setTimeout(() => {
-          autoDownloadFile(file.downloadUrl, file.fileName);
-        }, index * 400);
-      });
-    } else {
-      // Find export node results in the execution context as client-side fallback
-      const context = payload?.context as Record<string, any> | undefined;
-      if (context) {
-        const exportNodes = nodesToExecute.filter(n => n.type === 'export');
-        exportNodes.forEach(exportNode => {
-          const data = exportNode.data as any;
-          const format = data?.format || 'CSV';
-          const rawFileName = data?.fileName as string | undefined;
-          let dataSource = data?.dataSource;
-          
-          if (!dataSource) {
-            // If empty, explicitly use the node immediately upstream
-            const incomingEdge = edges.find(e => e.target === exportNode.id);
-            if (incomingEdge) {
-              dataSource = `{{${incomingEdge.source}}}`;
-            }
-          }
-          
-          const exportData = resolveExportData(context, dataSource);
-          const columns = (data?.columns && data.columns.length > 0) 
-            ? data.columns 
-            : (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
-          
-          if (exportData.length > 0) {
-            if (format === 'Excel') {
-              downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export', data?.headerColor as string | undefined);
-            } else {
-              downloadAsCSV(exportData, columns, rawFileName || 'export');
-            }
-          }
+    try {
+      const result = await dispatch(executeFlow({ id: currentFlow!.id, mode }));
+      
+      // Check for exported files returned by backend execution
+      const payload = (result as any)?.payload;
+      const exportedFiles = payload?.exportedFiles || [];
+      if (exportedFiles.length > 0) {
+        exportedFiles.forEach((file: any, index: number) => {
+          setTimeout(() => {
+            autoDownloadFile(file.downloadUrl, file.fileName);
+          }, index * 400);
         });
+      } else {
+        // Find export node results in the execution context as client-side fallback
+        const context = payload?.context as Record<string, any> | undefined;
+        if (context) {
+          const exportNodes = nodesToExecute.filter(n => n.type === 'export');
+          exportNodes.forEach(exportNode => {
+            const data = exportNode.data as any;
+            const format = data?.format || 'CSV';
+            const rawFileName = data?.fileName as string | undefined;
+            let dataSource = data?.dataSource;
+            
+            if (!dataSource) {
+              // If empty, explicitly use the node immediately upstream
+              const incomingEdge = edges.find(e => e.target === exportNode.id);
+              if (incomingEdge) {
+                dataSource = `{{${incomingEdge.source}}}`;
+              }
+            }
+            
+            const exportData = resolveExportData(context, dataSource);
+            const columns = (data?.columns && data.columns.length > 0) 
+              ? data.columns 
+              : (exportData[0] ? Object.keys(exportData[0]).map(k => ({ header: k, key: k })) : []);
+            
+            if (exportData.length > 0) {
+              if (format === 'Excel') {
+                downloadAsXMLSpreadsheet(exportData, columns, rawFileName || 'export', data?.headerColor as string | undefined);
+              } else {
+                downloadAsCSV(exportData, columns, rawFileName || 'export');
+              }
+            }
+          });
+        }
       }
+    } finally {
+      setIsLiveExecuting(false);
+      isLiveExecutingRef.current = false;
     }
   };
 
   const handleStopExecution = async () => {
     if (!currentFlow) return;
     try {
-      await dispatch(stopFlow(currentFlow.id)).unwrap();
+      isLiveExecutingRef.current = false;
       setIsLiveExecuting(false);
+      await dispatch(stopFlow(currentFlow.id)).unwrap();
       dispatch(showToast(`Ejecución de «${currentFlow.name}» detenida.`));
     } catch (err: any) {
       dispatch(showToast(`No se pudo detener el flujo: ${err.message}`));
@@ -600,9 +805,14 @@ function FlowCanvas() {
               <span>Detener Flujo</span>
             </Button>
           ) : (
-            <Button variant="primary" size="sm" onClick={handleExecute} className="gap-2" disabled={nodes.length === 0}>
-              <Play size={16} /> Ejecutar Flujo
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => handleExecute('debug')} className="gap-2 text-amber-600 border-amber-600 hover:bg-amber-50" disabled={nodes.length === 0}>
+                <Bug size={16} /> Debug
+              </Button>
+              <Button variant="primary" size="sm" onClick={() => handleExecute('normal')} className="gap-2" disabled={nodes.length === 0}>
+                <Play size={16} /> Ejecutar Flujo
+              </Button>
+            </div>
           )}
           <div className="w-px h-6 bg-border mx-1"></div>
           <Button variant="icon" size="icon" onClick={() => dispatch(toggleCanvasExpanded())} title={canvasExpanded ? "Restaurar layout" : "Expandir canvas"}>
@@ -713,21 +923,92 @@ function FlowCanvas() {
           {!canvasExpanded && nodeLibraryExpanded && <NodeLibrary />}
           
           <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
+            {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
+                <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-1">
+                  <Bug size={16} className={isLiveExecuting && pausedNodeIds.length === 0 ? "animate-spin" : "animate-pulse"} />
+                  <span>Debugging</span>
+                </div>
+                {pausedNodeIds.length > 0 ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
+                      className="h-7 text-xs border-amber-200 hover:bg-amber-50"
+                      title="Ejecutar el paso actual e ir al siguiente (paso a paso)"
+                    >
+                      <StepForward size={14} className="mr-1" /> Paso a paso
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
+                      className="h-7 text-xs bg-amber-600 hover:bg-amber-700"
+                      title="Continuar ejecución sin pausas"
+                    >
+                      <PlayCircle size={14} className="mr-1" /> Continuar Todo
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-1.5 text-xs text-muted font-medium px-1">
+                      <Loader2 size={13} className="animate-spin text-amber-600" />
+                      <span>Ejecutando...</span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isPausing}
+                      onClick={async () => {
+                        setIsPausing(true);
+                        await dispatch(pauseDebugExecution(currentFlow!.id));
+                      }}
+                      className="h-7 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
+                      title="Pausar en el siguiente paso para retomar el control paso a paso"
+                    >
+                      {isPausing ? (
+                        <>
+                          <Loader2 size={13} className="mr-1 animate-spin text-amber-600" /> Pausando...
+                        </>
+                      ) : (
+                        <>
+                          <Pause size={13} className="mr-1 fill-amber-600" /> Pausar
+                        </>
+                      )}
+                    </Button>
+                  </>
+                )}
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={handleStopExecution}
+                  className="h-7 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
+                  title="Detener ejecución del flujo"
+                >
+                  <Square size={11} className="mr-1 fill-white" /> Detener
+                </Button>
+              </div>
+            )}
             <ReactFlow
               nodes={nodes}
               edges={edges}
+              connectionMode={ConnectionMode.Loose}
               onNodesChange={isLocked ? undefined : onNodesChange}
               onEdgesChange={isLocked ? undefined : onEdgesChange}
               onConnect={isLocked ? undefined : onConnect}
+              isValidConnection={isValidConnection}
               onInit={setReactFlowInstance}
               onDrop={isLocked ? undefined : onDrop}
               onDragOver={isLocked ? undefined : onDragOver}
               onSelectionChange={onSelectionChange}
+              onNodeDoubleClick={handleNodeDoubleClick}
+              onEdgeDoubleClick={handleEdgeDoubleClick}
               nodeTypes={nodeTypes}
               deleteKeyCode={isLocked ? null : ['Backspace', 'Delete']}
               nodesDraggable={!isLocked}
               nodesConnectable={!isLocked}
-              elementsSelectable={!isLocked}
+              elementsSelectable={true}
               fitView
               className="bg-bg"
               proOptions={{ hideAttribution: true }}
@@ -979,6 +1260,52 @@ function FlowCanvas() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Export Preview Modal */}
+      {previewExportData && (
+        <ExportPreviewModal
+          isOpen={Boolean(previewExportData)}
+          onClose={() => setPreviewExportData(null)}
+          nodeId={previewExportData.id}
+          nodeLabel={previewExportData.label}
+          nodeResult={previewExportData.result || nodeResults[previewExportData.id]}
+          completed={previewExportData.completed || completedNodeIds.includes(previewExportData.id)}
+          isLiveExecuting={isLiveExecuting}
+          onExecuteFlow={handleExecute}
+          fileName={previewExportData.fileName}
+          format={previewExportData.format}
+          node={nodes.find(n => n.id === previewExportData.id)}
+          nodes={nodes}
+          edges={edges}
+          context={{ ...nodeResults, ...intermediateContext }}
+        />
+      )}
+
+      {/* Data Source Preview Modal */}
+      {previewDataSourceData && (
+        <DataSourcePreviewModal
+          isOpen={Boolean(previewDataSourceData)}
+          onClose={() => setPreviewDataSourceData(null)}
+          nodeId={previewDataSourceData.id}
+          nodeLabel={previewDataSourceData.label}
+          fileName={previewDataSourceData.fileName}
+          filePath={previewDataSourceData.filePath}
+          format={previewDataSourceData.format}
+          sheetName={previewDataSourceData.sheetName}
+          sheets={previewDataSourceData.sheets}
+          sampleRows={previewDataSourceData.sampleRows}
+          totalRows={previewDataSourceData.totalRows}
+          nodeResult={previewDataSourceData.result || nodeResults[previewDataSourceData.id]}
+          onSelectSheet={(sheet) => {
+            setNodes(nds => nds.map(n => {
+              if (n.id === previewDataSourceData.id) {
+                return { ...n, data: { ...n.data, sheetName: sheet } };
+              }
+              return n;
+            }));
+          }}
+        />
       )}
 
       {/* Execution History Modal */}

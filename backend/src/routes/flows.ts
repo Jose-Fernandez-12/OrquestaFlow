@@ -47,7 +47,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
       if (name !== undefined) { updates.push('name = ?'); values.push(name); }
       if (description !== undefined) { updates.push('description = ?'); values.push(description); }
-      if (definition !== undefined) { updates.push('definition = ?'); values.push(definition); }
+      if (definition !== undefined) { updates.push('definition = ?'); values.push(typeof definition === 'object' ? JSON.stringify(definition) : definition); }
       if (status !== undefined) { updates.push('status = ?'); values.push(status); }
       if (is_locked !== undefined) { updates.push('is_locked = ?'); values.push(is_locked); }
       updates.push("updated_at = datetime('now')");
@@ -115,11 +115,32 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     return { data: { stopped: true } };
   });
 
+  // Resume debug execution
+  app.post<{ Params: { id: string }, Body: { nodeId?: string, action: 'step_over' | 'continue' | 'continue_node' | 'step_request' } }>('/:id/debug/resume', async (request, reply) => {
+    const { resumeNodeExecution } = await import('../engine/executor.js');
+    const resumed = resumeNodeExecution(request.params.id, request.body.nodeId, request.body.action);
+    if (!resumed) {
+      return reply.status(400).send({ error: 'Failed to resume execution (invalid node or not in debug mode)' });
+    }
+    return { data: { resumed: true } };
+  });
+
+  // Pause debug execution
+  app.post<{ Params: { id: string } }>('/:id/debug/pause', async (request, reply) => {
+    const { pauseDebugExecution } = await import('../engine/executor.js');
+    const paused = pauseDebugExecution(request.params.id);
+    if (!paused) {
+      return reply.status(400).send({ error: 'Failed to pause execution (not running in debug mode)' });
+    }
+    return { data: { paused: true } };
+  });
+
   // Execute flow (using DAG engine)
-  app.post<{ Params: { id: string } }>('/:id/execute', async (request, reply) => {
+  app.post<{ Params: { id: string }, Body: { mode?: 'normal' | 'debug' } }>('/:id/execute', async (request, reply) => {
     const db = getDb();
     const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
     if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+    const mode = request.body?.mode || 'normal';
 
     const logId = uuid();
     db.prepare(`
@@ -133,29 +154,58 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       const { getIo } = await import('../engine/socket.js');
       const io = getIo();
       
+      // Track exported files emitted in real-time so we also include them in the final DB log
+      const realtimeExportedFiles: any[] = [];
+
       // Execute the DAG with real-time socket callbacks
       const context = await executeFlowEngine(request.params.id, (nodeId, status, result) => {
-        io.emit('flow-progress', { flowId: request.params.id, nodeId, status, result });
-      });
+        io.emit('flow-progress', { 
+          flowId: request.params.id, 
+          nodeId, 
+          status, 
+          result,
+          current: result?.current,
+          total: result?.total,
+          remainingSeconds: result?.remainingSeconds,
+          totalSeconds: result?.totalSeconds,
+          context: result?.context
+        });
+
+        // Emit export ready immediately when an export node finishes, so files download without waiting for other branches
+        if (status === 'completed' && result?.filePath && result?.success) {
+          const fileName = result.filePath.split(/[/\\]/).pop();
+          const info = {
+            nodeId,
+            fileName,
+            downloadUrl: `/api/files/${fileName}`,
+            records: result.records,
+            format: result.format,
+            filePath: result.filePath,
+            previewRows: result.previewRows,
+            headers: result.headers
+          };
+          realtimeExportedFiles.push(info);
+          io.emit('flow-export-ready', {
+            flowId: request.params.id,
+            ...info
+          });
+        }
+      }, { mode });
       const duration = Date.now() - startTime;
 
-      // Find any export output to surface the download link
+      // Ensure exportedFiles are collected for the execution logs and completion payload
       const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
-      
-      const exportedFiles = exportResults.map((exportResult: any) => {
+      const exportedFiles = realtimeExportedFiles.length > 0 ? realtimeExportedFiles : exportResults.map((exportResult: any) => {
         const fileName = exportResult.filePath.split(/[/\\]/).pop();
-        const info = {
+        return {
           fileName,
           downloadUrl: `/api/files/${fileName}`,
           records: exportResult.records,
           format: exportResult.format,
-          filePath: exportResult.filePath
+          filePath: exportResult.filePath,
+          previewRows: exportResult.previewRows,
+          headers: exportResult.headers
         };
-        io.emit('flow-export-ready', {
-          flowId: request.params.id,
-          ...info
-        });
-        return info;
       });
 
       let recordCount = 0;
