@@ -1372,6 +1372,64 @@ function DataSourceInspector({
                   <DataSourceInspector node={node} updateNodeData={updateNodeData} nodes={nodes} edges={edges} />
                 )}
 
+                {node.type === 'dataList' && (
+                  <div className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium">Datos (JSON Array)</label>
+                      <textarea
+                        className={`flex w-full min-h-[200px] rounded-sm border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent ${
+                          node.data?.items ? (
+                            (() => {
+                              try {
+                                const parsed = JSON.parse(node.data.items as string);
+                                return Array.isArray(parsed) ? "border-border" : "border-red-500 ring-1 ring-red-500/30";
+                              } catch {
+                                return "border-red-500 ring-1 ring-red-500/30";
+                              }
+                            })()
+                          ) : "border-border"
+                        }`}
+                        value={node.data?.items as string || ''}
+                        onChange={(e) => updateNodeData('items', e.target.value)}
+                        placeholder={'[\n  { "id": 1, "nombre": "A" },\n  { "id": 2, "nombre": "B" }\n]'}
+                      />
+                      {(() => {
+                        if (!node.data?.items) return null;
+                        try {
+                          const parsed = JSON.parse(node.data.items as string);
+                          if (!Array.isArray(parsed)) return <p className="text-[10px] text-red-500">Debe ser un array válido.</p>;
+                          return <p className="text-[10px] text-muted">Contiene {parsed.length} elementos.</p>;
+                        } catch {
+                          return <p className="text-[10px] text-red-500">JSON inválido.</p>;
+                        }
+                      })()}
+                    </div>
+                  </div>
+                )}
+
+                {node.type === 'forEach' && (
+                  <div className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium">Iterar sobre</label>
+                      <Input
+                        value={node.data?.iterateOver as string || ''}
+                        onChange={(e) => updateNodeData('iterateOver', e.target.value)}
+                        placeholder="{{dataList_1}}"
+                      />
+                      <p className="text-[10px] text-muted">Referencia al nodo que contiene el array. Ej: {'{{dataList_1}}'}</p>
+                    </div>
+                  </div>
+                )}
+
+                {node.type === 'forEachEnd' && (
+                  <div className="space-y-4">
+                    <div className="bg-bg/50 border border-border p-3 rounded-sm">
+                      <p className="text-xs font-medium mb-1">Este nodo marca el final del bucle forEach.</p>
+                      <p className="text-[11px] text-muted leading-relaxed">Los nodos entre 'Para cada elemento' y este nodo se ejecutaran una vez por cada elemento del array.</p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-8 pt-4 border-t border-border">
                   <Button
                     variant="default"
