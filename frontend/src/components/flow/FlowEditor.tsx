@@ -41,7 +41,8 @@ import {
   Bug,
   StepForward,
   PlayCircle,
-  Loader2
+  Loader2,
+  Pause
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
