@@ -1504,7 +1504,7 @@ async function executeForEachNode(
   edges: any[],
   nodes: any[],
   adjList: Record<string, string[]>,
-  onNodeProgress: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress', result?: any) => void,
+  onNodeProgress: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
   signal: AbortSignal,
   flowId: string
 ): Promise<any[]> {
