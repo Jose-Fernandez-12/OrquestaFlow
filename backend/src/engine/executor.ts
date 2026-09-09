@@ -161,6 +161,25 @@ export async function executeFlowEngine(
         forEachManagedNodeIds.add(sid);
         inDegree[sid] = Infinity; // Exclude from main DAG traversal
       });
+
+      // Crucial fix: The subgraph nodes between feNode and endId execute inside executeForEachNode,
+      // NOT in the main Kahn traversal loop.
+      // Therefore, edges from subIds to endId will never decrement inDegree[endId] in the main DAG.
+      // We must remove their inDegree contribution:
+      normalizedEdges.forEach(edge => {
+        if (edge.target === endId && subIds.includes(edge.source)) {
+          inDegree[endId] = Math.max(0, (inDegree[endId] || 0) - 1);
+        }
+      });
+
+      // Instead, feNode's completion in the main DAG must unlock endId:
+      if (!adjList[feNode.id]) {
+        adjList[feNode.id] = [];
+      }
+      if (!adjList[feNode.id].includes(endId)) {
+        adjList[feNode.id].push(endId);
+        inDegree[endId] = (inDegree[endId] || 0) + 1;
+      }
     }
   }
 
@@ -245,7 +264,7 @@ export async function executeFlowEngine(
                     output = await executeScrapingNode(node, context, abortController.signal);
                     break;
                   case 'export':
-                    output = await executeExportNode(node, context);
+                    output = await executeExportNode(node, context, edges, nodes);
                     break;
                   case 'query':
                     output = await executeQueryNode(node, context, abortController.signal);
@@ -274,14 +293,26 @@ export async function executeFlowEngine(
                     );
                     break;
                   case 'forEachEnd':
-                    // Passthrough: inherit the accumulated results from the forEach node
+                    // Passthrough: inherit the accumulated results from the paired forEach node
                     {
-                      const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
-                      for (const uid of upstreamIds) {
-                        if (context[uid] !== undefined) {
-                          output = context[uid];
-                          break;
+                      const pairedForEach = nodes.find(
+                        n => n.type === 'forEach' && findForEachEndNode(n.id, adjList, nodes) === node.id
+                      );
+                      if (pairedForEach && context[pairedForEach.id] !== undefined) {
+                        output = context[pairedForEach.id];
+                      } else if (context[node.id] !== undefined) {
+                        output = context[node.id];
+                      } else {
+                        const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+                        for (const uid of upstreamIds) {
+                          if (context[uid] !== undefined) {
+                            output = context[uid];
+                            break;
+                          }
                         }
+                      }
+                      if (Array.isArray(output)) {
+                        output = flattenRows(output);
                       }
                     }
                     break;
@@ -910,7 +941,7 @@ function flattenRows(data: any): any[] {
 }
 
 // Export Node Handler
-async function executeExportNode(node: any, context: Record<string, any>) {
+async function executeExportNode(node: any, context: Record<string, any>, edges?: any[], nodes?: any[]) {
   let fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0,10)}`;
   // Resolve template variables in fileName (e.g., {{_item.id_eds}} inside a forEach loop)
   if (typeof fileName === 'string' && fileName.includes('{{')) {
@@ -927,14 +958,27 @@ async function executeExportNode(node: any, context: Record<string, any>) {
     const pathStr = match ? match[1] : dataSource;
     rawData = resolvePath(context, pathStr);
   } else {
-    // Auto-detect: reverse context keys to prioritize the latest executed upstream node (HTTP Request)
-    const contextKeys = Object.keys(context).reverse();
-    for (const key of contextKeys) {
-      if (key.startsWith('start')) continue;
-      const val = context[key];
-      if (val !== undefined && val !== null) {
-        rawData = val;
-        break;
+    // 1. Direct upstream from edges (e.g. forEachEnd -> export)
+    if (edges && nodes) {
+      const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+      for (const uid of upstreamIds) {
+        if (context[uid] !== undefined && context[uid] !== null) {
+          rawData = context[uid];
+          break;
+        }
+      }
+    }
+
+    // 2. Fallback: reverse context keys to prioritize the latest executed upstream node (HTTP Request, forEachEnd, etc.)
+    if (!rawData) {
+      const contextKeys = Object.keys(context).reverse();
+      for (const key of contextKeys) {
+        if (key.startsWith('start')) continue;
+        const val = context[key];
+        if (val !== undefined && val !== null) {
+          rawData = val;
+          break;
+        }
       }
     }
   }
@@ -1110,9 +1154,17 @@ async function executeExportNode(node: any, context: Record<string, any>) {
       // Single Sheet Mode
       const sheet = workbook.addWorksheet('Datos');
 
-      if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
-        const headers = Object.keys(exportData[0]);
+      const allKeysSet = new Set<string>();
+      for (const row of exportData) {
+        if (typeof row === 'object' && row !== null) {
+          Object.keys(row).forEach(k => allKeysSet.add(k));
+        }
+      }
+      const headers = allKeysSet.size > 0 
+        ? Array.from(allKeysSet) 
+        : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
 
+      if (exportData.length > 0 && headers.length > 0) {
         // Add styled header row - per cell to avoid coloring the entire row
         sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
         const headerRow = sheet.getRow(1);
@@ -1126,7 +1178,7 @@ async function executeExportNode(node: any, context: Record<string, any>) {
         // Add data rows - plain, no background color
         exportData.forEach(row => {
           const dataRow = sheet.addRow(headers.map(h => {
-            const v = row[h];
+            const v = (typeof row === 'object' && row !== null) ? row[h] : row;
             return (v === null || v === undefined) ? '' : v;
           }));
           dataRow.height = 18;
@@ -1138,13 +1190,22 @@ async function executeExportNode(node: any, context: Record<string, any>) {
 
   } else {
     // Generate CSV
-    if (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null) {
-      const headers = Object.keys(exportData[0]);
+    const allKeysSet = new Set<string>();
+    for (const row of exportData) {
+      if (typeof row === 'object' && row !== null) {
+        Object.keys(row).forEach(k => allKeysSet.add(k));
+      }
+    }
+    const headers = allKeysSet.size > 0 
+      ? Array.from(allKeysSet) 
+      : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
+
+    if (exportData.length > 0 && headers.length > 0) {
       const csvRows = [headers.join(',')];
 
       for (const row of exportData) {
         const values = headers.map(header => {
-          const val = row[header];
+          const val = (typeof row === 'object' && row !== null) ? row[header] : row;
           const strVal = (val === null || val === undefined) ? '' : String(val);
           if (strVal.includes(',') || strVal.includes('"') || strVal.includes('\n')) {
             return `"${strVal.replace(/"/g, '""')}"`;
@@ -1539,6 +1600,11 @@ async function executeForEachNode(
 
   if (items.length === 0) {
     onNodeProgress(node.id, 'completed', { iterations: 0, results: [] });
+    context[node.id] = [];
+    const forEachEndId = findForEachEndNode(node.id, adjList, nodes);
+    if (forEachEndId) {
+      context[forEachEndId] = [];
+    }
     return [];
   }
 
@@ -1554,8 +1620,18 @@ async function executeForEachNode(
 
   if (subgraphNodes.length === 0) {
     onNodeProgress(node.id, 'completed', { iterations: 0, results: [] });
+    context[node.id] = [];
+    if (forEachEndId) {
+      context[forEachEndId] = [];
+    }
     return [];
   }
+
+  // Identify the terminal node inside the subgraph that connects to forEachEnd
+  const terminalEdge = edges.find(
+    e => e.target === forEachEndId && subgraphNodeIds.includes(e.source)
+  );
+  const terminalSubNodeId = terminalEdge ? terminalEdge.source : null;
 
   // Build local adjList and compute base inDegree for the sub-graph
   const subAdjList: Record<string, string[]> = {};
@@ -1690,7 +1766,7 @@ async function executeForEachNode(
                       output = await executeScrapingNode(subNode, localContext, signal);
                       break;
                     case 'export':
-                      output = await executeExportNode(subNode, localContext);
+                      output = await executeExportNode(subNode, localContext, edges, nodes);
                       break;
                     case 'query':
                       output = await executeQueryNode(subNode, localContext, signal);
@@ -1755,12 +1831,43 @@ async function executeForEachNode(
       checkAndRunLocal();
     });
 
-    // Collect the last meaningful output from this iteration
-    iterationResults.push(lastOutput);
+    // Collect the output from the terminal subgraph node (or fallback to lastOutput)
+    const subResult = (terminalSubNodeId && localContext[terminalSubNodeId] !== undefined)
+      ? localContext[terminalSubNodeId]
+      : lastOutput;
 
-    // Propagate sub-graph results back to main context for the forEachEnd node
-    // Store intermediate results so they accumulate across iterations
+    // Flatten rows from subResult and enrich with parent item metadata
+    const flatSub = flattenRows(subResult);
+    if (flatSub.length > 0) {
+      const mergedRows = flatSub.map(row => {
+        if (typeof row === 'object' && row !== null && typeof item === 'object' && item !== null && !Array.isArray(item)) {
+          return { ...item, ...row };
+        }
+        return row;
+      });
+      iterationResults.push(...mergedRows);
+    } else if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+      if (typeof subResult === 'object' && subResult !== null) {
+        iterationResults.push({ ...item, ...subResult });
+      } else if (subResult !== undefined && subResult !== null) {
+        iterationResults.push({ ...item, resultado: subResult });
+      } else {
+        iterationResults.push({ ...item });
+      }
+    } else {
+      iterationResults.push(subResult);
+    }
+
+    // Propagate accumulated results back to main context for both forEach and forEachEnd
     context[node.id] = iterationResults;
+    if (forEachEndId) {
+      context[forEachEndId] = iterationResults;
+    }
+  }
+
+  context[node.id] = iterationResults;
+  if (forEachEndId) {
+    context[forEachEndId] = iterationResults;
   }
 
   return iterationResults;
