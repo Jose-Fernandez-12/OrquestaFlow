@@ -1,5 +1,21 @@
 import React from 'react';
-import { Play, Globe, Code, FileOutput, Database, Clock, FileSpreadsheet, List, Repeat, Square } from 'lucide-react';
+import {
+  Play,
+  Globe,
+  Code,
+  FileOutput,
+  Database,
+  Clock,
+  FileSpreadsheet,
+  List,
+  Repeat,
+  Square,
+  GitFork,
+  Braces,
+  Radio,
+  KeyRound,
+  Bot
+} from 'lucide-react';
 
 const NODE_TEMPLATES = [
   { type: 'start', label: 'Inicio de flujo', icon: Play, desc: 'Punto de entrada' },
@@ -12,6 +28,11 @@ const NODE_TEMPLATES = [
   { type: 'dataList', label: 'Lista de datos', icon: List, desc: 'Definir array de datos JSON' },
   { type: 'forEach', label: 'Para cada elemento', icon: Repeat, desc: 'Inicio de bucle iterativo' },
   { type: 'forEachEnd', label: 'Fin de bucle', icon: Square, desc: 'Cierre del bucle forEach' },
+  { type: 'conditionalBranch', label: 'Bifurcación', icon: GitFork, desc: 'Decisión If/Else o Switch' },
+  { type: 'jsonTransform', label: 'Transformar JSON', icon: Braces, desc: 'Mapear o estructurar datos' },
+  { type: 'webhookTrigger', label: 'Webhook Trigger', icon: Radio, desc: 'Disparador HTTP externo' },
+  { type: 'oauth2Connector', label: 'Conector OAuth2', icon: KeyRound, desc: 'Autenticación y tokens' },
+  { type: 'aiChatCompletion', label: 'IA / Chat LLM', icon: Bot, desc: 'Generación con OpenAI/Ollama' },
 ];
 
 export function NodeLibrary() {

@@ -339,4 +339,87 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
     return { data: { logId, nodeId: request.params.nodeId, status: 'completed', duration } };
   });
+
+  // Webhook trigger endpoint
+  app.post<{ Params: { webhookId: string } }>('/webhook/:webhookId', async (request, reply) => {
+    const { webhookId } = request.params;
+    const db = getDb();
+    const flows = db.prepare('SELECT * FROM flows').all() as any[];
+
+    // Find flow containing webhookTrigger matching webhookId
+    let targetFlow: any = null;
+    let targetNode: any = null;
+
+    for (const f of flows) {
+      try {
+        const def = JSON.parse(f.definition || '{}');
+        const node = (def.nodes || []).find(
+          (n: any) => n.type === 'webhookTrigger' && (n.data?.webhookId === webhookId || n.id === webhookId)
+        );
+        if (node) {
+          targetFlow = f;
+          targetNode = node;
+          break;
+        }
+      } catch {}
+    }
+
+    if (!targetFlow || !targetNode) {
+      return reply.status(404).send({ error: `Webhook ${webhookId} no encontrado en ningún flujo activo` });
+    }
+
+    // Check optional secret / HMAC
+    const secret = targetNode.data?.secret;
+    if (secret) {
+      const signatureHeader = (request.headers['x-hub-signature-256'] || request.headers['x-webhook-signature']) as string | undefined;
+      const authHeader = request.headers['authorization'] as string | undefined;
+
+      if (signatureHeader) {
+        const crypto = await import('crypto');
+        const bodyStr = typeof request.body === 'string' ? request.body : JSON.stringify(request.body || {});
+        const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');
+        const sigBuf = Buffer.from(signatureHeader);
+        const expBuf = Buffer.from(expected);
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+          return reply.status(401).send({ error: 'Firma HMAC inválida' });
+        }
+      } else if (authHeader && authHeader.replace(/^Bearer\s+/i, '') !== secret) {
+        return reply.status(401).send({ error: 'Token de autorización inválido' });
+      }
+    }
+
+    // Trigger flow execution asynchronously
+    const { executeFlowEngine } = await import('../engine/executor.js');
+    const { getIo } = await import('../engine/socket.js');
+    const io = getIo();
+
+    const initialPayload = {
+      body: request.body,
+      headers: request.headers,
+      query: request.query,
+      timestamp: new Date().toISOString()
+    };
+
+    executeFlowEngine(
+      targetFlow.id,
+      (nodeId, status, result) => {
+        io.emit('flow-progress', { flowId: targetFlow.id, nodeId, status, result });
+      },
+      {
+        mode: 'normal',
+        initialContext: {
+          _webhookPayload: initialPayload,
+          [targetNode.id]: initialPayload
+        }
+      }
+    ).catch(err => {
+      app.log.error(err, 'Error executing flow via webhook');
+    });
+
+    return reply.status(202).send({
+      message: 'Webhook recibido y flujo encolado para ejecución',
+      flowId: targetFlow.id,
+      webhookId
+    });
+  });
 }

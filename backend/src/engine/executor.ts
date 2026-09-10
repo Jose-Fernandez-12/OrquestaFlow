@@ -98,7 +98,7 @@ export function resumeNodeExecution(
 export async function executeFlowEngine(
   flowId: string,
   onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
-  options?: { mode?: 'normal' | 'debug' }
+  options?: { mode?: 'normal' | 'debug'; initialContext?: Record<string, any> }
 ): Promise<Record<string, any>> {
   const db = getDb();
   const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
@@ -198,7 +198,7 @@ export async function executeFlowEngine(
     }
   }
 
-  const context: Record<string, any> = {};
+  const context: Record<string, any> = { ...(options?.initialContext || {}) };
   const runningPromises = new Map<string, Promise<void>>();
   const completedNodes = new Set<string>();
   const errorNodes = new Set<string>();
@@ -339,6 +339,21 @@ export async function executeFlowEngine(
                       }
                     }
                     break;
+                  case 'conditionalBranch':
+                    output = executeConditionalBranchNode(node, context);
+                    break;
+                  case 'jsonTransform':
+                    output = executeJsonTransformNode(node, context);
+                    break;
+                  case 'webhookTrigger':
+                    output = executeWebhookTriggerNode(node, context);
+                    break;
+                  case 'oauth2Connector':
+                    output = await executeOAuth2ConnectorNode(node, context);
+                    break;
+                  case 'aiChatCompletion':
+                    output = await executeAiChatCompletionNode(node, context, abortController.signal);
+                    break;
                   default:
                     output = { warning: 'Unknown node type' };
                 }
@@ -354,8 +369,20 @@ export async function executeFlowEngine(
                 }
                 notifyProgress(node.id, 'completed', output);
 
-                // Unlock dependents
-                if (adjList[node.id]) {
+                // Unlock dependents or propagate branch selection for conditionalBranch
+                if (node.type === 'conditionalBranch' && output?.selectedHandle) {
+                  const selectedHandle = String(output.selectedHandle);
+                  const outgoingEdges = normalizedEdges.filter(e => e.source === node.id);
+
+                  outgoingEdges.forEach(edge => {
+                    const matchesHandle = !edge.sourceHandle || edge.sourceHandle === selectedHandle;
+                    if (matchesHandle) {
+                      inDegree[edge.target]--;
+                    } else {
+                      markBranchSkipped(edge.target, normalizedEdges, inDegree, completedNodes, notifyProgress);
+                    }
+                  });
+                } else if (adjList[node.id]) {
                   adjList[node.id].forEach(depId => {
                     inDegree[depId]--;
                   });
@@ -1832,6 +1859,18 @@ async function executeForEachNode(
                     case 'dataList':
                       output = executeDataListNode(subNode);
                       break;
+                    case 'conditionalBranch':
+                      output = executeConditionalBranchNode(subNode, localContext);
+                      break;
+                    case 'jsonTransform':
+                      output = executeJsonTransformNode(subNode, localContext);
+                      break;
+                    case 'oauth2Connector':
+                      output = await executeOAuth2ConnectorNode(subNode, localContext);
+                      break;
+                    case 'aiChatCompletion':
+                      output = await executeAiChatCompletionNode(subNode, localContext, signal);
+                      break;
                     default:
                       output = { warning: 'Unknown node type' };
                   }
@@ -1915,4 +1954,300 @@ async function executeForEachNode(
   }
 
   return iterationResults;
+}
+
+// -------------------------------------------------------------
+// New Catalog Nodes Implementation
+// -------------------------------------------------------------
+
+// Conditional Branch Handler (If/Else and Switch)
+function executeConditionalBranchNode(node: any, context: Record<string, any>): {
+  result: boolean | string;
+  selectedHandle: string;
+  evaluatedRule?: any;
+} {
+  const mode = node.data?.mode || 'if_else';
+
+  if (mode === 'if_else') {
+    const operator = node.data?.operator || 'equals';
+    const leftRaw = node.data?.leftOperand ?? '';
+    const rightRaw = node.data?.rightOperand ?? '';
+
+    const leftVal = resolveTemplate(context, String(leftRaw));
+    const rightVal = resolveTemplate(context, String(rightRaw));
+
+    let isMatch = false;
+    switch (operator) {
+      case 'equals':
+        isMatch = String(leftVal ?? '').trim().toLowerCase() === String(rightVal ?? '').trim().toLowerCase();
+        break;
+      case 'not_equals':
+        isMatch = String(leftVal ?? '').trim().toLowerCase() !== String(rightVal ?? '').trim().toLowerCase();
+        break;
+      case 'greater_than':
+        isMatch = Number(leftVal) > Number(rightVal);
+        break;
+      case 'less_than':
+        isMatch = Number(leftVal) < Number(rightVal);
+        break;
+      case 'greater_or_equal':
+        isMatch = Number(leftVal) >= Number(rightVal);
+        break;
+      case 'less_or_equal':
+        isMatch = Number(leftVal) <= Number(rightVal);
+        break;
+      case 'contains':
+        isMatch = String(leftVal ?? '').toLowerCase().includes(String(rightVal ?? '').toLowerCase());
+        break;
+      case 'not_contains':
+        isMatch = !String(leftVal ?? '').toLowerCase().includes(String(rightVal ?? '').toLowerCase());
+        break;
+      case 'regex':
+        try {
+          const re = new RegExp(String(rightVal));
+          isMatch = re.test(String(leftVal ?? ''));
+        } catch {
+          isMatch = false;
+        }
+        break;
+      case 'is_null':
+      case 'is_empty':
+        isMatch = leftVal === null || leftVal === undefined || leftVal === '' || (Array.isArray(leftVal) && leftVal.length === 0);
+        break;
+      case 'is_not_null':
+      case 'is_not_empty':
+        isMatch = !(leftVal === null || leftVal === undefined || leftVal === '' || (Array.isArray(leftVal) && leftVal.length === 0));
+        break;
+      default:
+        isMatch = Boolean(leftVal);
+    }
+
+    const selectedHandle = isMatch ? 'true' : 'false';
+    return {
+      result: isMatch,
+      selectedHandle,
+      evaluatedRule: { operator, leftVal, rightVal, isMatch }
+    };
+  } else {
+    // Switch mode
+    const expression = node.data?.switchValue ?? '';
+    const switchVal = resolveTemplate(context, String(expression));
+    const cases = Array.isArray(node.data?.cases) ? node.data.cases : [];
+    
+    let matchedHandle = 'default';
+    for (const c of cases) {
+      const caseVal = resolveTemplate(context, String(c.value ?? ''));
+      if (String(switchVal ?? '').trim().toLowerCase() === String(caseVal ?? '').trim().toLowerCase()) {
+        matchedHandle = c.caseId || `case_${c.id}`;
+        break;
+      }
+    }
+
+    return {
+      result: matchedHandle,
+      selectedHandle: matchedHandle,
+      evaluatedRule: { switchVal, matchedHandle }
+    };
+  }
+}
+
+// Mark unselected branch nodes as skipped so Kahn DAG does not stall
+function markBranchSkipped(
+  nodeId: string,
+  edges: any[],
+  inDegree: Record<string, number>,
+  completedNodes: Set<string>,
+  notifyProgress: (nodeId: string, status: any, result?: any) => void
+) {
+  if (completedNodes.has(nodeId)) return;
+  completedNodes.add(nodeId);
+  notifyProgress(nodeId, 'completed', { skipped: true, reason: 'Rama condicional no seleccionada' });
+
+  // Propagate to outgoing targets
+  const outgoing = edges.filter(e => e.source === nodeId);
+  outgoing.forEach(edge => {
+    inDegree[edge.target]--;
+    if (inDegree[edge.target] <= 0) {
+      markBranchSkipped(edge.target, edges, inDegree, completedNodes, notifyProgress);
+    }
+  });
+}
+
+// Json Transform Handler (safe in-memory mapping and picking)
+function executeJsonTransformNode(node: any, context: Record<string, any>): any {
+  const transformType = node.data?.transformType || 'javascript';
+  const inputExpr = node.data?.inputDataSource || '';
+  let inputData: any = null;
+
+  if (inputExpr && inputExpr.trim()) {
+    inputData = resolveTemplate(context, inputExpr);
+  } else {
+    // Auto-detect upstream
+    const keys = Object.keys(context).reverse();
+    for (const k of keys) {
+      if (k !== 'start' && k !== node.id && context[k] !== undefined) {
+        inputData = context[k];
+        break;
+      }
+    }
+  }
+
+  if (transformType === 'pick') {
+    const fields: string[] = (node.data?.fields || '').split(',').map((s: string) => s.trim()).filter(Boolean);
+    if (Array.isArray(inputData)) {
+      return inputData.map(item => {
+        if (typeof item !== 'object' || !item) return item;
+        const res: Record<string, any> = {};
+        for (const f of fields) {
+          res[f] = resolvePath(item, f);
+        }
+        return res;
+      });
+    } else if (typeof inputData === 'object' && inputData) {
+      const res: Record<string, any> = {};
+      for (const f of fields) {
+        res[f] = resolvePath(inputData, f);
+      }
+      return res;
+    }
+    return inputData;
+  }
+
+  if (transformType === 'javascript') {
+    const scriptCode = node.data?.expression || 'return data;';
+    try {
+      const fn = new Function('data', 'context', `
+        "use strict";
+        ${scriptCode.includes('return') ? scriptCode : `return (${scriptCode});`}
+      `);
+      return fn(inputData, context);
+    } catch (e: any) {
+      throw new Error(`Error en jsonTransform: ${e.message}`);
+    }
+  }
+
+  return inputData;
+}
+
+// Webhook Trigger Handler
+function executeWebhookTriggerNode(node: any, context: Record<string, any>): any {
+  if (context._webhookPayload) {
+    return context._webhookPayload;
+  }
+  return {
+    msg: 'Webhook trigger inicializado',
+    webhookId: node.data?.webhookId || node.id,
+    timestamp: new Date().toISOString()
+  };
+}
+
+// OAuth2 Connector Handler
+async function executeOAuth2ConnectorNode(node: any, context: Record<string, any>): Promise<any> {
+  const grantType = node.data?.grantType || 'client_credentials';
+  const tokenUrl = resolveTemplate(context, node.data?.tokenUrl || '');
+  const clientId = resolveTemplate(context, node.data?.clientId || '');
+  const clientSecret = resolveTemplate(context, node.data?.clientSecret || '');
+  const scope = resolveTemplate(context, node.data?.scope || '');
+
+  if (!tokenUrl) {
+    throw new Error('OAuth2: Debe proporcionar la URL del token');
+  }
+
+  const bodyParams = new URLSearchParams();
+  bodyParams.append('grant_type', grantType);
+  if (clientId) bodyParams.append('client_id', clientId);
+  if (clientSecret) bodyParams.append('client_secret', clientSecret);
+  if (scope) bodyParams.append('scope', scope);
+
+  const res = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Accept': 'application/json'
+    },
+    body: bodyParams.toString()
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`OAuth2 error (${res.status}): ${errText}`);
+  }
+
+  const tokenData = (await res.json()) as any;
+  return {
+    ...tokenData,
+    access_token: tokenData.access_token || tokenData.token,
+    token_type: tokenData.token_type || 'Bearer',
+    expires_in: tokenData.expires_in,
+    acquired_at: new Date().toISOString()
+  };
+}
+
+// AI Chat Completion Handler
+async function executeAiChatCompletionNode(node: any, context: Record<string, any>, signal?: AbortSignal): Promise<any> {
+  const endpoint = resolveTemplate(context, node.data?.endpoint || 'https://api.openai.com/v1/chat/completions');
+  const apiKey = resolveTemplate(context, node.data?.apiKey || '');
+  const model = resolveTemplate(context, node.data?.model || 'gpt-4o-mini');
+  const systemPrompt = resolveTemplate(context, node.data?.systemPrompt || '');
+  const userPrompt = resolveTemplate(context, node.data?.userPrompt || '');
+  const temperature = Number(node.data?.temperature ?? 0.7);
+  const responseFormat = node.data?.responseFormat || 'text';
+
+  if (!endpoint) {
+    throw new Error('AI Chat: URL de endpoint requerida');
+  }
+
+  const messages: any[] = [];
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
+  }
+  messages.push({ role: 'user', content: userPrompt });
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  };
+  if (apiKey) {
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  }
+
+  const requestBody: Record<string, any> = {
+    model,
+    messages,
+    temperature
+  };
+
+  if (responseFormat === 'json_object') {
+    requestBody.response_format = { type: 'json_object' };
+  }
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(requestBody),
+    signal
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`AI Completion error (${res.status}): ${errText}`);
+  }
+
+  const json = (await res.json()) as any;
+  const choice = json.choices?.[0];
+  const messageContent = choice?.message?.content || '';
+
+  let parsedJson: any = null;
+  if (responseFormat === 'json_object') {
+    try {
+      parsedJson = JSON.parse(messageContent);
+    } catch {}
+  }
+
+  return {
+    content: messageContent,
+    parsed: parsedJson,
+    usage: json.usage,
+    model: json.model
+  };
 }

@@ -15,7 +15,12 @@ import {
   Database,
   List,
   Repeat,
-  Square
+  Square,
+  GitFork,
+  Braces,
+  Radio,
+  KeyRound,
+  Bot
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -52,6 +57,11 @@ const typeIcons: Record<string, React.ElementType> = {
   dataList: List,
   forEach: Repeat,
   forEachEnd: Square,
+  conditionalBranch: GitFork,
+  jsonTransform: Braces,
+  webhookTrigger: Radio,
+  oauth2Connector: KeyRound,
+  aiChatCompletion: Bot,
 };
 
 function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
@@ -80,6 +90,11 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     dataList: 'text-violet-600',
     forEach: 'text-sky-600',
     forEachEnd: 'text-sky-600',
+    conditionalBranch: 'text-amber-500',
+    jsonTransform: 'text-teal-600',
+    webhookTrigger: 'text-pink-600',
+    oauth2Connector: 'text-indigo-600',
+    aiChatCompletion: 'text-fuchsia-600',
   };
 
   const typeLabels: Record<string, string> = {
@@ -97,6 +112,11 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     dataList: 'Lista de datos',
     forEach: 'Inicio de bucle',
     forEachEnd: 'Fin de bucle',
+    conditionalBranch: 'Bifurcación',
+    jsonTransform: 'Transformar JSON',
+    webhookTrigger: 'Disparador Webhook',
+    oauth2Connector: 'Conector OAuth2',
+    aiChatCompletion: 'Inteligencia Artificial',
   };
 
   const formatTimerDuration = (seconds: number) => {
@@ -208,43 +228,105 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
         </div>
       )}
 
-      {/* 4 Universal Connection Points: Left, Right, Top, Bottom */}
-      <Handle
-        type="source"
-        position={Position.Left}
-        id="left"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="right"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
-      <Handle
-        type="source"
-        position={Position.Top}
-        id="top"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="bottom"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
+      {/* Connection Handles: specialized for conditionalBranch, universal for others */}
+      {type === 'conditionalBranch' ? (
+        <>
+          <Handle
+            type="source"
+            position={Position.Left}
+            id="left"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          {data?.mode === 'switch' ? (
+            <>
+              {(data.cases || [{ id: '1', caseId: 'case_1' }]).map((c: any, idx: number) => (
+                <Handle
+                  key={c.caseId || idx}
+                  type="source"
+                  position={Position.Right}
+                  id={c.caseId || `case_${c.id}`}
+                  style={{ top: `${28 + idx * 24}px` }}
+                  className={cn(handleClass, "!bg-amber-500 !opacity-100")}
+                  title={`Caso: ${c.value || c.caseId || idx + 1}`}
+                />
+              ))}
+              <Handle
+                type="source"
+                position={Position.Right}
+                id="default"
+                style={{ bottom: '12px' }}
+                className={cn(handleClass, "!bg-muted-foreground !opacity-100")}
+                title="Por defecto (Default)"
+              />
+            </>
+          ) : (
+            <>
+              <Handle
+                type="source"
+                position={Position.Right}
+                id="true"
+                style={{ top: '32%' }}
+                className={cn(handleClass, "!bg-green-500 !opacity-100")}
+                title="Verdadero (True / Si)"
+              />
+              <Handle
+                type="source"
+                position={Position.Right}
+                id="false"
+                style={{ top: '68%' }}
+                className={cn(handleClass, "!bg-red-500 !opacity-100")}
+                title="Falso (False / No)"
+              />
+              <div className="absolute right-3 top-0 bottom-0 flex flex-col justify-around py-3 pointer-events-none text-[8px] font-bold select-none">
+                <span className="text-green-600">SI</span>
+                <span className="text-red-500">NO</span>
+              </div>
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <Handle
+            type="source"
+            position={Position.Left}
+            id="left"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="right"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          <Handle
+            type="source"
+            position={Position.Top}
+            id="top"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          <Handle
+            type="source"
+            position={Position.Bottom}
+            id="bottom"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+        </>
+      )}
 
       {/* Content */}
       <div className="p-3 flex items-center gap-3">
@@ -411,6 +493,59 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           {type === 'export' && (
             <div className="mt-1 text-[9px] text-muted/80 flex items-center gap-1">
               <span>Doble clic para previsualizar</span>
+            </div>
+          )}
+
+          {/* Conditional Branch preview */}
+          {type === 'conditionalBranch' && (
+            <div className="mt-1 flex flex-col gap-0.5 text-[10px] text-muted">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border inline-block truncate max-w-[150px]">
+                {data.mode === 'switch' ? `Switch: ${data.switchField || 'campo'}` : `If: ${data.operator || 'equals'}`}
+              </span>
+              {completed && nodeResult?.selectedBranch && (
+                <span className="text-amber-600 font-semibold">
+                  Rama: {String(nodeResult.selectedBranch)}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* JSON Transform preview */}
+          {type === 'jsonTransform' && (
+            <div className="mt-1 text-[10px] text-muted">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                {data.transformType === 'pick' ? 'Seleccionar campos' : 'JavaScript seguro'}
+              </span>
+            </div>
+          )}
+
+          {/* Webhook Trigger preview */}
+          {type === 'webhookTrigger' && (
+            <div className="mt-1 text-[10px] text-muted truncate">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                {data.webhookId ? `/${data.webhookId}` : 'Sin Webhook ID'}
+              </span>
+            </div>
+          )}
+
+          {/* OAuth2 Connector preview */}
+          {type === 'oauth2Connector' && (
+            <div className="mt-1 text-[10px] text-muted">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                {data.grantType === 'password' ? 'Password' : 'Client Creds'}
+              </span>
+              {completed && nodeResult?.access_token && (
+                <span className="ml-1 text-emerald-600 font-medium">Token OK</span>
+              )}
+            </div>
+          )}
+
+          {/* AI Chat Completion preview */}
+          {type === 'aiChatCompletion' && (
+            <div className="mt-1 text-[10px] text-muted truncate">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                {String(data.model || 'gpt-4o-mini')}
+              </span>
             </div>
           )}
         </div>

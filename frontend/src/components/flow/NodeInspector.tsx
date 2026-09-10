@@ -3,7 +3,7 @@ import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { JsonTreeViewer } from './JsonTreeViewer';
 import { DebugContextViewer } from './DebugContextViewer';
-import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2, Plus, Trash2, Repeat, Copy, Layers, ListOrdered, Table, Sparkles, Info } from 'lucide-react';
+import { X, ChevronDown, ChevronRight, Clock, FileSpreadsheet, Upload, Eye, Check, Loader2, Plus, Trash2, Repeat, Copy, Layers, ListOrdered, Table, Sparkles, Info, GitFork, Code2, Webhook, KeyRound, Bot, Sliders } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
 import { useAppSelector } from '../../store/hooks';
@@ -12,7 +12,20 @@ import { getApiUrl } from '../../lib/api';
 
 const isDataProducerNode = (type?: string) => {
   if (!type) return false;
-  return type.startsWith('http') || type === 'query' || type === 'dataSource' || type === 'fileSource' || type === 'dataList' || type === 'forEach' || type === 'forEachEnd';
+  return (
+    type.startsWith('http') ||
+    type === 'query' ||
+    type === 'dataSource' ||
+    type === 'fileSource' ||
+    type === 'dataList' ||
+    type === 'forEach' ||
+    type === 'forEachEnd' ||
+    type === 'conditionalBranch' ||
+    type === 'jsonTransform' ||
+    type === 'webhookTrigger' ||
+    type === 'oauth2Connector' ||
+    type === 'aiChatCompletion'
+  );
 };
 
 const getUpstreamNodes = (node: Node, edges: Edge[] = [], nodes: Node[] = []): Node[] => {
@@ -548,6 +561,859 @@ function DataSourceInspector({
             <p>
               Puedes referenciar este nodo unificador usando <code>{`{{${node.id}}}`}</code> en otros nodos (ej. "Iterar Sobre" de HTTP o en un nodo de Exportar).
             </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConditionalBranchInspector({
+  node,
+  updateNodeData,
+  upstreamNodes,
+  nodeResult
+}: {
+  node: Node;
+  updateNodeData: (key: string, value: any) => void;
+  upstreamNodes: Node[];
+  nodeResult?: any;
+}) {
+  const mode = (node.data?.mode as string) || 'if_else';
+  const operator = (node.data?.operator as string) || 'equals';
+  const leftOperand = (node.data?.leftOperand as string) || '';
+  const rightOperand = (node.data?.rightOperand as string) || '';
+  const switchField = (node.data?.switchField as string) || '';
+  const cases: string[] = Array.isArray(node.data?.cases) ? (node.data.cases as string[]) : ['caso_1', 'caso_2'];
+  const [newCaseInput, setNewCaseInput] = useState('');
+
+  const addCase = () => {
+    const trimmed = newCaseInput.trim();
+    if (!trimmed || cases.includes(trimmed)) return;
+    updateNodeData('cases', [...cases, trimmed]);
+    setNewCaseInput('');
+  };
+
+  const removeCase = (index: number) => {
+    const updated = cases.filter((_, idx) => idx !== index);
+    updateNodeData('cases', updated);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Mode Selector */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Modo de bifurcación</label>
+        <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-bg rounded border border-border">
+          <button
+            type="button"
+            onClick={() => updateNodeData('mode', 'if_else')}
+            className={cn(
+              "text-xs py-1.5 px-2 rounded font-medium transition-colors text-center",
+              mode === 'if_else'
+                ? "bg-accent/15 text-accent border border-accent/40 font-semibold"
+                : "text-muted hover:text-fg"
+            )}
+          >
+            If / Else (Booleano)
+          </button>
+          <button
+            type="button"
+            onClick={() => updateNodeData('mode', 'switch')}
+            className={cn(
+              "text-xs py-1.5 px-2 rounded font-medium transition-colors text-center",
+              mode === 'switch'
+                ? "bg-accent/15 text-accent border border-accent/40 font-semibold"
+                : "text-muted hover:text-fg"
+            )}
+          >
+            Switch (Múltiples Casos)
+          </button>
+        </div>
+      </div>
+
+      {mode === 'if_else' ? (
+        <div className="space-y-3">
+          {/* Operando Izquierdo */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium flex items-center justify-between">
+              <span>Operando izquierdo (Valor o Variable)</span>
+              {upstreamNodes.length > 0 && (
+                <span className="text-[10px] text-muted">{upstreamNodes.length} anterior(es)</span>
+              )}
+            </label>
+            {upstreamNodes.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-1">
+                {upstreamNodes.map(up => (
+                  <button
+                    key={up.id}
+                    type="button"
+                    onClick={() => updateNodeData('leftOperand', `{{${up.id}}}`)}
+                    className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-accent hover:border-accent transition-colors"
+                  >
+                    + {String(up.data?.label || up.id)}
+                  </button>
+                ))}
+              </div>
+            )}
+            <Input
+              value={leftOperand}
+              onChange={(e) => updateNodeData('leftOperand', e.target.value)}
+              placeholder="{{nodo_anterior.status}} o valor"
+              className="font-mono text-xs"
+            />
+          </div>
+
+          {/* Operador */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Operador</label>
+            <select
+              value={operator}
+              onChange={(e) => updateNodeData('operator', e.target.value)}
+              className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
+            >
+              <option value="equals">Es igual a (==)</option>
+              <option value="not_equals">No es igual a (!=)</option>
+              <option value="greater_than">Mayor que (&gt;)</option>
+              <option value="greater_equal">Mayor o igual que (&gt;=)</option>
+              <option value="less_than">Menor que (&lt;)</option>
+              <option value="less_equal">Menor o igual que (&lt;=)</option>
+              <option value="contains">Contiene texto</option>
+              <option value="is_empty">Está vacío / nulo</option>
+              <option value="is_not_empty">Tiene valor (No vacío)</option>
+            </select>
+          </div>
+
+          {/* Operando Derecho */}
+          {operator !== 'is_empty' && operator !== 'is_not_empty' && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Operando derecho (Valor esperado)</label>
+              <Input
+                value={rightOperand}
+                onChange={(e) => updateNodeData('rightOperand', e.target.value)}
+                placeholder="200, activo, ok..."
+                className="font-mono text-xs"
+              />
+            </div>
+          )}
+
+          {/* Diagrama explicativo de puertos */}
+          <div className="p-2.5 bg-bg border border-border rounded text-xs space-y-1.5">
+            <p className="font-medium text-fg flex items-center gap-1.5">
+              <GitFork size={13} className="text-amber-500" />
+              <span>Conexiones de salida</span>
+            </p>
+            <div className="space-y-1 text-[11px]">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shrink-0" />
+                <span className="font-semibold text-emerald-600">Verdadero (True):</span>
+                <span className="text-muted">Conector superior lateral</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 shrink-0" />
+                <span className="font-semibold text-rose-600">Falso (False):</span>
+                <span className="text-muted">Conector inferior lateral</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {/* Switch Field */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium flex items-center justify-between">
+              <span>Campo o Variable a evaluar</span>
+              {upstreamNodes.length > 0 && (
+                <span className="text-[10px] text-muted">{upstreamNodes.length} anterior(es)</span>
+              )}
+            </label>
+            {upstreamNodes.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-1">
+                {upstreamNodes.map(up => (
+                  <button
+                    key={up.id}
+                    type="button"
+                    onClick={() => updateNodeData('switchField', `{{${up.id}}}`)}
+                    className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-accent hover:border-accent transition-colors"
+                  >
+                    + {String(up.data?.label || up.id)}
+                  </button>
+                ))}
+              </div>
+            )}
+            <Input
+              value={switchField}
+              onChange={(e) => updateNodeData('switchField', e.target.value)}
+              placeholder="{{nodo.tipo}}"
+              className="font-mono text-xs"
+            />
+          </div>
+
+          {/* Casos */}
+          <div className="space-y-2">
+            <label className="text-xs font-medium flex items-center justify-between">
+              <span>Casos definidos ({cases.length})</span>
+              <span className="text-[10px] text-muted">Genera un conector por caso</span>
+            </label>
+
+            <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+              {cases.map((c, idx) => (
+                <div key={idx} className="flex items-center justify-between p-1.5 bg-surface border border-border rounded text-xs">
+                  <span className="font-mono font-medium text-fg">{c}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeCase(idx)}
+                    className="text-muted hover:text-danger p-0.5"
+                    title="Eliminar caso"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex gap-1.5 mt-1">
+              <Input
+                value={newCaseInput}
+                onChange={(e) => setNewCaseInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addCase())}
+                placeholder="Nuevo caso (ej: pendiente)..."
+                className="font-mono text-xs"
+              />
+              <Button type="button" size="sm" onClick={addCase} className="shrink-0 text-xs">
+                <Plus size={13} className="mr-1" /> Agregar
+              </Button>
+            </div>
+
+            <p className="text-[10px] text-muted">
+              Se incluye automáticamente un conector <code>default</code> para cuando ningún caso coincida.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Node execution preview */}
+      {nodeResult && (
+        <div className="p-2.5 bg-bg border border-border rounded text-xs space-y-1">
+          <p className="font-medium text-fg">Última evaluación:</p>
+          <div className="flex items-center gap-2">
+            <span className="text-muted">Rama tomada:</span>
+            <span className="font-mono font-bold px-1.5 py-0.5 bg-amber-500/10 text-amber-600 border border-amber-500/20 rounded">
+              {String(nodeResult.selectedBranch)}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JsonTransformInspector({
+  node,
+  updateNodeData,
+  upstreamNodes,
+  nodeResult
+}: {
+  node: Node;
+  updateNodeData: (key: string, value: any) => void;
+  upstreamNodes: Node[];
+  nodeResult?: any;
+}) {
+  const transformType = (node.data?.transformType as string) || 'javascript';
+  const inputData = (node.data?.inputData as string) || '';
+  const expression = (node.data?.expression as string) || '';
+  const pickFields = (node.data?.pickFields as string) || '';
+
+  const insertTemplate = (code: string) => {
+    updateNodeData('expression', code);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Selector de modo */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Modo de transformación</label>
+        <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-bg rounded border border-border">
+          <button
+            type="button"
+            onClick={() => updateNodeData('transformType', 'javascript')}
+            className={cn(
+              "text-xs py-1.5 px-2 rounded font-medium transition-colors text-center",
+              transformType === 'javascript'
+                ? "bg-accent/15 text-accent border border-accent/40 font-semibold"
+                : "text-muted hover:text-fg"
+            )}
+          >
+            JavaScript Seguro
+          </button>
+          <button
+            type="button"
+            onClick={() => updateNodeData('transformType', 'pick')}
+            className={cn(
+              "text-xs py-1.5 px-2 rounded font-medium transition-colors text-center",
+              transformType === 'pick'
+                ? "bg-accent/15 text-accent border border-accent/40 font-semibold"
+                : "text-muted hover:text-fg"
+            )}
+          >
+            Seleccionar Claves (Pick)
+          </button>
+        </div>
+      </div>
+
+      {/* Origen de datos */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium flex items-center justify-between">
+          <span>Origen de datos a transformar</span>
+          <span className="text-[10px] text-muted">Opcional (auto-detecta previo)</span>
+        </label>
+        {upstreamNodes.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-1">
+            {upstreamNodes.map(up => (
+              <button
+                key={up.id}
+                type="button"
+                onClick={() => updateNodeData('inputData', `{{${up.id}}}`)}
+                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-accent hover:border-accent transition-colors"
+              >
+                + {String(up.data?.label || up.id)}
+              </button>
+            ))}
+          </div>
+        )}
+        <Input
+          value={inputData}
+          onChange={(e) => updateNodeData('inputData', e.target.value)}
+          placeholder="{{nodo_anterior}} o dejar vacío"
+          className="font-mono text-xs"
+        />
+      </div>
+
+      {transformType === 'javascript' ? (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-medium">Expresión JavaScript</label>
+            <span className="text-[10px] text-muted font-mono">retorna el nuevo resultado</span>
+          </div>
+
+          <div className="flex flex-wrap gap-1 mb-1">
+            <button
+              type="button"
+              onClick={() => insertTemplate("return data.map(item => ({\n  id: item.id,\n  etiqueta: item.nombre\n}));")}
+              className="text-[10px] px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-fg"
+            >
+              Mapear array
+            </button>
+            <button
+              type="button"
+              onClick={() => insertTemplate("return data.filter(item => Boolean(item.activo));")}
+              className="text-[10px] px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-fg"
+            >
+              Filtrar
+            </button>
+            <button
+              type="button"
+              onClick={() => insertTemplate("return {\n  totalRegistros: Array.isArray(data) ? data.length : 1,\n  procesadoEn: new Date().toISOString()\n};")}
+              className="text-[10px] px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-fg"
+            >
+              Resumen
+            </button>
+          </div>
+
+          <textarea
+            className="flex w-full min-h-[160px] rounded-sm border border-border bg-bg px-2.5 py-2 text-xs font-mono text-fg focus-visible:outline-none focus-visible:border-accent"
+            value={expression}
+            onChange={(e) => updateNodeData('expression', e.target.value)}
+            placeholder={'// "data" contiene el resultado anterior\n// "context" contiene todas las variables\nreturn data.map(x => ({ id: x.id, title: x.name }));'}
+          />
+          <p className="text-[10px] text-muted">
+            Ejecución aislada y segura en sandbox. Puedes acceder a <code>data</code> y al objeto <code>context</code>.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Claves / Columnas a conservar</label>
+          <Input
+            value={pickFields}
+            onChange={(e) => updateNodeData('pickFields', e.target.value)}
+            placeholder="id, nombre, email, total"
+            className="font-mono text-xs"
+          />
+          <p className="text-[10px] text-muted">
+            Ingresa los nombres de campos separados por coma. Aplica a objetos y a arrays de objetos.
+          </p>
+        </div>
+      )}
+
+      {nodeResult && (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-fg">Resultado transformado</label>
+          <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
+            <JsonTreeViewer data={nodeResult} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WebhookTriggerInspector({
+  node,
+  updateNodeData,
+  nodeResult
+}: {
+  node: Node;
+  updateNodeData: (key: string, value: any) => void;
+  nodeResult?: any;
+}) {
+  const webhookId = (node.data?.webhookId as string) || node.id;
+  const secret = (node.data?.secret as string) || '';
+  const [copied, setCopied] = useState(false);
+
+  const fullUrl = getApiUrl(`/flows/webhook/${webhookId}`);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(fullUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Webhook URL copy box */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium flex items-center justify-between">
+          <span>URL Pública del Webhook</span>
+          <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 px-1.5 py-0.5 rounded font-semibold">
+            POST
+          </span>
+        </label>
+        <div className="flex gap-1.5">
+          <Input
+            readOnly
+            value={fullUrl}
+            className="font-mono text-xs bg-bg select-all text-fg"
+          />
+          <Button
+            type="button"
+            size="sm"
+            onClick={handleCopy}
+            className="shrink-0 text-xs px-2.5"
+          >
+            {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+          </Button>
+        </div>
+        <p className="text-[10px] text-muted">
+          Envía una solicitud POST con <code>Content-Type: application/json</code> a esta URL para disparar el flujo.
+        </p>
+      </div>
+
+      {/* Webhook ID / Slug */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Identificador del Webhook (Slug / ID)</label>
+        <Input
+          value={node.data?.webhookId as string || ''}
+          onChange={(e) => updateNodeData('webhookId', e.target.value)}
+          placeholder={node.id}
+          className="font-mono text-xs"
+        />
+        <p className="text-[10px] text-muted">
+          Ruta personalizada para identificar el webhook en el sistema.
+        </p>
+      </div>
+
+      {/* HMAC Secret */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium flex items-center justify-between">
+          <span>Clave Secreta HMAC (Opcional)</span>
+          <span className="text-[10px] text-muted">SHA-256</span>
+        </label>
+        <Input
+          type="password"
+          value={secret}
+          onChange={(e) => updateNodeData('secret', e.target.value)}
+          placeholder="Clave para validar firma..."
+          className="font-mono text-xs"
+        />
+        <p className="text-[10px] text-muted">
+          Si se configura, se exigirá el encabezado <code>x-webhook-signature: sha256=&lt;hash&gt;</code>.
+        </p>
+      </div>
+
+      {/* Variables usage guide */}
+      <div className="p-2.5 bg-bg border border-border rounded text-xs space-y-1">
+        <p className="font-medium text-fg">Uso de datos en el flujo:</p>
+        <div className="space-y-0.5 font-mono text-[10px] text-muted">
+          <p>• Payload completo: <span className="text-accent">{`{{${node.id}.body}}`}</span> o <span className="text-accent">{`{{body}}`}</span></p>
+          <p>• Campos específicos: <span className="text-accent">{`{{body.cliente_id}}`}</span></p>
+        </div>
+      </div>
+
+      {nodeResult && (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-fg">Último payload recibido</label>
+          <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
+            <JsonTreeViewer data={nodeResult} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OAuth2ConnectorInspector({
+  node,
+  updateNodeData,
+  nodeResult
+}: {
+  node: Node;
+  updateNodeData: (key: string, value: any) => void;
+  nodeResult?: any;
+}) {
+  const grantType = (node.data?.grantType as string) || 'client_credentials';
+  const tokenUrl = (node.data?.tokenUrl as string) || '';
+  const clientId = (node.data?.clientId as string) || '';
+  const clientSecret = (node.data?.clientSecret as string) || '';
+  const scope = (node.data?.scope as string) || '';
+  const username = (node.data?.username as string) || '';
+  const password = (node.data?.password as string) || '';
+  const refreshToken = (node.data?.refreshToken as string) || '';
+
+  const [copiedToken, setCopiedToken] = useState(false);
+  const tokenVar = `Bearer {{${node.id}.access_token}}`;
+
+  const handleCopyVar = () => {
+    navigator.clipboard.writeText(tokenVar);
+    setCopiedToken(true);
+    setTimeout(() => setCopiedToken(false), 2000);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Grant Type */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Tipo de Concesión (Grant Type)</label>
+        <select
+          value={grantType}
+          onChange={(e) => updateNodeData('grantType', e.target.value)}
+          className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
+        >
+          <option value="client_credentials">Client Credentials</option>
+          <option value="password">Resource Owner Password</option>
+          <option value="refresh_token">Refresh Token</option>
+        </select>
+      </div>
+
+      {/* Token URL */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Token Endpoint URL</label>
+        <Input
+          value={tokenUrl}
+          onChange={(e) => updateNodeData('tokenUrl', e.target.value)}
+          placeholder="https://auth.ejemplo.com/oauth/v2/token"
+          className="font-mono text-xs"
+        />
+      </div>
+
+      {/* Client ID & Secret */}
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Client ID</label>
+          <Input
+            value={clientId}
+            onChange={(e) => updateNodeData('clientId', e.target.value)}
+            placeholder="cliente-id-api"
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Client Secret</label>
+          <Input
+            type="password"
+            value={clientSecret}
+            onChange={(e) => updateNodeData('clientSecret', e.target.value)}
+            placeholder="••••••••••••"
+            className="font-mono text-xs"
+          />
+        </div>
+      </div>
+
+      {/* Scope */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Alcance (Scope opcional)</label>
+        <Input
+          value={scope}
+          onChange={(e) => updateNodeData('scope', e.target.value)}
+          placeholder="read write offline_access"
+          className="font-mono text-xs"
+        />
+      </div>
+
+      {/* Password grant fields */}
+      {grantType === 'password' && (
+        <div className="space-y-3 p-2.5 bg-bg border border-border rounded">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Usuario (Username)</label>
+            <Input
+              value={username}
+              onChange={(e) => updateNodeData('username', e.target.value)}
+              placeholder="usuario@dominio.com"
+              className="text-xs"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Contraseña (Password)</label>
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => updateNodeData('password', e.target.value)}
+              placeholder="••••••••"
+              className="text-xs"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Refresh token field */}
+      {grantType === 'refresh_token' && (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Refresh Token</label>
+          <Input
+            type="password"
+            value={refreshToken}
+            onChange={(e) => updateNodeData('refreshToken', e.target.value)}
+            placeholder="Token de refresco previo..."
+            className="font-mono text-xs"
+          />
+        </div>
+      )}
+
+      {/* Usage guide */}
+      <div className="p-2.5 bg-bg border border-border rounded text-xs space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="font-medium text-fg">Header de autorización para HTTP:</span>
+          <button
+            type="button"
+            onClick={handleCopyVar}
+            className="text-[10px] text-accent hover:underline flex items-center gap-1 font-mono"
+          >
+            {copiedToken ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+            Copiar
+          </button>
+        </div>
+        <div className="p-1.5 bg-surface border border-border rounded font-mono text-[11px] text-accent select-all">
+          {tokenVar}
+        </div>
+      </div>
+
+      {/* Token status */}
+      {nodeResult?.access_token && (
+        <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded text-xs space-y-1">
+          <p className="font-semibold text-emerald-600 flex items-center gap-1">
+            <Check size={13} /> Token OAuth2 activo en memoria
+          </p>
+          <p className="text-[11px] text-muted">
+            Tipo: {String(nodeResult.token_type || 'Bearer')} | Expira en: {String(nodeResult.expires_in || 3600)}s
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiChatCompletionInspector({
+  node,
+  updateNodeData,
+  upstreamNodes,
+  nodeResult
+}: {
+  node: Node;
+  updateNodeData: (key: string, value: any) => void;
+  upstreamNodes: Node[];
+  nodeResult?: any;
+}) {
+  const endpoint = (node.data?.endpoint as string) || 'https://api.openai.com/v1/chat/completions';
+  const model = (node.data?.model as string) || 'gpt-4o-mini';
+  const apiKey = (node.data?.apiKey as string) || '';
+  const systemPrompt = (node.data?.systemPrompt as string) || '';
+  const userPrompt = (node.data?.userPrompt as string) || '';
+  const temperature = typeof node.data?.temperature === 'number' ? node.data.temperature : 0.7;
+  const responseFormat = (node.data?.responseFormat as string) || 'text';
+
+  const applyPreset = (presetEndpoint: string, presetModel: string) => {
+    updateNodeData('endpoint', presetEndpoint);
+    updateNodeData('model', presetModel);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Presets */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Presets rápidos de proveedor</label>
+        <div className="flex flex-wrap gap-1">
+          <button
+            type="button"
+            onClick={() => applyPreset('https://api.openai.com/v1/chat/completions', 'gpt-4o-mini')}
+            className="text-[10px] px-2 py-1 rounded bg-bg border border-border hover:border-accent hover:text-accent transition-colors"
+          >
+            OpenAI
+          </button>
+          <button
+            type="button"
+            onClick={() => applyPreset('https://api.groq.com/openai/v1/chat/completions', 'llama-3.3-70b-versatile')}
+            className="text-[10px] px-2 py-1 rounded bg-bg border border-border hover:border-accent hover:text-accent transition-colors"
+          >
+            Groq
+          </button>
+          <button
+            type="button"
+            onClick={() => applyPreset('https://openrouter.ai/api/v1/chat/completions', 'anthropic/claude-3.5-sonnet')}
+            className="text-[10px] px-2 py-1 rounded bg-bg border border-border hover:border-accent hover:text-accent transition-colors"
+          >
+            OpenRouter
+          </button>
+          <button
+            type="button"
+            onClick={() => applyPreset('https://api.deepseek.com/chat/completions', 'deepseek-chat')}
+            className="text-[10px] px-2 py-1 rounded bg-bg border border-border hover:border-accent hover:text-accent transition-colors"
+          >
+            DeepSeek
+          </button>
+          <button
+            type="button"
+            onClick={() => applyPreset('http://localhost:11434/v1/chat/completions', 'llama3.2')}
+            className="text-[10px] px-2 py-1 rounded bg-bg border border-border hover:border-accent hover:text-accent transition-colors"
+          >
+            Ollama (Local)
+          </button>
+        </div>
+      </div>
+
+      {/* Endpoint & Model */}
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Endpoint API (Compatible con OpenAI)</label>
+          <Input
+            value={endpoint}
+            onChange={(e) => updateNodeData('endpoint', e.target.value)}
+            placeholder="https://api.openai.com/v1/chat/completions"
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Modelo</label>
+          <Input
+            value={model}
+            onChange={(e) => updateNodeData('model', e.target.value)}
+            placeholder="gpt-4o-mini"
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">API Key (Bearer Token)</label>
+          <Input
+            type="password"
+            value={apiKey}
+            onChange={(e) => updateNodeData('apiKey', e.target.value)}
+            placeholder="sk-..."
+            className="font-mono text-xs"
+          />
+        </div>
+      </div>
+
+      {/* System Prompt */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium">Prompt de Sistema (System Prompt)</label>
+        <textarea
+          className="flex w-full min-h-[60px] rounded-sm border border-border bg-bg px-2.5 py-2 text-xs font-mono text-fg focus-visible:outline-none focus-visible:border-accent"
+          value={systemPrompt}
+          onChange={(e) => updateNodeData('systemPrompt', e.target.value)}
+          placeholder="Eres un analista de datos especializado en flotas y logística..."
+        />
+      </div>
+
+      {/* User Prompt */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium flex items-center justify-between">
+          <span>Prompt del Usuario (User Prompt)</span>
+          {upstreamNodes.length > 0 && (
+            <span className="text-[10px] text-muted">Insertar variables:</span>
+          )}
+        </label>
+        {upstreamNodes.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-1">
+            {upstreamNodes.map(up => (
+              <button
+                key={up.id}
+                type="button"
+                onClick={() => updateNodeData('userPrompt', (userPrompt ? userPrompt + '\n' : '') + `{{${up.id}}}`)}
+                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-accent hover:border-accent transition-colors"
+              >
+                + {String(up.data?.label || up.id)}
+              </button>
+            ))}
+          </div>
+        )}
+        <textarea
+          className="flex w-full min-h-[100px] rounded-sm border border-border bg-bg px-2.5 py-2 text-xs font-mono text-fg focus-visible:outline-none focus-visible:border-accent"
+          value={userPrompt}
+          onChange={(e) => updateNodeData('userPrompt', e.target.value)}
+          placeholder={'Analiza los siguientes registros y resume hallazgos clave:\n{{nodo_anterior}}'}
+        />
+        <p className="text-[10px] text-muted">
+          Soporta interpolación dinámica con <code>{`{{variable}}`}</code> y <code>{`{{_item.campo}}`}</code> dentro de bucles.
+        </p>
+      </div>
+
+      {/* Parameters: Temperature & Format */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium flex justify-between">
+            <span>Temperatura</span>
+            <span className="font-mono text-muted">{temperature}</span>
+          </label>
+          <input
+            type="range"
+            min="0"
+            max="1.5"
+            step="0.1"
+            value={temperature}
+            onChange={(e) => updateNodeData('temperature', parseFloat(e.target.value))}
+            className="w-full h-1.5 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Formato de respuesta</label>
+          <select
+            value={responseFormat}
+            onChange={(e) => updateNodeData('responseFormat', e.target.value)}
+            className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
+          >
+            <option value="text">Texto (Markdown)</option>
+            <option value="json_object">JSON Mode (Estructurado)</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Response Preview */}
+      {nodeResult && (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-fg flex items-center justify-between">
+            <span>Respuesta generada</span>
+            {nodeResult?.usage && (
+              <span className="text-[10px] font-mono text-muted">
+                {String(nodeResult.usage.total_tokens || 0)} tokens
+              </span>
+            )}
+          </label>
+          <div className="max-h-48 overflow-auto border border-border rounded p-2.5 bg-bg text-xs whitespace-pre-wrap font-mono">
+            {typeof nodeResult?.content === 'object'
+              ? JSON.stringify(nodeResult.content, null, 2)
+              : String(nodeResult?.content || JSON.stringify(nodeResult, null, 2))}
           </div>
         </div>
       )}
@@ -1817,6 +2683,49 @@ function DataSourceInspector({
                   </div>
                 )}
 
+                {node.type === 'conditionalBranch' && (
+                  <ConditionalBranchInspector
+                    node={node}
+                    updateNodeData={updateNodeData}
+                    upstreamNodes={upstreamDataNodes}
+                    nodeResult={selectedNodeResult}
+                  />
+                )}
+
+                {node.type === 'jsonTransform' && (
+                  <JsonTransformInspector
+                    node={node}
+                    updateNodeData={updateNodeData}
+                    upstreamNodes={upstreamDataNodes}
+                    nodeResult={selectedNodeResult}
+                  />
+                )}
+
+                {node.type === 'webhookTrigger' && (
+                  <WebhookTriggerInspector
+                    node={node}
+                    updateNodeData={updateNodeData}
+                    nodeResult={selectedNodeResult}
+                  />
+                )}
+
+                {node.type === 'oauth2Connector' && (
+                  <OAuth2ConnectorInspector
+                    node={node}
+                    updateNodeData={updateNodeData}
+                    nodeResult={selectedNodeResult}
+                  />
+                )}
+
+                {node.type === 'aiChatCompletion' && (
+                  <AiChatCompletionInspector
+                    node={node}
+                    updateNodeData={updateNodeData}
+                    upstreamNodes={upstreamDataNodes}
+                    nodeResult={selectedNodeResult}
+                  />
+                )}
+
                 <div className="mt-8 pt-4 border-t border-border">
                   <Button
                     variant="default"
@@ -1976,6 +2885,22 @@ function DataSourceInspector({
                   return;
                 }
                 setError('Ejecuta el flujo o inicia el Modo Debug para capturar los datos del bucle en tiempo real.');
+                return;
+              }
+
+              // Si es un nodo del catálogo avanzado
+              if (
+                node.type === 'conditionalBranch' ||
+                node.type === 'jsonTransform' ||
+                node.type === 'webhookTrigger' ||
+                node.type === 'oauth2Connector' ||
+                node.type === 'aiChatCompletion'
+              ) {
+                if (cachedResult) {
+                  setJsonData(truncateArrays(cachedResult));
+                  return;
+                }
+                setError('Ejecuta el flujo o usa Modo Debug para generar el resultado de este nodo y seleccionarlo aquí.');
                 return;
               }
 
