@@ -251,19 +251,22 @@ export async function executeFlowEngine(
 
               notifyProgress(node.id, 'running');
               
-              const delayMs = node.type === 'start' ? 150 : 800;
-              await new Promise<void>((res, rej) => {
-                if (abortController.signal.aborted) {
-                  return rej(new Error('Ejecución detenida por el usuario'));
-                }
-                const t = setTimeout(res, delayMs);
-                const onAbort = () => {
-                  clearTimeout(t);
-                  abortController.signal.removeEventListener('abort', onAbort);
-                  rej(new Error('Ejecución detenida por el usuario'));
-                };
-                abortController.signal.addEventListener('abort', onAbort, { once: true });
-              });
+              const isDebug = currentExec?.mode === 'debug';
+              const delayMs = isDebug ? (node.type === 'start' ? 150 : 500) : 0;
+              if (delayMs > 0) {
+                await new Promise<void>((res, rej) => {
+                  if (abortController.signal.aborted) {
+                    return rej(new Error('Ejecución detenida por el usuario'));
+                  }
+                  const t = setTimeout(res, delayMs);
+                  const onAbort = () => {
+                    clearTimeout(t);
+                    abortController.signal.removeEventListener('abort', onAbort);
+                    rej(new Error('Ejecución detenida por el usuario'));
+                  };
+                  abortController.signal.addEventListener('abort', onAbort, { once: true });
+                });
+              }
 
               if (abortController.signal.aborted) {
                 throw new Error('Ejecución detenida por el usuario');
@@ -1126,7 +1129,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
     });
   }
 
-  const dataDir = path.join(process.cwd(), 'data');
+  const dataDir = path.join(process.cwd(), 'data', 'exports');
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
@@ -1778,14 +1781,17 @@ async function executeForEachNode(
 
                 onNodeProgress(subNode.id, 'running');
 
-                // Animation delay
-                const delayMs = 300;
-                await new Promise<void>((res, rej) => {
-                  if (signal.aborted) return rej(new Error('Ejecucion detenida por el usuario'));
-                  const t = setTimeout(res, delayMs);
-                  const onAbort = () => { clearTimeout(t); signal.removeEventListener('abort', onAbort); rej(new Error('Ejecucion detenida por el usuario')); };
-                  signal.addEventListener('abort', onAbort, { once: true });
-                });
+                // Animation delay only in debug mode
+                const isSubDebug = currentExec?.mode === 'debug';
+                const delayMs = isSubDebug ? 250 : 0;
+                if (delayMs > 0) {
+                  await new Promise<void>((res, rej) => {
+                    if (signal.aborted) return rej(new Error('Ejecucion detenida por el usuario'));
+                    const t = setTimeout(res, delayMs);
+                    const onAbort = () => { clearTimeout(t); signal.removeEventListener('abort', onAbort); rej(new Error('Ejecucion detenida por el usuario')); };
+                    signal.addEventListener('abort', onAbort, { once: true });
+                  });
+                }
 
                 if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
 

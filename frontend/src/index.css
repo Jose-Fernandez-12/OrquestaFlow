@@ -97,11 +97,28 @@ textarea:focus-visible,
 }
 
 .react-flow__controls {
-  display: none !important;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 4px !important;
+  overflow: hidden !important;
+}
+
+.react-flow__controls-button {
+  background-color: var(--surface) !important;
+  border-bottom: 1px solid var(--border) !important;
+  color: var(--fg) !important;
+  fill: var(--fg) !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: var(--bg) !important;
 }
 
 .react-flow__minimap {
-  display: none !important;
+  background-color: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
 }
 
 /* ── Utility classes ─── */

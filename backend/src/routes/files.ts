@@ -148,8 +148,23 @@ export async function fileManagerRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'filePath es obligatorio' });
     }
 
-    // Resolve path safely within cwd
-    const fullPath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
+    // Resolve path safely and restrict strictly to uploads/ and data/exports/
+    const normalizedInput = filePath.replace(/\\/g, '/');
+    if (normalizedInput.includes('..') || normalizedInput.includes('orquesta.sqlite')) {
+      return reply.status(403).send({ error: 'Acceso no permitido al archivo solicitado' });
+    }
+
+    const fullPath = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(process.cwd(), filePath);
+    const allowedDirs = [
+      path.resolve(process.cwd(), 'uploads'),
+      path.resolve(process.cwd(), 'data', 'exports'),
+    ];
+
+    const isAllowed = allowedDirs.some(dir => fullPath.startsWith(dir + path.sep) || fullPath === dir);
+    if (!isAllowed) {
+      return reply.status(403).send({ error: 'Acceso no permitido: el archivo debe residir en uploads o data/exports' });
+    }
+
     if (!fs.existsSync(fullPath)) {
       return reply.status(404).send({ error: `Archivo no encontrado: ${filePath}` });
     }

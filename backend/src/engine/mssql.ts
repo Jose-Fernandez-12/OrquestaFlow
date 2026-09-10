@@ -29,6 +29,39 @@ function buildMssqlConfig(connection: any) {
   };
 }
 
+// Global cache for connection pools to avoid reconnecting and destroying pools per query
+const poolCache = new Map<string, mssql.ConnectionPool>();
+
+async function getOrCreatePool(config: any): Promise<mssql.ConnectionPool> {
+  const cacheKey = `${config.server}:${config.port || 1433}:${config.database}:${config.user}`;
+  let pool = poolCache.get(cacheKey);
+
+  if (!pool || !pool.connected) {
+    if (pool) {
+      try {
+        await pool.close();
+      } catch {}
+    }
+    pool = await new mssql.ConnectionPool(config).connect();
+    poolCache.set(cacheKey, pool);
+  }
+
+  return pool;
+}
+
+export async function closeAllMssqlPools(): Promise<void> {
+  for (const [key, pool] of poolCache.entries()) {
+    try {
+      if (pool.connected) {
+        await pool.close();
+      }
+    } catch (e) {
+      console.error(`Error closing MSSQL pool ${key}:`, e);
+    }
+  }
+  poolCache.clear();
+}
+
 export async function executeMssqlQuery(connectionId: string, sqlText: string, params: Record<string, any> = {}) {
   const db = getDb();
   const connInfo = db.prepare('SELECT * FROM connections WHERE id = ?').get(connectionId) as any;
@@ -38,8 +71,8 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
 
   const config = buildMssqlConfig(connInfo);
   
-  // Connect and run query
-  const pool = await mssql.connect(config);
+  // Connect and run query using cached pool
+  const pool = await getOrCreatePool(config);
   try {
     const request = pool.request();
 
@@ -105,7 +138,8 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
       rows: result.recordset || [],
       rowCount: result.rowsAffected[0] || 0
     };
-  } finally {
-    await pool.close();
+  } catch (err) {
+    console.error("MSSQL Query Error:", err);
+    throw err;
   }
 }

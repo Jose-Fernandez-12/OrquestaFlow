@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchFlows, createFlow, deleteFlow, duplicateFlow, saveFlow, executeFlow, stopFlow, setCurrentFlow, type Flow } from '../../store/flowSlice';
 import { triggerBrowserDownload } from '../../lib/exportUtils';
+import { SOCKET_URL, getFileUrl } from '../../lib/api';
 import {
   GitMerge,
   Plus,
@@ -69,7 +70,7 @@ export function FlowListView() {
   }, [dispatch]);
 
   useEffect(() => {
-    const socket = io('http://localhost:3001');
+    const socket = io(SOCKET_URL);
     socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string }) => {
       const id = Date.now() + Math.random();
       setExportNotifications(prev => {
@@ -166,7 +167,7 @@ export function FlowListView() {
     e.stopPropagation();
     setExecutingFlowId(flow.id);
     try {
-      const resultAction = await dispatch(executeFlow(flow.id));
+      const resultAction = await dispatch(executeFlow({ id: flow.id, mode: 'normal' }));
       if (executeFlow.fulfilled.match(resultAction)) {
         const payload = resultAction.payload as any;
         const durationSec = payload?.duration ? (payload.duration / 1000).toFixed(2) : null;
@@ -681,7 +682,7 @@ export function FlowListView() {
               <div className="text-xs text-muted truncate">{notification.fileName}</div>
             </div>
             <a
-              href={`http://localhost:3001${notification.downloadUrl}`}
+              href={getFileUrl(notification.downloadUrl)}
               download={notification.fileName}
               target="_blank"
               rel="noreferrer"
