@@ -3,6 +3,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchSchedules, createSchedule, updateSchedule, deleteSchedule, type Schedule } from '../../store/scheduleSlice';
 import { fetchFlows } from '../../store/flowSlice';
 import { fetchScripts } from '../../store/scriptSlice';
+import { SOCKET_URL, getApiUrl } from '../../lib/api';
 import {
   Calendar,
   Plus,
@@ -91,7 +92,7 @@ export function ScheduleView() {
       setNow(Date.now());
     }, 10000);
 
-    const socket = io('http://localhost:3001');
+    const socket = io(SOCKET_URL);
 
     socket.on('flow-export-ready', (data: any) => {
       const id = Date.now() + Math.random();
@@ -239,7 +240,7 @@ export function ScheduleView() {
     setHistoryModalOpen(true);
     setLoadingHistory(true);
     try {
-      const res = await fetch(`http://localhost:3001/api/schedules/${id}/logs`);
+      const res = await fetch(getApiUrl(`/schedules/${id}/logs`));
       const data = await res.json();
       setHistoryLogs(data.data || []);
     } catch (e) {

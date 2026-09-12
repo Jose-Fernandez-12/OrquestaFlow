@@ -17,6 +17,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { v4 as uuid } from 'uuid';
 import { useParams, useNavigate } from 'react-router-dom';
+import { SOCKET_URL, getApiUrl } from '../../lib/api';
 import {
   Play,
   Save,
@@ -247,7 +248,7 @@ function FlowCanvas() {
     if (!flowId) return;
 
     // Query active execution state on mount (syncs if execution started from catalog or earlier)
-    fetch(`http://localhost:3001/api/flows/${flowId}/execution-state`)
+    fetch(getApiUrl(`/flows/${flowId}/execution-state`))
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data?.data) {
@@ -274,7 +275,7 @@ function FlowCanvas() {
         console.error('Failed to sync flow execution state', err);
       });
 
-    const socket = io('http://localhost:3001');
+    const socket = io(SOCKET_URL);
 
     socket.on('flow-progress', (data: { 
       flowId: string; 

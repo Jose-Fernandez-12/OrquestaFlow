@@ -4,7 +4,10 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { config } from 'dotenv';
 import { join } from 'path';
+import { existsSync, mkdirSync } from 'fs';
 import { getDb, closeDb } from './db/database.js';
+import { closeAllMssqlPools } from './engine/mssql.js';
+import { stopAllSchedulerJobs } from './engine/scheduler.js';
 import { flowRoutes } from './routes/flows.js';
 import { queryRoutes } from './routes/queries.js';
 import { connectionRoutes } from './routes/connections.js';
@@ -49,9 +52,14 @@ async function start(): Promise<void> {
     decorateReply: false
   });
 
-  // Serve exported files for download
+  // Serve exported files for download strictly from data/exports (protecting orquesta.sqlite)
+  const exportsDir = join(process.cwd(), 'data', 'exports');
+  if (!existsSync(exportsDir)) {
+    mkdirSync(exportsDir, { recursive: true });
+  }
+
   await app.register(fastifyStatic, {
-    root: join(process.cwd(), 'data'),
+    root: exportsDir,
     prefix: '/api/files/',
     decorateReply: false,
     setHeaders: (res, path) => {
@@ -75,10 +83,17 @@ async function start(): Promise<void> {
   const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
   for (const signal of signals) {
     process.on(signal, async () => {
-      app.log.info(`Received ${signal}, shutting down...`);
-      closeDb();
-      await app.close();
-      process.exit(0);
+      app.log.info(`Received ${signal}, shutting down gracefully...`);
+      try {
+        stopAllSchedulerJobs();
+        await closeAllMssqlPools();
+        closeDb();
+        await app.close();
+      } catch (err) {
+        app.log.error(err, 'Error during shutdown');
+      } finally {
+        process.exit(0);
+      }
     });
   }
 
