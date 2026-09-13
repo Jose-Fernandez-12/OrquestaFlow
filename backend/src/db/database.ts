@@ -100,10 +100,28 @@ export async function initDb(): Promise<void> {
   // Migrate schedule_id if needed
   }
   try {
-    wrappedDb.exec('ALTER TABLE execution_logs ADD COLUMN schedule_id TEXT;');
-    console.log('[DB] Migrated: added schedule_id to execution_logs');
+    wrappedDb.exec('ALTER TABLE queries ADD COLUMN group_name TEXT;');
+    console.log('[DB] Migrated: added group_name to queries');
   } catch (e: any) {
-    // Ignore if column already exists (sql.js throws error on duplicate column)
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec('ALTER TABLE queries ADD COLUMN region TEXT;');
+    console.log('[DB] Migrated: added region to queries');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec('ALTER TABLE connections ADD COLUMN group_name TEXT;');
+    console.log('[DB] Migrated: added group_name to connections');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec("ALTER TABLE queries ADD COLUMN display_columns TEXT DEFAULT '[]';");
+    console.log('[DB] Migrated: added display_columns to queries');
+  } catch (e: any) {
+    // Ignore if exists
   }
 
   // Seed demo data if tables are empty

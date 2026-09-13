@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchConnections, setCurrentConnection, testConnection, createConnection, updateConnection, deleteConnection } from '../../store/connectionSlice';
-import { fetchQueries, setCurrentQuery, executeQuery, updateQuery, createQuery, deleteQuery } from '../../store/querySlice';
+import { fetchQueries, setCurrentQuery, executeQuery, cancelQuery, updateQuery, createQuery, deleteQuery } from '../../store/querySlice';
 import { showToast } from '../../store/uiSlice';
-import { Database, Plus, Play, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns, Trash2, Edit } from 'lucide-react';
+import { Database, Plus, Play, Square, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns, Trash2, Edit } from 'lucide-react';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql } from '@codemirror/lang-sql';
 import { format } from 'sql-formatter';
@@ -38,19 +38,34 @@ export function DatabaseView() {
   // Local state for editing/creating SQL
   const [sqlText, setSqlText] = useState('');
   const [queryName, setQueryName] = useState('');
+  const [queryGroupName, setQueryGroupName] = useState('');
+  const [queryRegion, setQueryRegion] = useState('');
   const [selectedConns, setSelectedConns] = useState<string[]>([]);
   const [showQueryEditor, setShowQueryEditor] = useState(true);
   const [displayColumns, setDisplayColumns] = useState<string[]>([]);
   const [isColumnSelectorOpen, setIsColumnSelectorOpen] = useState(false);
+  const [currentExecutionLogId, setCurrentExecutionLogId] = useState<string | null>(null);
 
   // Local state for parameters
   const [isParamModalOpen, setIsParamModalOpen] = useState(false);
   const [detectedParams, setDetectedParams] = useState<string[]>([]);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
-  // Derived state for autocomplete
-  const uniqueGroups = Array.from(new Set(connectionsState.connections.map(c => c.group_name).filter(Boolean))) as string[];
-  const uniqueRegions = Array.from(new Set(connectionsState.connections.map(c => c.region).filter(Boolean))) as string[];
+  // Derived state for autocomplete & selection of existing aliases/groups
+  const availableGroups = useMemo(() => {
+    const connGroups = connectionsState.connections.map(c => c.group_name).filter(Boolean) as string[];
+    const queryGroups = queriesState.queries.map(q => q.group_name).filter(Boolean) as string[];
+    return Array.from(new Set([...connGroups, ...queryGroups]));
+  }, [connectionsState.connections, queriesState.queries]);
+
+  const availableRegions = useMemo(() => {
+    const connRegions = connectionsState.connections.map(c => c.region).filter(Boolean) as string[];
+    const queryRegions = queriesState.queries.map(q => q.region).filter(Boolean) as string[];
+    return Array.from(new Set([...connRegions, ...queryRegions]));
+  }, [connectionsState.connections, queriesState.queries]);
+
+  const uniqueGroups = availableGroups;
+  const uniqueRegions = availableRegions;
 
   useEffect(() => {
     dispatch(fetchConnections());
@@ -62,6 +77,8 @@ export function DatabaseView() {
     if (queriesState.currentQuery) {
       setSqlText(queriesState.currentQuery.sql_text);
       setQueryName(queriesState.currentQuery.name);
+      setQueryGroupName(queriesState.currentQuery.group_name || '');
+      setQueryRegion(queriesState.currentQuery.region || '');
       try {
         let rawIds = queriesState.currentQuery.connection_ids;
         // If it's already an array, use it. Otherwise, parse it.
@@ -85,6 +102,8 @@ export function DatabaseView() {
     } else {
       setSqlText('');
       setQueryName('');
+      setQueryGroupName('');
+      setQueryRegion('');
       setSelectedConns([]);
       setDisplayColumns([]);
     }
@@ -109,6 +128,8 @@ export function DatabaseView() {
         await dispatch(updateQuery({
           id: queriesState.currentQuery.id,
           name: queryName,
+          group_name: queryGroupName || null,
+          region: queryRegion || null,
           sql_text: sqlText,
           connection_ids: selectedConns,
           display_columns: JSON.stringify(displayColumns)
@@ -117,6 +138,8 @@ export function DatabaseView() {
       } else {
         await dispatch(createQuery({
           name: queryName || 'Nueva Consulta',
+          group_name: queryGroupName || null,
+          region: queryRegion || null,
           sql_text: sqlText,
           connection_ids: selectedConns,
           display_columns: JSON.stringify(displayColumns)
@@ -166,8 +189,22 @@ export function DatabaseView() {
     }
   };
 
+  const handleCancelQuery = async () => {
+    if (!queriesState.currentQuery) return;
+    const logIdToCancel = currentExecutionLogId || queriesState.activeExecutionLogId || queriesState.currentQuery.id;
+    try {
+      await dispatch(cancelQuery({ id: queriesState.currentQuery.id, logId: logIdToCancel })).unwrap();
+      dispatch(showToast('Cancelación enviada al servidor'));
+    } catch (err: any) {
+      dispatch(showToast(`Error al cancelar: ${err.message}`));
+    }
+  };
+
   const doExecute = (params: Record<string, any>) => {
     if (queriesState.currentQuery && selectedConns.length > 0) {
+      const executionLogId = `query-exec-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      setCurrentExecutionLogId(executionLogId);
+
       // Auto-parse parameters
       const parsedParams: Record<string, any> = {};
       Object.keys(params).forEach(k => {
@@ -192,7 +229,8 @@ export function DatabaseView() {
       dispatch(executeQuery({
         id: queriesState.currentQuery.id,
         connection_ids: selectedConns,
-        params: parsedParams
+        params: parsedParams,
+        logId: executionLogId
       })).unwrap().catch((err: any) => {
         dispatch(showToast(`Error de ejecución: ${err.message}`));
       });
@@ -202,13 +240,41 @@ export function DatabaseView() {
   };
 
   const handleToggleConn = (id: string) => {
-    setSelectedConns(prev => 
-      prev.includes(id) ? prev.filter(cId => cId !== id) : [...prev, id]
-    );
+    setSelectedConns(prev => {
+      const next = prev.includes(id) ? prev.filter(cId => cId !== id) : [...prev, id];
+      // Si el usuario selecciona conexiones y no ha definido manualmente grupo o región, sugerir/autocompletar con los de la conexión
+      if (next.length > 0 && (!queryGroupName || !queryRegion)) {
+        const firstConn = connectionsState.connections.find(c => c.id === next[0]);
+        if (firstConn) {
+          if (!queryGroupName && firstConn.group_name) setQueryGroupName(firstConn.group_name);
+          if (!queryRegion && firstConn.region) setQueryRegion(firstConn.region);
+        }
+      }
+      return next;
+    });
   };
 
   const selectedConn = connectionsState.currentConnection;
   const selectedQuery = queriesState.currentQuery;
+
+  const groupedQueries = React.useMemo(() => {
+    const groups: Record<string, Record<string, typeof queriesState.queries>> = {};
+    
+    queriesState.queries.forEach(q => {
+      const gName = (q.group_name && q.group_name.trim()) ? q.group_name.trim() : 'Sin agrupar';
+      const rName = (q.region && q.region.trim()) ? q.region.trim() : 'General';
+      
+      if (!groups[gName]) {
+        groups[gName] = {};
+      }
+      if (!groups[gName][rName]) {
+        groups[gName][rName] = [];
+      }
+      groups[gName][rName].push(q);
+    });
+    
+    return groups;
+  }, [queriesState.queries]);
 
   const activeColumns = React.useMemo(() => {
     if (!queriesState.results?.columns) return [];
@@ -319,26 +385,46 @@ export function DatabaseView() {
                     <Plus size={14} />
                   </Button>
                 </div>
-                {queriesState.queries.map(q => (
-                  <button
-                    key={q.id}
-                    onClick={() => dispatch(setCurrentQuery(q))}
-                    className={cn(
-                      "w-full text-left p-3 border rounded-sm flex items-center gap-3 transition-all",
-                      selectedQuery?.id === q.id 
-                        ? "border-accent bg-accent-light text-fg" 
-                        : "border-border hover:border-muted hover:bg-bg"
-                    )}
-                  >
-                    <div className="w-8 h-8 rounded-sm bg-bg border border-border flex items-center justify-center font-mono text-accent text-xs shrink-0">
-                      SQL
+                {Object.entries(groupedQueries).map(([groupName, regions]) => (
+                  <div key={groupName} className="mb-4">
+                    <div className="text-[11px] font-bold text-fg uppercase tracking-widest px-1 mb-2 border-b border-border/50 pb-1 flex items-center justify-between">
+                      <span>{groupName}</span>
+                      <span className="text-[9px] font-mono text-muted bg-bg/80 px-1.5 py-0.5 rounded border border-border/40">
+                        {Object.values(regions).reduce((sum, list) => sum + list.length, 0)}
+                      </span>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{q.name}</div>
-                      <div className="text-xs text-muted truncate">Last run: {q.last_run_at ? new Date(q.last_run_at).toLocaleDateString() : 'Never'}</div>
-                    </div>
-                  </button>
+                    {Object.entries(regions).map(([region, queries]) => (
+                      <div key={region} className="flex flex-col gap-1 mb-2">
+                        {region !== 'General' && (
+                          <span className="text-[10px] font-semibold text-muted uppercase tracking-wider px-1">{region}</span>
+                        )}
+                        {queries.map(q => (
+                          <button
+                            key={q.id}
+                            onClick={() => dispatch(setCurrentQuery(q))}
+                            className={cn(
+                              "w-full text-left p-3 border rounded-sm flex items-center gap-3 transition-all",
+                              selectedQuery?.id === q.id 
+                                ? "border-accent bg-accent-light text-fg" 
+                                : "border-border hover:border-muted hover:bg-bg"
+                            )}
+                          >
+                            <div className="w-8 h-8 rounded-sm bg-bg border border-border flex items-center justify-center font-mono text-accent text-xs shrink-0">
+                              SQL
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium truncate">{q.name}</div>
+                              <div className="text-xs text-muted truncate">Last run: {q.last_run_at ? new Date(q.last_run_at).toLocaleDateString() : 'Never'}</div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
                 ))}
+                {queriesState.queries.length === 0 && (
+                  <div className="text-xs text-muted italic px-2 py-4 text-center">No hay consultas guardadas.</div>
+                )}
               </>
             )}
           </div>
@@ -488,7 +574,7 @@ export function DatabaseView() {
           {activeTab === 'queries' && (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex justify-between items-start">
-                <div className="flex-1 min-w-0">
+                <div className="flex-1 min-w-0 pr-4">
                   <input
                     type="text"
                     value={queryName}
@@ -496,9 +582,90 @@ export function DatabaseView() {
                     placeholder="Nombre de la consulta"
                     className="text-lg font-semibold bg-transparent border-b border-transparent hover:border-border focus:border-accent outline-none w-full pb-1"
                   />
-                  <p className="text-sm text-muted mt-1">Escribe la consulta SQL y selecciona las bases de datos destino.</p>
+                  <div className="flex gap-4 mt-2">
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-medium text-muted uppercase tracking-wider">Grupo / Apodo / Carpeta</label>
+                        {availableGroups.length > 0 && (
+                          <span className="text-[10px] text-muted">Existentes: {availableGroups.length}</span>
+                        )}
+                      </div>
+                      <input
+                        type="text"
+                        list="query-groups-list"
+                        value={queryGroupName}
+                        onChange={(e) => setQueryGroupName(e.target.value)}
+                        placeholder="Escribe o selecciona un grupo/apodo..."
+                        className="w-full text-xs px-2.5 py-1.5 rounded-sm border border-border bg-bg text-fg focus:border-accent outline-none"
+                      />
+                      <datalist id="query-groups-list">
+                        {availableGroups.map(g => (
+                          <option key={g} value={g} />
+                        ))}
+                      </datalist>
+                      {availableGroups.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {availableGroups.slice(0, 5).map(g => (
+                            <button
+                              key={g}
+                              type="button"
+                              onClick={() => setQueryGroupName(g)}
+                              className={cn(
+                                "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                                queryGroupName === g 
+                                  ? "border-accent bg-accent-light text-accent font-medium" 
+                                  : "border-border/60 text-muted hover:text-fg hover:border-muted"
+                              )}
+                            >
+                              {g}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-medium text-muted uppercase tracking-wider">Región / Etiqueta</label>
+                        {availableRegions.length > 0 && (
+                          <span className="text-[10px] text-muted">Existentes: {availableRegions.length}</span>
+                        )}
+                      </div>
+                      <input
+                        type="text"
+                        list="query-regions-list"
+                        value={queryRegion}
+                        onChange={(e) => setQueryRegion(e.target.value)}
+                        placeholder="Escribe o selecciona una región..."
+                        className="w-full text-xs px-2.5 py-1.5 rounded-sm border border-border bg-bg text-fg focus:border-accent outline-none"
+                      />
+                      <datalist id="query-regions-list">
+                        {availableRegions.map(r => (
+                          <option key={r} value={r} />
+                        ))}
+                      </datalist>
+                      {availableRegions.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {availableRegions.slice(0, 5).map(r => (
+                            <button
+                              key={r}
+                              type="button"
+                              onClick={() => setQueryRegion(r)}
+                              className={cn(
+                                "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                                queryRegion === r 
+                                  ? "border-accent bg-accent-light text-accent font-medium" 
+                                  : "border-border/60 text-muted hover:text-fg hover:border-muted"
+                              )}
+                            >
+                              {r}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex gap-2 shrink-0 items-start pt-1">
                   <Button 
                     variant="outline" 
                     size="sm" 
@@ -523,9 +690,21 @@ export function DatabaseView() {
                   <Button variant="default" size="sm" onClick={handleSaveQuery} className="gap-2">
                     <Save size={14} /> Guardar
                   </Button>
-                  <Button variant="primary" size="sm" onClick={handleExecuteClick} disabled={queriesState.executing} className="gap-2">
-                    <Play size={14} /> Ejecutar
-                  </Button>
+                  {queriesState.executing ? (
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={handleCancelQuery} 
+                      className="gap-2 text-danger border-danger/40 hover:bg-danger/10 hover:border-danger animate-pulse"
+                      title="Cancelar consulta en curso en la base de datos"
+                    >
+                      <Square size={14} /> Detener
+                    </Button>
+                  ) : (
+                    <Button variant="primary" size="sm" onClick={handleExecuteClick} className="gap-2">
+                      <Play size={14} /> Ejecutar
+                    </Button>
+                  )}
                 </div>
               </div>
 
