@@ -111,6 +111,18 @@ export async function initDb(): Promise<void> {
   } catch (e: any) {
     // Ignore if exists
   }
+  try {
+    wrappedDb.exec('ALTER TABLE connections ADD COLUMN group_name TEXT;');
+    console.log('[DB] Migrated: added group_name to connections');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec("ALTER TABLE queries ADD COLUMN display_columns TEXT DEFAULT '[]';");
+    console.log('[DB] Migrated: added display_columns to queries');
+  } catch (e: any) {
+    // Ignore if exists
+  }
 
   // Seed demo data if tables are empty
   const flowCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM flows').get() as { count: number };

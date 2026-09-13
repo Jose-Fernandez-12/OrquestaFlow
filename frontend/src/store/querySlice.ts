@@ -58,6 +58,7 @@ export const createQuery = createAsyncThunk(
       body: JSON.stringify(body),
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.message || data.error || 'Failed to create query');
     return data.data as Query;
   }
 );
@@ -71,6 +72,7 @@ export const updateQuery = createAsyncThunk(
       body: JSON.stringify(body),
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.message || data.error || 'Failed to update query');
     return data.data as Query;
   }
 );
