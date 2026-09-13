@@ -142,7 +142,7 @@ export function DatabaseView() {
   };
 
   const extractParams = (sqlString: string) => {
-    const regex = /:([a-zA-Z0-9_]+)/g;
+    const regex = /(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
     const params = new Set<string>();
     let match;
     while ((match = regex.exec(sqlString)) !== null) {
@@ -933,7 +933,7 @@ export function DatabaseView() {
               <p className="text-sm text-muted">Ingresa los valores para los parámetros detectados en tu consulta SQL.</p>
               {detectedParams.map(param => (
                 <div key={param} className="flex flex-col gap-1.5">
-                  <label className="text-xs font-mono font-medium text-accent">:{param}</label>
+                  <label className="text-xs font-mono font-medium text-accent">#param_{param}</label>
                   <Input
                     type="text"
                     value={paramValues[param] || ''}

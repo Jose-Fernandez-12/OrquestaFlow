@@ -24,8 +24,8 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
     const id = uuid();
     const { name, sql_text, connection_ids = [], display_columns = [] } = request.body;
 
-    // Auto-detect named params (:param_name)
-    const paramRegex = /:([a-zA-Z_][a-zA-Z0-9_]*)/g;
+    // Auto-detect named params (#param_name)
+    const paramRegex = /(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
     const params: string[] = [];
     let match;
     while ((match = paramRegex.exec(sql_text)) !== null) {
@@ -58,7 +58,7 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
         updates.push('sql_text = ?');
         values.push(sql_text);
         // Re-detect params
-        const paramRegex = /:([a-zA-Z_][a-zA-Z0-9_]*)/g;
+        const paramRegex = /(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
         const params: string[] = [];
         let match;
         while ((match = paramRegex.exec(sql_text)) !== null) {
@@ -88,7 +88,7 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
   // Validate SQL (basic check)
   app.post<{ Body: { sql_text: string } }>('/validate', async (request) => {
     const { sql_text } = request.body;
-    const paramRegex = /:([a-zA-Z_][a-zA-Z0-9_]*)/g;
+    const paramRegex = /(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
     const params: string[] = [];
     let match;
     while ((match = paramRegex.exec(sql_text)) !== null) {
