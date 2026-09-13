@@ -51,9 +51,21 @@ export function DatabaseView() {
   const [detectedParams, setDetectedParams] = useState<string[]>([]);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
-  // Derived state for autocomplete
-  const uniqueGroups = Array.from(new Set(connectionsState.connections.map(c => c.group_name).filter(Boolean))) as string[];
-  const uniqueRegions = Array.from(new Set(connectionsState.connections.map(c => c.region).filter(Boolean))) as string[];
+  // Derived state for autocomplete & selection of existing aliases/groups
+  const availableGroups = useMemo(() => {
+    const connGroups = connectionsState.connections.map(c => c.group_name).filter(Boolean) as string[];
+    const queryGroups = queriesState.queries.map(q => q.group_name).filter(Boolean) as string[];
+    return Array.from(new Set([...connGroups, ...queryGroups]));
+  }, [connectionsState.connections, queriesState.queries]);
+
+  const availableRegions = useMemo(() => {
+    const connRegions = connectionsState.connections.map(c => c.region).filter(Boolean) as string[];
+    const queryRegions = queriesState.queries.map(q => q.region).filter(Boolean) as string[];
+    return Array.from(new Set([...connRegions, ...queryRegions]));
+  }, [connectionsState.connections, queriesState.queries]);
+
+  const uniqueGroups = availableGroups;
+  const uniqueRegions = availableRegions;
 
   useEffect(() => {
     dispatch(fetchConnections());
@@ -228,9 +240,18 @@ export function DatabaseView() {
   };
 
   const handleToggleConn = (id: string) => {
-    setSelectedConns(prev => 
-      prev.includes(id) ? prev.filter(cId => cId !== id) : [...prev, id]
-    );
+    setSelectedConns(prev => {
+      const next = prev.includes(id) ? prev.filter(cId => cId !== id) : [...prev, id];
+      // Si el usuario selecciona conexiones y no ha definido manualmente grupo o región, sugerir/autocompletar con los de la conexión
+      if (next.length > 0 && (!queryGroupName || !queryRegion)) {
+        const firstConn = connectionsState.connections.find(c => c.id === next[0]);
+        if (firstConn) {
+          if (!queryGroupName && firstConn.group_name) setQueryGroupName(firstConn.group_name);
+          if (!queryRegion && firstConn.region) setQueryRegion(firstConn.region);
+        }
+      }
+      return next;
+    });
   };
 
   const selectedConn = connectionsState.currentConnection;
@@ -563,24 +584,84 @@ export function DatabaseView() {
                   />
                   <div className="flex gap-4 mt-2">
                     <div className="flex-1">
-                      <label className="text-[11px] font-medium text-muted uppercase tracking-wider block mb-1">Grupo / Carpeta</label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-medium text-muted uppercase tracking-wider">Grupo / Apodo / Carpeta</label>
+                        {availableGroups.length > 0 && (
+                          <span className="text-[10px] text-muted">Existentes: {availableGroups.length}</span>
+                        )}
+                      </div>
                       <input
                         type="text"
+                        list="query-groups-list"
                         value={queryGroupName}
                         onChange={(e) => setQueryGroupName(e.target.value)}
-                        placeholder="Ej. Ventas, Marketing, etc."
+                        placeholder="Escribe o selecciona un grupo/apodo..."
                         className="w-full text-xs px-2.5 py-1.5 rounded-sm border border-border bg-bg text-fg focus:border-accent outline-none"
                       />
+                      <datalist id="query-groups-list">
+                        {availableGroups.map(g => (
+                          <option key={g} value={g} />
+                        ))}
+                      </datalist>
+                      {availableGroups.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {availableGroups.slice(0, 5).map(g => (
+                            <button
+                              key={g}
+                              type="button"
+                              onClick={() => setQueryGroupName(g)}
+                              className={cn(
+                                "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                                queryGroupName === g 
+                                  ? "border-accent bg-accent-light text-accent font-medium" 
+                                  : "border-border/60 text-muted hover:text-fg hover:border-muted"
+                              )}
+                            >
+                              {g}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div className="flex-1">
-                      <label className="text-[11px] font-medium text-muted uppercase tracking-wider block mb-1">Región / Etiqueta</label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-medium text-muted uppercase tracking-wider">Región / Etiqueta</label>
+                        {availableRegions.length > 0 && (
+                          <span className="text-[10px] text-muted">Existentes: {availableRegions.length}</span>
+                        )}
+                      </div>
                       <input
                         type="text"
+                        list="query-regions-list"
                         value={queryRegion}
                         onChange={(e) => setQueryRegion(e.target.value)}
-                        placeholder="Ej. Colombia, México, General, etc."
+                        placeholder="Escribe o selecciona una región..."
                         className="w-full text-xs px-2.5 py-1.5 rounded-sm border border-border bg-bg text-fg focus:border-accent outline-none"
                       />
+                      <datalist id="query-regions-list">
+                        {availableRegions.map(r => (
+                          <option key={r} value={r} />
+                        ))}
+                      </datalist>
+                      {availableRegions.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {availableRegions.slice(0, 5).map(r => (
+                            <button
+                              key={r}
+                              type="button"
+                              onClick={() => setQueryRegion(r)}
+                              className={cn(
+                                "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                                queryRegion === r 
+                                  ? "border-accent bg-accent-light text-accent font-medium" 
+                                  : "border-border/60 text-muted hover:text-fg hover:border-muted"
+                              )}
+                            >
+                              {r}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
