@@ -62,7 +62,45 @@ export async function closeAllMssqlPools(): Promise<void> {
   poolCache.clear();
 }
 
-export async function executeMssqlQuery(connectionId: string, sqlText: string, params: Record<string, any> = {}) {
+// Active MSSQL requests map by execution ID (e.g. logId)
+const activeMssqlRequests = new Map<string, Set<mssql.Request>>();
+
+export function registerActiveMssqlRequest(executionId: string, request: mssql.Request) {
+  let requests = activeMssqlRequests.get(executionId);
+  if (!requests) {
+    requests = new Set();
+    activeMssqlRequests.set(executionId, requests);
+  }
+  requests.add(request);
+}
+
+export function unregisterActiveMssqlRequest(executionId: string, request: mssql.Request) {
+  const requests = activeMssqlRequests.get(executionId);
+  if (requests) {
+    requests.delete(request);
+    if (requests.size === 0) {
+      activeMssqlRequests.delete(executionId);
+    }
+  }
+}
+
+export function cancelMssqlQuery(executionId: string): boolean {
+  const requests = activeMssqlRequests.get(executionId);
+  if (!requests || requests.size === 0) {
+    return false;
+  }
+  for (const req of requests) {
+    try {
+      req.cancel();
+    } catch (err) {
+      console.error(`Error cancelling request for ${executionId}:`, err);
+    }
+  }
+  activeMssqlRequests.delete(executionId);
+  return true;
+}
+
+export async function executeMssqlQuery(connectionId: string, sqlText: string, params: Record<string, any> = {}, executionId?: string) {
   const db = getDb();
   const connInfo = db.prepare('SELECT * FROM connections WHERE id = ?').get(connectionId) as any;
   if (!connInfo) {
@@ -73,9 +111,12 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
   
   // Connect and run query using cached pool
   const pool = await getOrCreatePool(config);
-  try {
-    const request = pool.request();
+  const request = pool.request();
+  if (executionId) {
+    registerActiveMssqlRequest(executionId, request);
+  }
 
+  try {
     // Map named parameters from :param to MS SQL format (@param)
     // MS SQL does not support colon parameters natively, so we replace them and inject variables.
     // Replace #param_param inside string literals (like '%#param_param%') with string concatenation
@@ -138,8 +179,16 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
       rows: result.recordset || [],
       rowCount: result.rowsAffected[0] || 0
     };
-  } catch (err) {
-    console.error("MSSQL Query Error:", err);
+  } catch (err: any) {
+    if (err && (err.code === 'ECANCEL' || err.message?.includes('Canceled') || err.message?.includes('cancelled') || err.message?.includes('abort'))) {
+      console.log(`Query execution cancelled for ${executionId || connectionId}`);
+    } else {
+      console.error("MSSQL Query Error:", err);
+    }
     throw err;
+  } finally {
+    if (executionId) {
+      unregisterActiveMssqlRequest(executionId, request);
+    }
   }
 }

@@ -19,10 +19,10 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Create query
-  app.post<{ Body: { name: string; sql_text: string; connection_ids?: string[]; display_columns?: string[] } }>('/', async (request) => {
+  app.post<{ Body: { name: string; sql_text: string; group_name?: string; region?: string; connection_ids?: string[]; display_columns?: string[] } }>('/', async (request) => {
     const db = getDb();
     const id = uuid();
-    const { name, sql_text, connection_ids = [], display_columns = [] } = request.body;
+    const { name, sql_text, group_name = null, region = null, connection_ids = [], display_columns = [] } = request.body;
 
     // Auto-detect named params (#param_name)
     const paramRegex = /(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
@@ -33,27 +33,29 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
     }
 
     db.prepare(`
-      INSERT INTO queries (id, name, sql_text, params, connection_ids, display_columns)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, name, sql_text, JSON.stringify(params), JSON.stringify(connection_ids), JSON.stringify(display_columns));
+      INSERT INTO queries (id, name, group_name, region, sql_text, params, connection_ids, display_columns)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, name, group_name, region, sql_text, JSON.stringify(params), JSON.stringify(connection_ids), JSON.stringify(display_columns));
 
     const query = db.prepare('SELECT * FROM queries WHERE id = ?').get(id);
     return { data: query };
   });
 
   // Update query
-  app.put<{ Params: { id: string }; Body: { name?: string; sql_text?: string; connection_ids?: string[]; display_columns?: string[] } }>(
+  app.put<{ Params: { id: string }; Body: { name?: string; group_name?: string; region?: string; sql_text?: string; connection_ids?: string[]; display_columns?: string[] } }>(
     '/:id',
     async (request, reply) => {
       const db = getDb();
       const existing = db.prepare('SELECT * FROM queries WHERE id = ?').get(request.params.id);
       if (!existing) return reply.status(404).send({ error: 'Query not found' });
 
-      const { name, sql_text, connection_ids, display_columns } = request.body;
+      const { name, group_name, region, sql_text, connection_ids, display_columns } = request.body;
       const updates: string[] = [];
       const values: unknown[] = [];
 
       if (name !== undefined) { updates.push('name = ?'); values.push(name); }
+      if (group_name !== undefined) { updates.push('group_name = ?'); values.push(group_name); }
+      if (region !== undefined) { updates.push('region = ?'); values.push(region); }
       if (sql_text !== undefined) {
         updates.push('sql_text = ?');
         values.push(sql_text);
@@ -115,16 +117,38 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
+  // Cancel running query execution
+  app.post<{ Params: { id: string }; Body: { logId?: string } }>('/:id/cancel', async (request, reply) => {
+    const { logId } = request.body || {};
+    const executionId = logId || request.params.id;
+
+    const { cancelMssqlQuery } = await import('../engine/mssql.js');
+    const cancelled = cancelMssqlQuery(executionId);
+
+    const db = getDb();
+    if (logId) {
+      try {
+        db.prepare(`
+          UPDATE execution_logs
+          SET status = 'error', completed_at = datetime('now'), result = ?
+          WHERE id = ?
+        `).run(JSON.stringify({ error: 'Consulta cancelada por el usuario' }), logId);
+      } catch (e) {}
+    }
+
+    return { data: { cancelled, logId: executionId } };
+  });
+
   // Execute query against selected connections
   app.post<{
     Params: { id: string };
-    Body: { connection_ids: string[]; params?: Record<string, string> }
+    Body: { connection_ids: string[]; params?: Record<string, string>; logId?: string }
   }>('/:id/execute', async (request, reply) => {
     const db = getDb();
     const query = db.prepare('SELECT * FROM queries WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
     if (!query) return reply.status(404).send({ error: 'Query not found' });
 
-    let { connection_ids, params = {} } = request.body;
+    let { connection_ids, params = {}, logId: customLogId } = request.body;
     
     // Si no se envían conexiones, intentar usar las asociadas a la consulta
     if (!connection_ids || connection_ids.length === 0) {
@@ -137,7 +161,7 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Debe seleccionar al menos una conexión de base de datos' });
     }
 
-    const logId = uuid();
+    const logId = customLogId || uuid();
     db.prepare(`
       INSERT INTO execution_logs (id, target_type, target_id, status, result)
       VALUES (?, 'query', ?, 'running', ?)
@@ -159,7 +183,7 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
           result = await executeSqliteQuery(conn.host, query.sql_text as string, params);
         } else {
           const { executeMssqlQuery } = await import('../engine/mssql.js');
-          result = await executeMssqlQuery(connId, query.sql_text as string, params);
+          result = await executeMssqlQuery(connId, query.sql_text as string, params, logId);
         }
         return result;
       });
@@ -198,13 +222,16 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
 
     } catch (err: any) {
       const duration = Date.now() - startTime;
+      const isCancelled = err?.code === 'ECANCEL' || err?.message?.includes('Canceled') || err?.message?.includes('cancelled');
+      const errorMessage = isCancelled ? 'Consulta cancelada por el usuario' : err.message;
+
       db.prepare(`
         UPDATE execution_logs
         SET status = 'error', duration_ms = ?, record_count = ?, completed_at = datetime('now'), result = ?
         WHERE id = ?
-      `).run(duration, 0, JSON.stringify({ error: err.message }), logId);
+      `).run(duration, 0, JSON.stringify({ error: errorMessage }), logId);
 
-      return reply.status(500).send({ error: 'Query execution failed', message: err.message });
+      return reply.status(500).send({ error: 'Query execution failed', message: errorMessage, isCancelled });
     }
   });
 

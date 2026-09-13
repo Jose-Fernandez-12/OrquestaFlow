@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS flows (
 CREATE TABLE IF NOT EXISTS queries (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  group_name TEXT,
+  region TEXT,
   sql_text TEXT NOT NULL,
   params TEXT DEFAULT '[]',
   connection_ids TEXT DEFAULT '[]',
