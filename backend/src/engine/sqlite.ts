@@ -16,7 +16,8 @@ export async function executeSqliteQuery(filePath: string, sqlText: string, para
 
   try {
     // Convert common LIKE patterns with parameters inside quotes to string concatenation
-    let parsedSql = sqlText.replace(/'(%?):([a-zA-Z0-9_]+)(%?)'/g, (match, leading, paramName, trailing) => {
+    // Support #param_param and legacy :param
+    let parsedSql = sqlText.replace(/'(%?)#param_([a-zA-Z0-9_]+)(%?)'/g, (match, leading, paramName, trailing) => {
       let parts = [];
       if (leading) parts.push("'%'");
       parts.push(`:${paramName}`);
@@ -24,7 +25,11 @@ export async function executeSqliteQuery(filePath: string, sqlText: string, para
       if (parts.length === 1) return `:${paramName}`;
       return parts.join(' || ');
     });
-    
+
+    parsedSql = parsedSql.replace(/(^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (match, prefix, paramName) => {
+      return prefix + ':' + paramName;
+    });
+
     // Map params and expand list parameters for IN clauses
     const binds: Record<string, any> = {};
     Object.keys(params).forEach(k => {

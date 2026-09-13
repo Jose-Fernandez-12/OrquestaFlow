@@ -615,7 +615,7 @@ function FlowCanvas() {
         const query = queries.find((q: any) => q.id === node.data!.queryId);
         if (query) {
           const sqlText = (query.sql_text as string) || '';
-          const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
+          const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
           const uniqueParams = [...new Set(paramMatches.map(m => m[1]))];
           
           let queryParams: Record<string, string> = {};
@@ -1144,7 +1144,7 @@ function FlowCanvas() {
                   <div className="space-y-2">
                     {item.missing.map(param => (
                       <div key={param} className="flex flex-col gap-1">
-                        <label className="text-[11px] font-mono text-accent">:{param}</label>
+                        <label className="text-[11px] font-mono text-accent">#param_{param}</label>
                         <input
                           type="text"
                           className="flex h-8 w-full rounded-md border border-border bg-surface px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
