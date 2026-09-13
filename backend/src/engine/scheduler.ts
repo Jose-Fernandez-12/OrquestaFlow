@@ -7,6 +7,18 @@ import path from 'path';
 import fs from 'fs';
 
 const activeJobs: Record<string, cron.ScheduledTask> = {};
+const runningJobIds = new Set<string>();
+
+export function stopAllSchedulerJobs(): void {
+  for (const id of Object.keys(activeJobs)) {
+    try {
+      activeJobs[id].stop();
+    } catch {}
+    delete activeJobs[id];
+  }
+  runningJobIds.clear();
+  console.log('[Scheduler] All active jobs stopped.');
+}
 
 export async function initScheduler() {
   const db = getDb();
@@ -47,6 +59,12 @@ function startCronJob(schedule: any) {
   }
 
   const task = cron.schedule(schedule.cron_expression, async () => {
+    if (runningJobIds.has(schedule.id)) {
+      console.warn(`[Scheduler] Skipping schedule ${schedule.id} (${schedule.name}): previous execution is still running`);
+      return;
+    }
+
+    runningJobIds.add(schedule.id);
     console.log(`[Scheduler] Triggered job: ${schedule.name} (${schedule.target_type})`);
     const { v4: uuid } = require('uuid');
     const logId = uuid();
@@ -111,6 +129,8 @@ function startCronJob(schedule: any) {
         SET status = 'error', error_message = ?, duration_ms = ?, completed_at = datetime('now')
         WHERE id = ?
       `).run(err.message, duration, logId);
+    } finally {
+      runningJobIds.delete(schedule.id);
     }
   });
 
@@ -123,8 +143,19 @@ async function runScriptById(scriptId: string) {
   const script = db.prepare('SELECT * FROM scripts WHERE id = ?').get(scriptId) as any;
   if (!script) throw new Error('Script not found');
 
-  const scriptPath = path.join(process.cwd(), 'scripts', script.file_path);
-  if (!fs.existsSync(scriptPath)) throw new Error('Script file not found');
+  // Robust path resolution checking uploads, root and scripts directories
+  let scriptPath = script.file_path;
+  if (!path.isAbsolute(scriptPath)) {
+    const candidatePaths = [
+      path.join(process.cwd(), 'uploads', scriptPath),
+      path.join(process.cwd(), scriptPath),
+      path.join(process.cwd(), 'scripts', scriptPath),
+    ];
+    const found = candidatePaths.find(p => fs.existsSync(p));
+    scriptPath = found || candidatePaths[0];
+  }
+
+  if (!fs.existsSync(scriptPath)) throw new Error(`Script file not found at: ${scriptPath}`);
 
   return new Promise<void>((resolve, reject) => {
     const py = spawn('python', [scriptPath]);

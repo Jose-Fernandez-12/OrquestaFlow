@@ -8,6 +8,7 @@ import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
 import { useAppSelector } from '../../store/hooks';
 import { cn } from '../../lib/utils';
+import { getApiUrl } from '../../lib/api';
 
 const isDataProducerNode = (type?: string) => {
   if (!type) return false;
@@ -197,7 +198,7 @@ function DataSourceInspector({
     setUploadError(null);
 
     try {
-      const res = await fetch('http://localhost:3001/api/file-manager/upload', {
+      const res = await fetch(getApiUrl('/file-manager/upload'), {
         method: 'POST',
         body: formData,
       });
@@ -721,7 +722,7 @@ function DataSourceInspector({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 font-semibold text-accent">
                 <Repeat size={14} />
-                <span>Dentro del bucle: {parentForEachNode.data?.label || parentForEachNode.id}</span>
+                <span>Dentro del bucle: {String(parentForEachNode.data?.label || parentForEachNode.id)}</span>
               </div>
               <span className="text-[10px] font-mono bg-accent/20 text-accent px-1.5 py-0.5 rounded font-medium">
                 {parentLoopItems.length > 0 ? `${parentLoopItems.length} elementos` : 'Iterando'}
@@ -1653,7 +1654,7 @@ function DataSourceInspector({
                                     : "bg-surface border-border text-muted hover:text-fg hover:border-border-hover"
                                 )}
                               >
-                                {src.data?.label || src.id} ({src.type})
+                                {String(src.data?.label || src.id)} ({src.type})
                               </button>
                             );
                           })}
@@ -1935,7 +1936,7 @@ function DataSourceInspector({
                 if (node.data?.filePath) {
                   setLoading(true);
                   try {
-                    const previewRes = await fetch(`http://localhost:3001/api/file-manager/preview?filePath=${encodeURIComponent(node.data.filePath)}&limit=10`);
+                    const previewRes = await fetch(getApiUrl(`/file-manager/preview?filePath=${encodeURIComponent(node.data.filePath)}&limit=10`));
                     if (previewRes.ok) {
                       const pJson = await previewRes.json();
                       if (pJson?.data?.rows) {
@@ -1986,7 +1987,7 @@ function DataSourceInspector({
                 setError('No hay una consulta seleccionada en el nodo.');
               return;
       }
-              endpoint = `http://localhost:3001/api/queries/${queryId}/execute`;
+              endpoint = getApiUrl(`/queries/${queryId}/execute`);
     }
 
               if (!endpoint) {

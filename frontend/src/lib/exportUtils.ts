@@ -193,8 +193,10 @@ export function downloadAsCSV(
   document.body.removeChild(link);
 }
 
+import { getFileUrl } from './api';
+
 export async function triggerBrowserDownload(downloadUrl: string, fileName?: string) {
-  const fullUrl = downloadUrl.startsWith('http') ? downloadUrl : `http://localhost:3001${downloadUrl}`;
+  const fullUrl = downloadUrl.startsWith('http') ? downloadUrl : getFileUrl(downloadUrl);
   try {
     const res = await fetch(fullUrl);
     if (!res.ok) throw new Error('Download failed');

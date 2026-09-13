@@ -13,6 +13,7 @@ import {
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { triggerBrowserDownload } from '../../lib/exportUtils';
+import { getApiUrl, getFileUrl } from '../../lib/api';
 
 interface DataSourcePreviewModalProps {
   isOpen: boolean;
@@ -82,7 +83,7 @@ export function DataSourcePreviewModal({
     setLoadError(null);
 
     const sheetParam = activeSheet ? `&sheetName=${encodeURIComponent(activeSheet)}` : '';
-    fetch(`http://localhost:3001/api/file-manager/preview?filePath=${encodeURIComponent(filePath)}${sheetParam}&limit=1000`)
+    fetch(getApiUrl(`/file-manager/preview?filePath=${encodeURIComponent(filePath)}${sheetParam}&limit=1000`))
       .then(async res => {
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
@@ -165,7 +166,7 @@ export function DataSourcePreviewModal({
   const handleDownloadFile = () => {
     if (filePath) {
       const cleanName = fileName || filePath.split(/[/\\]/).pop() || 'datos';
-      triggerBrowserDownload(`http://localhost:3001/api/files/${cleanName}`, cleanName);
+      triggerBrowserDownload(getFileUrl(`/api/files/${cleanName}`), cleanName);
     }
   };
 

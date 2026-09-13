@@ -1,14 +1,30 @@
 import React from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { Check, Loader2, X, Clock, FileSpreadsheet, Eye, Pause } from 'lucide-react';
+import {
+  Check,
+  Loader2,
+  X,
+  Clock,
+  FileSpreadsheet,
+  Eye,
+  Pause,
+  Play,
+  Globe,
+  FileOutput,
+  Code,
+  Database,
+  List,
+  Repeat,
+  Square
+} from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
 
 interface BaseNodeProps {
   id: string;
   data: {
-    label: string;
-    icon: React.ElementType;
+    label?: string;
+    icon?: React.ElementType;
     color?: string;
     duration?: number;
     unit?: string;
@@ -21,7 +37,24 @@ interface BaseNodeProps {
   type: string;
 }
 
-export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
+const typeIcons: Record<string, React.ElementType> = {
+  start: Play,
+  httpGet: Globe,
+  httpPost: Globe,
+  httpRequest: Globe,
+  scraping: Code,
+  export: FileOutput,
+  query: Database,
+  timer: Clock,
+  delay: Clock,
+  dataSource: FileSpreadsheet,
+  fileSource: FileSpreadsheet,
+  dataList: List,
+  forEach: Repeat,
+  forEachEnd: Square,
+};
+
+function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
   const executing = useAppSelector(state => state.flows.executingNodeIds.includes(id));
   const completed = useAppSelector(state => state.flows.completedNodeIds.includes(id));
   const hasError = useAppSelector(state => state.flows.errorNodeIds.includes(id));
@@ -30,7 +63,7 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
   const progress = useAppSelector(state => state.flows.nodeProgress[id]);
   const timerState = useAppSelector(state => state.flows.nodeTimers[id]);
 
-  const Icon = data.icon;
+  const Icon = data?.icon || typeIcons[type] || FileSpreadsheet;
 
   const typeColors: Record<string, string> = {
     start: 'text-green-600',
@@ -405,3 +438,5 @@ export function BaseNode({ id, data, selected, type }: BaseNodeProps) {
     </div>
   );
 }
+
+export const BaseNode = React.memo(BaseNodeComponent);

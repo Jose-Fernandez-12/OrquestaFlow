@@ -16,6 +16,7 @@ import {
 import { Button } from '../ui/button';
 import { format } from 'date-fns';
 import { cn } from '../../lib/utils';
+import { getApiUrl, getFileUrl } from '../../lib/api';
 
 interface ExportedFileInfo {
   fileName: string;
@@ -58,7 +59,7 @@ export function FlowExecutionHistoryModal({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:3001/api/flows/${flow.id}/logs`);
+      const res = await fetch(getApiUrl(`/flows/${flow.id}/logs`));
       if (!res.ok) {
         throw new Error(`Error ${res.status}: ${res.statusText}`);
       }
@@ -252,7 +253,7 @@ export function FlowExecutionHistoryModal({
                         return (
                           <a
                             key={idx}
-                            href={downloadUrl.startsWith('http') ? downloadUrl : `http://localhost:3001${downloadUrl}`}
+                            href={downloadUrl.startsWith('http') ? downloadUrl : getFileUrl(downloadUrl)}
                             download={fileName}
                             target="_blank"
                             rel="noreferrer"

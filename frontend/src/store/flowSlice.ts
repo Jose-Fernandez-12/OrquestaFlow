@@ -1,6 +1,5 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit';
-
-const API_URL = 'http://localhost:3001/api';
+import { API_URL } from '../lib/api';
 
 export interface FlowNode {
   id: string;

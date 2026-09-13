@@ -32,7 +32,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Upload script
-  app.post('/', async (request, reply) => {
+  const handleUpload = async (request: any, reply: any) => {
     const data = await request.file();
     if (!data) return reply.status(400).send({ error: 'No file uploaded' });
 
@@ -55,7 +55,10 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
 
     const script = db.prepare('SELECT * FROM scripts WHERE id = ?').get(id);
     return { data: script };
-  });
+  };
+
+  app.post('/', handleUpload);
+  app.post('/upload', handleUpload);
 
   // Update script
   app.put<{

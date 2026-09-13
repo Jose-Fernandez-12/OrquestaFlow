@@ -8,20 +8,24 @@ import { DatabaseView } from './components/database/DatabaseView';
 import { ScriptsView } from './components/scripts/ScriptsView';
 import { ScheduleView } from './components/schedule/ScheduleView';
 
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
+
 function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<AppLayout />}>
-          <Route path="/" element={<FlowListView />} />
-          <Route path="/flujos" element={<FlowListView />} />
-          <Route path="/flujos/:id" element={<FlowEditor />} />
-          <Route path="/scripts" element={<ScriptsView />} />
-          <Route path="/bases" element={<DatabaseView />} />
-          <Route path="/programacion" element={<ScheduleView />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route path="/" element={<FlowListView />} />
+            <Route path="/flujos" element={<FlowListView />} />
+            <Route path="/flujos/:id" element={<FlowEditor />} />
+            <Route path="/scripts" element={<ScriptsView />} />
+            <Route path="/bases" element={<DatabaseView />} />
+            <Route path="/programacion" element={<ScheduleView />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }
 

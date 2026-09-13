@@ -6,6 +6,7 @@ import { Button } from '../ui/button';
 import { Card } from '../ui/card';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
+import { getApiUrl } from '../../lib/api';
 
 export function ScriptsView() {
   const dispatch = useAppDispatch();
@@ -52,7 +53,7 @@ export function ScriptsView() {
 
     setUploading(true);
     try {
-      const response = await fetch('http://localhost:3001/api/scripts/upload', {
+      const response = await fetch(getApiUrl('/scripts/upload'), {
         method: 'POST',
         body: formData
       });

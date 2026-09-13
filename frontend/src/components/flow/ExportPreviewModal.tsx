@@ -16,6 +16,7 @@ import {
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { triggerBrowserDownload, downloadAsCSV, downloadAsXMLSpreadsheet } from '../../lib/exportUtils';
+import { getApiUrl, getFileUrl } from '../../lib/api';
 
 interface ExportPreviewModalProps {
   isOpen: boolean;
@@ -114,7 +115,7 @@ export function ExportPreviewModal({
   useEffect(() => {
     if (isOpen && nodeResult?.filePath && (!nodeResult.previewRows || nodeResult.previewRows.length === 0)) {
       setIsLoadingFile(true);
-      fetch(`http://localhost:3001/api/file-manager/preview?filePath=${encodeURIComponent(nodeResult.filePath)}&limit=500`)
+      fetch(getApiUrl(`/file-manager/preview?filePath=${encodeURIComponent(nodeResult.filePath)}&limit=500`))
         .then(res => res.ok ? res.json() : null)
         .then(data => {
           if (data?.data) {
@@ -171,7 +172,7 @@ export function ExportPreviewModal({
       for (const up of upstreamNodes) {
         if (context[up.id] !== undefined && context[up.id] !== null) {
           rawData = context[up.id];
-          sourceLabel = (up.data?.label as string) || up.type;
+          sourceLabel = (up.data?.label as string) || up.type || '';
           break;
         }
       }
@@ -272,7 +273,7 @@ export function ExportPreviewModal({
   const handleDownload = () => {
     if (nodeResult?.filePath) {
       const fileName = nodeResult.filePath.split(/[/\\]/).pop();
-      triggerBrowserDownload(`http://localhost:3001/api/files/${fileName}`, fileName);
+      triggerBrowserDownload(getFileUrl(`/api/files/${fileName}`), fileName);
     } else if (rows.length > 0) {
       const cols = columns.map(c => ({ header: c, key: c }));
       if (displayFormat.toLowerCase().includes('excel') || displayFormat.toLowerCase().includes('xlsx')) {
