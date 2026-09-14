@@ -42,7 +42,8 @@ import {
   StepForward,
   PlayCircle,
   Loader2,
-  Pause
+  Pause,
+  Eye
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -70,7 +71,8 @@ import {
   setNodePaused,
   setExecutionMode,
   resumeDebugNode,
-  pauseDebugExecution
+  pauseDebugExecution,
+  setDebugModalOpen
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
 import { fetchQueries } from '../../store/querySlice';
@@ -78,6 +80,7 @@ import { Button } from '../ui/button';
 import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
 import { NodeInspector } from './NodeInspector';
+import { DebugContextViewer } from './DebugContextViewer';
 import { ExportPreviewModal } from './ExportPreviewModal';
 import { DataSourcePreviewModal } from './DataSourcePreviewModal';
 import { cn } from '../../lib/utils';
@@ -106,6 +109,44 @@ function FlowCanvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+
+  const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
+  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode || {});
+  const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
+  const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
+
+  // Active node for debugging inspection (persisted so modal doesn't flicker/unmount while stepping)
+  const activeDebugNodeId = pausedNodeIds[0] || selectedNodeId;
+  const [persistedDebugNodeId, setPersistedDebugNodeId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeDebugNodeId) {
+      setPersistedDebugNodeId(activeDebugNodeId);
+    }
+  }, [activeDebugNodeId]);
+
+  const debugTargetNodeId = activeDebugNodeId || persistedDebugNodeId;
+  const debugTargetNode = debugTargetNodeId ? nodes.find(n => n.id === debugTargetNodeId) : null;
+  const nodeDebugPreview = debugTargetNodeId ? allNodePreviews[debugTargetNodeId] : undefined;
+  const debugRequestPreview = nodeDebugPreview !== undefined ? nodeDebugPreview.requestPreview : globalRequestPreview;
+  const debugResponsePreview = nodeDebugPreview !== undefined ? nodeDebugPreview.responsePreview : globalResponsePreview;
+  const iterationHistory = nodeDebugPreview?.history || [];
+
+  // Keep React Flow nodes.selected in sync with Redux selectedNodeId
+  useEffect(() => {
+    setNodes(nds => {
+      let hasChanges = false;
+      const updated = nds.map(n => {
+        const shouldBeSelected = selectedNodeId !== null && n.id === selectedNodeId;
+        if (!!n.selected !== shouldBeSelected) {
+          hasChanges = true;
+          return { ...n, selected: shouldBeSelected };
+        }
+        return n;
+      });
+      return hasChanges ? updated : nds;
+    });
+  }, [selectedNodeId, setNodes]);
   const [editingName, setEditingName] = useState(currentFlow?.name || '');
   const [showOptionsMenu, setShowOptionsMenu] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
@@ -486,12 +527,14 @@ function FlowCanvas() {
     [reactFlowInstance, setNodes]
   );
 
-  const onSelectionChange = useCallback(({ nodes }: { nodes: Node[] }) => {
-    if (nodes.length === 1) {
-      dispatch(selectNode(nodes[0].id));
-    } else {
-      dispatch(selectNode(null));
+  const onSelectionChange = useCallback(({ nodes: selNodes }: { nodes: Node[] }) => {
+    if (selNodes.length === 1) {
+      dispatch(selectNode(selNodes[0].id));
     }
+  }, [dispatch]);
+
+  const handlePaneClick = useCallback(() => {
+    dispatch(selectNode(null));
   }, [dispatch]);
 
   const handleNodeDoubleClick = useCallback((event: React.MouseEvent, node: Node) => {
@@ -946,6 +989,15 @@ function FlowCanvas() {
                     >
                       <PlayCircle size={14} className="mr-1" /> Continuar Todo
                     </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => dispatch(setDebugModalOpen(true))}
+                      className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                      title="Abrir ventana modal de inspección de depuración"
+                    >
+                      <Eye size={13} className="mr-1" /> Inspeccionar
+                    </Button>
                   </>
                 ) : (
                   <>
@@ -999,6 +1051,7 @@ function FlowCanvas() {
               onDrop={isLocked ? undefined : onDrop}
               onDragOver={isLocked ? undefined : onDragOver}
               onSelectionChange={onSelectionChange}
+              onPaneClick={handlePaneClick}
               onNodeDoubleClick={handleNodeDoubleClick}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               nodeTypes={nodeTypes}
@@ -1026,6 +1079,22 @@ function FlowCanvas() {
               setNodes={setNodes}
               edges={edges}
               selectedNodeId={selectedNodeId} 
+            />
+          )}
+
+          {/* Top-Level Debug Inspection Modal (persists across stepping and continue) */}
+          {isDebugModalOpen && debugTargetNode && (
+            <DebugContextViewer
+              node={debugTargetNode}
+              nodes={nodes}
+              edges={edges}
+              flowId={currentFlow?.id || ''}
+              context={intermediateContext || {}}
+              requestPreview={debugRequestPreview}
+              responsePreview={debugResponsePreview}
+              iterationHistory={iterationHistory}
+              allNodePreviews={allNodePreviews}
+              modalOnly={true}
             />
           )}
         </div>
