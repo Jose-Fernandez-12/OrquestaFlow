@@ -54,6 +54,7 @@ export const createConnection = createAsyncThunk('connections/create', async (co
     body: JSON.stringify(connectionData)
   });
   const data = await res.json();
+  if (!res.ok) throw new Error(data.message || data.error || 'Failed to create connection');
   return data as { data: Connection };
 });
 
@@ -64,6 +65,7 @@ export const updateConnection = createAsyncThunk('connections/update', async ({ 
     body: JSON.stringify(connectionData)
   });
   const data = await res.json();
+  if (!res.ok) throw new Error(data.message || data.error || 'Failed to update connection');
   return data as { data: Connection };
 });
 

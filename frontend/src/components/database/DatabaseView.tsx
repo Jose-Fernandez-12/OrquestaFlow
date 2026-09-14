@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchConnections, setCurrentConnection, testConnection, createConnection, updateConnection, deleteConnection } from '../../store/connectionSlice';
-import { fetchQueries, setCurrentQuery, executeQuery, updateQuery, createQuery, deleteQuery } from '../../store/querySlice';
+import { fetchQueries, setCurrentQuery, executeQuery, cancelQuery, updateQuery, createQuery, deleteQuery } from '../../store/querySlice';
 import { showToast } from '../../store/uiSlice';
-import { Database, Plus, Play, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns, Trash2, Edit } from 'lucide-react';
+import { Database, Plus, Play, Square, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns, Trash2, Edit, ChevronDown, ChevronUp, Folder, Tag } from 'lucide-react';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql } from '@codemirror/lang-sql';
 import { format } from 'sql-formatter';
@@ -38,19 +38,36 @@ export function DatabaseView() {
   // Local state for editing/creating SQL
   const [sqlText, setSqlText] = useState('');
   const [queryName, setQueryName] = useState('');
+  const [queryGroupName, setQueryGroupName] = useState('');
+  const [queryRegion, setQueryRegion] = useState('');
   const [selectedConns, setSelectedConns] = useState<string[]>([]);
   const [showQueryEditor, setShowQueryEditor] = useState(true);
+  const [showGroupingOptions, setShowGroupingOptions] = useState(false);
+  const [showDatabaseSelector, setShowDatabaseSelector] = useState(false);
   const [displayColumns, setDisplayColumns] = useState<string[]>([]);
   const [isColumnSelectorOpen, setIsColumnSelectorOpen] = useState(false);
+  const [currentExecutionLogId, setCurrentExecutionLogId] = useState<string | null>(null);
 
   // Local state for parameters
   const [isParamModalOpen, setIsParamModalOpen] = useState(false);
   const [detectedParams, setDetectedParams] = useState<string[]>([]);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
-  // Derived state for autocomplete
-  const uniqueGroups = Array.from(new Set(connectionsState.connections.map(c => c.group_name).filter(Boolean))) as string[];
-  const uniqueRegions = Array.from(new Set(connectionsState.connections.map(c => c.region).filter(Boolean))) as string[];
+  // Derived state for autocomplete & selection of existing aliases/groups
+  const availableGroups = useMemo(() => {
+    const connGroups = connectionsState.connections.map(c => c.group_name).filter(Boolean) as string[];
+    const queryGroups = queriesState.queries.map(q => q.group_name).filter(Boolean) as string[];
+    return Array.from(new Set([...connGroups, ...queryGroups]));
+  }, [connectionsState.connections, queriesState.queries]);
+
+  const availableRegions = useMemo(() => {
+    const connRegions = connectionsState.connections.map(c => c.region).filter(Boolean) as string[];
+    const queryRegions = queriesState.queries.map(q => q.region).filter(Boolean) as string[];
+    return Array.from(new Set([...connRegions, ...queryRegions]));
+  }, [connectionsState.connections, queriesState.queries]);
+
+  const uniqueGroups = availableGroups;
+  const uniqueRegions = availableRegions;
 
   useEffect(() => {
     dispatch(fetchConnections());
@@ -62,6 +79,11 @@ export function DatabaseView() {
     if (queriesState.currentQuery) {
       setSqlText(queriesState.currentQuery.sql_text);
       setQueryName(queriesState.currentQuery.name);
+      setQueryGroupName(queriesState.currentQuery.group_name || '');
+      setQueryRegion(queriesState.currentQuery.region || '');
+      setShowQueryEditor(true);
+      setShowGroupingOptions(false);
+      setShowDatabaseSelector(false);
       try {
         let rawIds = queriesState.currentQuery.connection_ids;
         // If it's already an array, use it. Otherwise, parse it.
@@ -85,8 +107,13 @@ export function DatabaseView() {
     } else {
       setSqlText('');
       setQueryName('');
+      setQueryGroupName('');
+      setQueryRegion('');
       setSelectedConns([]);
       setDisplayColumns([]);
+      setShowQueryEditor(true);
+      setShowGroupingOptions(false);
+      setShowDatabaseSelector(true);
     }
   }, [queriesState.currentQuery]);
 
@@ -109,17 +136,21 @@ export function DatabaseView() {
         await dispatch(updateQuery({
           id: queriesState.currentQuery.id,
           name: queryName,
+          group_name: queryGroupName || null,
+          region: queryRegion || null,
           sql_text: sqlText,
           connection_ids: selectedConns,
-          display_columns: JSON.stringify(displayColumns)
+          display_columns: displayColumns
         })).unwrap();
         dispatch(showToast('Consulta guardada exitosamente'));
       } else {
         await dispatch(createQuery({
           name: queryName || 'Nueva Consulta',
+          group_name: queryGroupName || null,
+          region: queryRegion || null,
           sql_text: sqlText,
           connection_ids: selectedConns,
-          display_columns: JSON.stringify(displayColumns)
+          display_columns: displayColumns
         })).unwrap();
         dispatch(showToast('Consulta creada exitosamente'));
       }
@@ -166,8 +197,22 @@ export function DatabaseView() {
     }
   };
 
+  const handleCancelQuery = async () => {
+    if (!queriesState.currentQuery) return;
+    const logIdToCancel = currentExecutionLogId || queriesState.activeExecutionLogId || queriesState.currentQuery.id;
+    try {
+      await dispatch(cancelQuery({ id: queriesState.currentQuery.id, logId: logIdToCancel })).unwrap();
+      dispatch(showToast('Cancelación enviada al servidor'));
+    } catch (err: any) {
+      dispatch(showToast(`Error al cancelar: ${err.message}`));
+    }
+  };
+
   const doExecute = (params: Record<string, any>) => {
     if (queriesState.currentQuery && selectedConns.length > 0) {
+      const executionLogId = `query-exec-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      setCurrentExecutionLogId(executionLogId);
+
       // Auto-parse parameters
       const parsedParams: Record<string, any> = {};
       Object.keys(params).forEach(k => {
@@ -192,7 +237,8 @@ export function DatabaseView() {
       dispatch(executeQuery({
         id: queriesState.currentQuery.id,
         connection_ids: selectedConns,
-        params: parsedParams
+        params: parsedParams,
+        logId: executionLogId
       })).unwrap().catch((err: any) => {
         dispatch(showToast(`Error de ejecución: ${err.message}`));
       });
@@ -202,13 +248,36 @@ export function DatabaseView() {
   };
 
   const handleToggleConn = (id: string) => {
-    setSelectedConns(prev => 
-      prev.includes(id) ? prev.filter(cId => cId !== id) : [...prev, id]
-    );
+    setSelectedConns(prev => {
+      const next = prev.includes(id) ? prev.filter(cId => cId !== id) : [...prev, id];
+      // Si el usuario selecciona conexiones y no ha definido manualmente grupo o región, sugerir/autocompletar con los de la conexión
+      if (next.length > 0 && (!queryGroupName || !queryRegion)) {
+        const firstConn = connectionsState.connections.find(c => c.id === next[0]);
+        if (firstConn) {
+          if (!queryGroupName && firstConn.group_name) setQueryGroupName(firstConn.group_name);
+          if (!queryRegion && firstConn.region) setQueryRegion(firstConn.region);
+        }
+      }
+      return next;
+    });
   };
 
   const selectedConn = connectionsState.currentConnection;
   const selectedQuery = queriesState.currentQuery;
+
+  const groupedQueries = React.useMemo(() => {
+    const groups: Record<string, typeof queriesState.queries> = {};
+    
+    queriesState.queries.forEach(q => {
+      const gName = (q.group_name && q.group_name.trim()) ? q.group_name.trim() : 'Sin agrupar';
+      if (!groups[gName]) {
+        groups[gName] = [];
+      }
+      groups[gName].push(q);
+    });
+    
+    return groups;
+  }, [queriesState.queries]);
 
   const activeColumns = React.useMemo(() => {
     if (!queriesState.results?.columns) return [];
@@ -315,30 +384,69 @@ export function DatabaseView() {
               <>
                 <div className="flex items-center justify-between px-1 mb-1 shrink-0">
                   <span className="text-[10px] font-mono tracking-wider text-muted uppercase">Consultas SQL</span>
-                  <Button variant="icon" size="icon" className="h-6 w-6" onClick={() => dispatch(setCurrentQuery(null))} title="Nueva Consulta">
+                  <Button 
+                    variant="icon" 
+                    size="icon" 
+                    className="h-6 w-6" 
+                    onClick={() => {
+                      dispatch(setCurrentQuery(null));
+                      setShowQueryEditor(true);
+                    }} 
+                    title="Nueva Consulta"
+                  >
                     <Plus size={14} />
                   </Button>
                 </div>
-                {queriesState.queries.map(q => (
-                  <button
-                    key={q.id}
-                    onClick={() => dispatch(setCurrentQuery(q))}
-                    className={cn(
-                      "w-full text-left p-3 border rounded-sm flex items-center gap-3 transition-all",
-                      selectedQuery?.id === q.id 
-                        ? "border-accent bg-accent-light text-fg" 
-                        : "border-border hover:border-muted hover:bg-bg"
-                    )}
-                  >
-                    <div className="w-8 h-8 rounded-sm bg-bg border border-border flex items-center justify-center font-mono text-accent text-xs shrink-0">
-                      SQL
+                {Object.entries(groupedQueries).map(([groupName, queries]) => (
+                  <div key={groupName} className="mb-4">
+                    <div className="text-[11px] font-bold text-fg uppercase tracking-widest px-1 mb-2 border-b border-border/50 pb-1 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 truncate">
+                        <Folder size={12} className="text-muted shrink-0" />
+                        {groupName}
+                      </span>
+                      <span className="text-[9px] font-mono text-muted bg-bg/80 px-1.5 py-0.5 rounded border border-border/40 shrink-0">
+                        {queries.length}
+                      </span>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{q.name}</div>
-                      <div className="text-xs text-muted truncate">Last run: {q.last_run_at ? new Date(q.last_run_at).toLocaleDateString() : 'Never'}</div>
+                    <div className="flex flex-col gap-1 mb-2">
+                      {queries.map(q => (
+                        <button
+                          key={q.id}
+                          onClick={() => {
+                            dispatch(setCurrentQuery(q));
+                            setShowQueryEditor(true);
+                          }}
+                          className={cn(
+                            "w-full text-left p-3 border rounded-sm flex items-center gap-3 transition-all",
+                            selectedQuery?.id === q.id 
+                              ? "border-accent bg-accent-light text-fg" 
+                              : "border-border hover:border-muted hover:bg-bg"
+                          )}
+                        >
+                          <div className="w-8 h-8 rounded-sm bg-bg border border-border flex items-center justify-center font-mono text-accent text-xs shrink-0">
+                            SQL
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium truncate">{q.name}</div>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              {q.region && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface border border-border text-muted font-medium truncate max-w-[110px]" title={`Apodo: ${q.region}`}>
+                                  {q.region}
+                                </span>
+                              )}
+                              <span className="text-xs text-muted truncate">
+                                {q.last_run_at ? new Date(q.last_run_at).toLocaleDateString() : 'Never'}
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
                     </div>
-                  </button>
+                  </div>
                 ))}
+                {queriesState.queries.length === 0 && (
+                  <div className="text-xs text-muted italic px-2 py-4 text-center">No hay consultas guardadas.</div>
+                )}
               </>
             )}
           </div>
@@ -488,7 +596,7 @@ export function DatabaseView() {
           {activeTab === 'queries' && (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex justify-between items-start">
-                <div className="flex-1 min-w-0">
+                <div className="flex-1 min-w-0 pr-4">
                   <input
                     type="text"
                     value={queryName}
@@ -496,9 +604,158 @@ export function DatabaseView() {
                     placeholder="Nombre de la consulta"
                     className="text-lg font-semibold bg-transparent border-b border-transparent hover:border-border focus:border-accent outline-none w-full pb-1"
                   />
-                  <p className="text-sm text-muted mt-1">Escribe la consulta SQL y selecciona las bases de datos destino.</p>
+                  {/* Agrupación compacta / plegable */}
+                  <div className="mt-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {queryGroupName ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded bg-surface border border-border text-fg font-medium">
+                          <Folder size={13} className="text-accent" />
+                          <span>Grupo: <strong>{queryGroupName}</strong></span>
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted">Sin grupo asignado</span>
+                      )}
+
+                      {queryRegion && (
+                        <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded bg-surface border border-border text-muted">
+                          <Tag size={12} className="text-muted" />
+                          <span>Apodo: <strong>{queryRegion}</strong></span>
+                        </span>
+                      )}
+
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowGroupingOptions(!showGroupingOptions)}
+                        className="h-6 px-2 text-xs text-muted hover:text-fg gap-1"
+                        title={showGroupingOptions ? "Ocultar configuración de grupo/apodo" : "Configurar grupo o apodo"}
+                      >
+                        {showGroupingOptions ? 'Ocultar agrupación' : (queryGroupName || queryRegion ? 'Cambiar grupo / apodo' : '+ Asignar grupo o apodo')}
+                        {showGroupingOptions ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                      </Button>
+                    </div>
+
+                    {showGroupingOptions && (
+                      <div className="mt-3 p-3.5 border border-border rounded-md bg-bg/50 flex flex-col gap-3">
+                        <div className="flex gap-4">
+                          <div className="flex-1">
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-[11px] font-medium text-muted uppercase tracking-wider flex items-center gap-1">
+                                <Folder size={12} /> Grupo o Carpeta
+                              </label>
+                              {availableGroups.length > 0 && (
+                                <span className="text-[10px] text-muted">Disponibles: {availableGroups.length}</span>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              list="query-groups-list"
+                              value={queryGroupName}
+                              onChange={(e) => setQueryGroupName(e.target.value)}
+                              placeholder="Ej. Ventas, HO40 - COMUNES..."
+                              className="w-full text-xs px-2.5 py-1.5 rounded-sm border border-border bg-surface text-fg focus:border-accent outline-none"
+                            />
+                            <datalist id="query-groups-list">
+                              {availableGroups.map(g => (
+                                <option key={g} value={g} />
+                              ))}
+                            </datalist>
+                            {availableGroups.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {availableGroups.slice(0, 6).map(g => (
+                                  <button
+                                    key={g}
+                                    type="button"
+                                    onClick={() => setQueryGroupName(g)}
+                                    className={cn(
+                                      "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                                      queryGroupName === g 
+                                        ? "border-accent bg-accent-light text-accent font-medium" 
+                                        : "border-border/60 text-muted hover:text-fg hover:border-muted"
+                                    )}
+                                  >
+                                    {g}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex-1">
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-[11px] font-medium text-muted uppercase tracking-wider flex items-center gap-1">
+                                <Tag size={12} /> Apodo o Etiqueta (opcional)
+                              </label>
+                              {availableRegions.length > 0 && (
+                                <span className="text-[10px] text-muted">Disponibles: {availableRegions.length}</span>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              list="query-regions-list"
+                              value={queryRegion}
+                              onChange={(e) => setQueryRegion(e.target.value)}
+                              placeholder="Ej. HO40, Principal, Reporte..."
+                              className="w-full text-xs px-2.5 py-1.5 rounded-sm border border-border bg-surface text-fg focus:border-accent outline-none"
+                            />
+                            <datalist id="query-regions-list">
+                              {availableRegions.map(r => (
+                                <option key={r} value={r} />
+                              ))}
+                            </datalist>
+                            {availableRegions.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {availableRegions.slice(0, 6).map(r => (
+                                  <button
+                                    key={r}
+                                    type="button"
+                                    onClick={() => setQueryRegion(r)}
+                                    className={cn(
+                                      "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                                      queryRegion === r 
+                                        ? "border-accent bg-accent-light text-accent font-medium" 
+                                        : "border-border/60 text-muted hover:text-fg hover:border-muted"
+                                    )}
+                                  >
+                                    {r}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end gap-2 pt-1 border-t border-border/40">
+                          {(queryGroupName || queryRegion) && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setQueryGroupName('');
+                                setQueryRegion('');
+                              }}
+                              className="text-xs h-6 text-danger hover:bg-danger/10 px-2"
+                            >
+                              Quitar agrupación
+                            </Button>
+                          )}
+                          <Button
+                            type="button"
+                            variant="default"
+                            size="sm"
+                            onClick={() => setShowGroupingOptions(false)}
+                            className="text-xs h-6 px-3"
+                          >
+                            Listo
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex gap-2 shrink-0 items-start pt-1">
                   <Button 
                     variant="outline" 
                     size="sm" 
@@ -523,15 +780,27 @@ export function DatabaseView() {
                   <Button variant="default" size="sm" onClick={handleSaveQuery} className="gap-2">
                     <Save size={14} /> Guardar
                   </Button>
-                  <Button variant="primary" size="sm" onClick={handleExecuteClick} disabled={queriesState.executing} className="gap-2">
-                    <Play size={14} /> Ejecutar
-                  </Button>
+                  {queriesState.executing ? (
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={handleCancelQuery} 
+                      className="gap-2 text-danger border-danger/40 hover:bg-danger/10 hover:border-danger animate-pulse"
+                      title="Cancelar consulta en curso en la base de datos"
+                    >
+                      <Square size={14} /> Detener
+                    </Button>
+                  ) : (
+                    <Button variant="primary" size="sm" onClick={handleExecuteClick} className="gap-2">
+                      <Play size={14} /> Ejecutar
+                    </Button>
+                  )}
                 </div>
               </div>
 
               {/* Database destinations board */}
               <div className="p-4 border border-border rounded-md bg-bg/50">
-                <div className="flex flex-col gap-4">
+                <div className="flex flex-col gap-3">
                   {(() => {
                     const firstSelectedConn = selectedConns.length > 0 
                       ? connectionsState.connections.find(c => c.id === selectedConns[0]) 
@@ -540,60 +809,90 @@ export function DatabaseView() {
                     
                     return (
                       <>
-                        <div className="flex items-center justify-between mb-1">
-                          <h3 className="text-sm font-semibold">Bases de datos asociadas</h3>
-                          {activeGroup !== null && (
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            <h3 className="text-sm font-semibold flex items-center gap-1.5">
+                              <Database size={14} className="text-accent" />
+                              Bases de datos asociadas
+                            </h3>
+                            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-surface border border-border text-muted">
+                              {selectedConns.length} seleccionada{selectedConns.length === 1 ? '' : 's'}
+                            </span>
+                            {!showDatabaseSelector && selectedConns.length > 0 && (
+                              <span className="text-xs text-muted truncate max-w-[360px]" title={connectionsState.connections.filter(c => selectedConns.includes(c.id)).map(c => c.name).join(', ')}>
+                                • {connectionsState.connections.filter(c => selectedConns.includes(c.id)).map(c => c.name).join(', ')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {activeGroup !== null && showDatabaseSelector && (
+                              <Button 
+                                variant="ghost" 
+                                size="sm" 
+                                onClick={() => setSelectedConns([])}
+                                className="text-xs h-6 text-muted hover:text-fg gap-1 px-2"
+                                title="Limpiar selección para elegir otra carpeta o grupo"
+                              >
+                                <RefreshCw size={12} /> Cambiar grupo/carpeta
+                              </Button>
+                            )}
                             <Button 
                               variant="ghost" 
                               size="sm" 
-                              onClick={() => setSelectedConns([])}
+                              onClick={() => setShowDatabaseSelector(!showDatabaseSelector)}
                               className="text-xs h-6 text-muted hover:text-fg gap-1 px-2"
-                              title="Limpiar selección para elegir otra carpeta o grupo"
                             >
-                              <RefreshCw size={12} /> Cambiar grupo/carpeta
+                              {showDatabaseSelector ? 'Ocultar' : 'Mostrar'}
+                              {showDatabaseSelector ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                             </Button>
-                          )}
+                          </div>
                         </div>
-                        {(() => {
+
+                        {showDatabaseSelector && (() => {
                           const filteredGroups = Object.entries(connectionsState.grouped)
                             .filter(([groupName]) => activeGroup === null || groupName === activeGroup);
 
                           if (filteredGroups.length === 0) {
-                            return <div className="text-xs text-muted">No hay conexiones disponibles.</div>;
+                            return <div className="text-xs text-muted pt-2 border-t border-border/40">No hay conexiones disponibles.</div>;
                           }
 
-                          return filteredGroups.map(([groupName, regions]) => (
-                            <div key={groupName} className="mb-4">
-                              {groupName && <div className="text-[12px] font-bold text-fg uppercase tracking-widest px-1 mb-2 border-b border-border/50 pb-1">{groupName}</div>}
-                              <div className="flex flex-col gap-3">
-                                {Object.entries(regions).map(([region, conns]) => (
-                                  <div key={region} className="flex flex-col gap-1.5">
-                                    <span className="text-[11px] font-semibold text-muted uppercase tracking-wider ml-1">{region}</span>
-                                    <div className="flex flex-wrap gap-2">
-                                      {conns.map(conn => {
-                                        const isChecked = selectedConns.includes(conn.id);
-                                        return (
-                                          <button
-                                            key={conn.id}
-                                            onClick={() => handleToggleConn(conn.id)}
-                                            className={cn(
-                                              "px-3 py-1.5 border rounded-full text-xs font-medium transition-colors flex items-center gap-2",
-                                              isChecked 
-                                                ? "border-accent bg-accent-light text-accent" 
-                                                : "border-border bg-surface text-fg hover:border-muted"
-                                            )}
-                                          >
-                                            <span className={cn("w-2 h-2 rounded-full", isChecked ? "bg-accent" : "bg-muted")}></span>
-                                            {conn.name}
-                                          </button>
-                                        );
-                                      })}
-                                    </div>
+                          return (
+                            <div className="pt-2 border-t border-border/40 flex flex-col gap-3">
+                              {filteredGroups.map(([groupName, regions]) => (
+                                <div key={groupName} className="mb-2">
+                                  {groupName && <div className="text-[12px] font-bold text-fg uppercase tracking-widest px-1 mb-2 border-b border-border/50 pb-1">{groupName}</div>}
+                                  <div className="flex flex-col gap-3">
+                                    {Object.entries(regions).map(([region, conns]) => (
+                                      <div key={region} className="flex flex-col gap-1.5">
+                                        <span className="text-[11px] font-semibold text-muted uppercase tracking-wider ml-1">{region}</span>
+                                        <div className="flex flex-wrap gap-2">
+                                          {conns.map(conn => {
+                                            const isChecked = selectedConns.includes(conn.id);
+                                            return (
+                                              <button
+                                                key={conn.id}
+                                                type="button"
+                                                onClick={() => handleToggleConn(conn.id)}
+                                                className={cn(
+                                                  "px-3 py-1.5 border rounded-full text-xs font-medium transition-colors flex items-center gap-2",
+                                                  isChecked 
+                                                    ? "border-accent bg-accent-light text-accent" 
+                                                    : "border-border bg-surface text-fg hover:border-muted"
+                                                )}
+                                              >
+                                                <span className={cn("w-2 h-2 rounded-full", isChecked ? "bg-accent" : "bg-muted")}></span>
+                                                {conn.name}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    ))}
                                   </div>
-                                ))}
-                              </div>
+                                </div>
+                              ))}
                             </div>
-                          ));
+                          );
                         })()}
                       </>
                     );
