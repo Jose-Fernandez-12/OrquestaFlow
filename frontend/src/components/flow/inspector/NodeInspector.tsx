@@ -45,7 +45,8 @@ export function NodeInspector({
 
   const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
-  const nodeDebugPreview = useAppSelector(state => state.flows.debugPreviewsByNode?.[selectedNodeId]);
+  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode || {});
+  const nodeDebugPreview = allNodePreviews[selectedNodeId];
   const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
   const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
 
@@ -55,6 +56,7 @@ export function NodeInspector({
   const debugResponsePreview = nodeDebugPreview !== undefined 
     ? nodeDebugPreview.responsePreview 
     : globalResponsePreview;
+  const iterationHistory = nodeDebugPreview?.history || [];
   const currentFlow = useAppSelector(state => state.flows.currentFlow);
   const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults || {});
   const isPaused = pausedNodeIds.includes(selectedNodeId);
@@ -213,6 +215,8 @@ export function NodeInspector({
             context={intermediateContext || {}}
             requestPreview={debugRequestPreview}
             responsePreview={debugResponsePreview}
+            iterationHistory={iterationHistory}
+            allNodePreviews={allNodePreviews}
           />
         </div>
       )}
