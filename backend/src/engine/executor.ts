@@ -1037,18 +1037,59 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
 
   const baseData = baseDataWrapped.map(w => w.item);
 
-  // Apply column mapping if defined
+  // Pre-build join index maps for O(1) matching: avoids O(N * M * C) freeze on large datasets
+  const joins = (node.data?.joins as { nodeId: string, localKey: string, foreignKey: string }[]) || [];
+  const joinLookups = new Map<string, { lookup: Map<string, any>; localKey: string; foreignKey: string }>();
+  if (joins && Array.isArray(joins)) {
+    for (const j of joins) {
+      if (j.nodeId && j.localKey && j.foreignKey) {
+        const targetData = context[j.nodeId];
+        const flatTarget = flattenRows(targetData);
+        if (flatTarget.length > 0) {
+          const lookup = new Map<string, any>();
+          const fkLower = j.foreignKey.toLowerCase();
+          for (const r of flatTarget) {
+            if (r && typeof r === 'object') {
+              const actualKey = Object.keys(r).find(k => k.toLowerCase() === fkLower) || j.foreignKey;
+              const val = r[actualKey];
+              if (val !== undefined && val !== null) {
+                lookup.set(String(val), r);
+              }
+            }
+          }
+          joinLookups.set(j.nodeId, { lookup, localKey: j.localKey, foreignKey: j.foreignKey });
+        }
+      }
+    }
+  }
+
+  // Apply column mapping or auto-merge joined columns
   let exportData: any[] = baseData;
   if (columns && columns.length > 0 && Array.isArray(baseData)) {
     exportData = baseDataWrapped.map((wrappedItem, itemIndex) => {
-      const { item, rootIndex } = wrappedItem;
+      const { item } = wrappedItem;
       const row: Record<string, any> = {};
+
+      // Pre-fetch matches from joins for this item (O(1) lookups per item)
+      const joinedRowMatches = new Map<string, any>();
+      for (const [joinNodeId, { lookup, localKey }] of joinLookups) {
+        const lkLower = localKey.toLowerCase();
+        const actualLocalKey = Object.keys(item).find(k => k.toLowerCase() === lkLower) || localKey;
+        const localVal = item[actualLocalKey];
+        if (localVal !== undefined && localVal !== null) {
+          const matchedRow = lookup.get(String(localVal));
+          if (matchedRow) {
+            joinedRowMatches.set(joinNodeId, matchedRow);
+          }
+        }
+      }
+
       for (const col of columns) {
         if (col.header && col.key) {
           if (col.key.includes('{{') && col.key.includes('}}')) {
              row[col.header] = resolveTemplate({ ...context, _item: item, _index: itemIndex }, col.key) ?? '';
           } else {
-            // Resolve dot-notation key on item
+            // 1. Resolve dot-notation key on item
             const parts = col.key.split('.');
             let val: any = item;
             for (const part of parts) {
@@ -1056,76 +1097,43 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
               val = val[part];
             }
             
-            // Fallback 1: Resolve as a direct path in the global context
+            // 2. Check if val is present in matched joined node rows
+            if (val === undefined || val === null) {
+              for (const matchedRow of joinedRowMatches.values()) {
+                if (col.key in matchedRow) {
+                  val = matchedRow[col.key];
+                  break;
+                }
+              }
+            }
+
+            // 3. Fallback: Resolve as a direct path in global context
             if (val === undefined || val === null) {
               val = resolvePath(context, col.key);
             }
             
-            // Fallback 2: Smart resolution across other node results for flat keys
-            if (val === undefined || val === null) {
-               for (const [nodeId, nodeResult] of Object.entries(context)) {
-                  if (nodeId === 'start') continue;
-                  if (Array.isArray(nodeResult)) {
-                      let rowMatch: any = null;
-                      let manualJoinAttempted = false;
-                      const joins = node.data?.joins as { nodeId: string, localKey: string, foreignKey: string }[] | undefined;
-                      const explicitJoin = joins?.find(j => j.nodeId === nodeId);
-                      
-                      if (explicitJoin && explicitJoin.localKey && explicitJoin.foreignKey) {
-                          manualJoinAttempted = true;
-                          
-                          // Find actual local key (case-insensitive)
-                          const localKeyActual = Object.keys(item).find(k => k.toLowerCase() === explicitJoin.localKey.toLowerCase());
-                          
-                          if (localKeyActual && item[localKeyActual] !== undefined && item[localKeyActual] !== null) {
-                              rowMatch = nodeResult.find((r: any) => {
-                                  // Find actual foreign key (case-insensitive)
-                                  const foreignKeyActual = Object.keys(r).find(k => k.toLowerCase() === explicitJoin.foreignKey.toLowerCase());
-                                  return foreignKeyActual && String(r[foreignKeyActual]) === String(item[localKeyActual]);
-                              });
-                          }
-                      } else if (nodeResult.length > 0 && typeof nodeResult[0] === 'object' && typeof item === 'object') {
-                          // Smart Relational Join: try to find a common ID key between the item and nodeResult
-                          const itemKeys = Object.keys(item);
-                          const foreignKeys = Object.keys(nodeResult[0]);
-                          // Find common keys that likely represent IDs
-                          const commonKeys = itemKeys.filter(k => 
-                              foreignKeys.some(fk => fk.toLowerCase() === k.toLowerCase())
-                          );
-                          
-                          // Prefer keys that have 'id' or 'code' in their name
-                          const bestKeyItem = commonKeys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('code')) || commonKeys[0];
-                          
-                          if (bestKeyItem && item[bestKeyItem] !== undefined && item[bestKeyItem] !== null) {
-                              const bestKeyForeign = foreignKeys.find(fk => fk.toLowerCase() === bestKeyItem.toLowerCase())!;
-                              // Find the row where the IDs match
-                              rowMatch = nodeResult.find((r: any) => String(r[bestKeyForeign]) === String(item[bestKeyItem]));
-                          }
-                      }
-
-                      // Try to match by index if relational join failed
-                      if (!rowMatch && !manualJoinAttempted) {
-                          rowMatch = nodeResult[rootIndex];
-                      }
-
-                      if (rowMatch && typeof rowMatch === 'object' && col.key in rowMatch) {
-                          val = rowMatch[col.key];
-                          break;
-                      }
-                  } else if (nodeResult && typeof nodeResult === 'object') {
-                      if (col.key in nodeResult) {
-                          val = nodeResult[col.key];
-                          break;
-                      }
-                  }
-               }
-            }
-
             row[col.header] = val ?? '';
           }
         }
       }
       return row;
+    });
+  } else if (joinLookups.size > 0 && Array.isArray(baseData)) {
+    // If no custom column mapping was specified, automatically merge joined node fields
+    exportData = baseData.map(item => {
+      const merged = { ...item };
+      for (const [, { lookup, localKey }] of joinLookups) {
+        const lkLower = localKey.toLowerCase();
+        const actualLocalKey = Object.keys(item).find(k => k.toLowerCase() === lkLower) || localKey;
+        const localVal = item[actualLocalKey];
+        if (localVal !== undefined && localVal !== null) {
+          const matched = lookup.get(String(localVal));
+          if (matched && typeof matched === 'object') {
+            Object.assign(merged, matched);
+          }
+        }
+      }
+      return merged;
     });
   }
 
@@ -1137,13 +1145,12 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
   const isExcel = format === 'Excel';
   const ext = isExcel ? '.xlsx' : '.csv';
   const safeFileName = fileName.endsWith(ext) ? fileName : (fileName.replace(/\.(csv|xlsx|json)$/, '') + ext);
-  const filePath = path.join(dataDir, safeFileName);
+  let filePath = path.join(dataDir, safeFileName);
 
   if (isExcel) {
-    // Generate a real .xlsx file with ExcelJS
+    // Generate .xlsx with ExcelJS
     const workbook = new ExcelJS.Workbook();
     
-    // Parse the header color early so we can apply it to the header row
     const headerColStr = node.data?.headerColor as string;
     const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
       ? headerColStr.replace('#', '').toUpperCase() 
@@ -1159,7 +1166,6 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
 
       for (const nodeId of nodeIds) {
         let sheetName = multiSheetConfig[nodeId];
-        // Ensure valid sheet name
         if (!sheetName || sheetName.trim() === '') {
           sheetName = `Hoja_${nodeId.substring(0, 5)}`;
         }
@@ -1170,7 +1176,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
         const flatData = flattenRows(sheetData);
         if (flatData.length === 0) continue;
         
-        const sheet = workbook.addWorksheet(sheetName.substring(0, 31)); // Excel limit is 31 chars
+        const sheet = workbook.addWorksheet(sheetName.substring(0, 31));
         const firstItem = typeof flatData[0] === 'object' && flatData[0] !== null ? flatData[0] : { Valor: flatData[0] };
         const headers = Object.keys(firstItem);
         
@@ -1206,7 +1212,6 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
         : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
 
       if (exportData.length > 0 && headers.length > 0) {
-        // Add styled header row - per cell to avoid coloring the entire row
         sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
         const headerRow = sheet.getRow(1);
         headerRow.height = 24;
@@ -1216,7 +1221,6 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
           cell.alignment = { vertical: 'middle', horizontal: 'left' };
         });
 
-        // Add data rows - plain, no background color
         exportData.forEach(row => {
           const dataRow = sheet.addRow(headers.map(h => {
             const v = (typeof row === 'object' && row !== null) ? row[h] : row;
@@ -1227,7 +1231,21 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
       }
     }
 
-    await workbook.xlsx.writeFile(filePath);
+    // Use writeBuffer and atomic write to avoid stream hangs and handle Excel file lock
+    const buffer = await workbook.xlsx.writeBuffer();
+    try {
+      fs.writeFileSync(filePath, Buffer.from(buffer));
+    } catch (err: any) {
+      if (err.code === 'EBUSY' || err.code === 'EPERM') {
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '_');
+        const fileExt = path.extname(safeFileName);
+        const base = path.basename(safeFileName, fileExt);
+        filePath = path.join(dataDir, `${base}_${timestamp}${fileExt}`);
+        fs.writeFileSync(filePath, Buffer.from(buffer));
+      } else {
+        throw err;
+      }
+    }
 
   } else {
     // Generate CSV
@@ -1241,6 +1259,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
       ? Array.from(allKeysSet) 
       : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
 
+    let csvContent = '';
     if (exportData.length > 0 && headers.length > 0) {
       const csvRows = [headers.join(',')];
 
@@ -1255,9 +1274,23 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
         });
         csvRows.push(values.join(','));
       }
-      fs.writeFileSync(filePath, csvRows.join('\n'), 'utf8');
+      csvContent = csvRows.join('\n');
     } else {
-      fs.writeFileSync(filePath, exportData.join('\n'), 'utf8');
+      csvContent = exportData.join('\n');
+    }
+
+    try {
+      fs.writeFileSync(filePath, csvContent, 'utf8');
+    } catch (err: any) {
+      if (err.code === 'EBUSY' || err.code === 'EPERM') {
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '_');
+        const fileExt = path.extname(safeFileName);
+        const base = path.basename(safeFileName, fileExt);
+        filePath = path.join(dataDir, `${base}_${timestamp}${fileExt}`);
+        fs.writeFileSync(filePath, csvContent, 'utf8');
+      } else {
+        throw err;
+      }
     }
   }
 

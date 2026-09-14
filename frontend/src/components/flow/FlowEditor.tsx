@@ -24,7 +24,6 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
-  Clock,
   PanelLeft,
   Plus,
   CheckCircle2,
@@ -99,10 +98,6 @@ function FlowCanvas() {
   const nodeResults = useAppSelector(state => state.flows.nodeResults);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
   const queries = useAppSelector(state => (state as any).queries.queries || []);
-
-  const flowSchedules = currentFlow 
-    ? schedules.filter(s => s.target_type === 'flow' && s.target_id === currentFlow.id && s.is_active === 1)
-    : [];
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   
   const { id: routeFlowId } = useParams<{ id: string }>();
@@ -298,7 +293,8 @@ function FlowCanvas() {
             nodeId: data.nodeId, 
             context: data.context || data.result?.context,
             requestPreview: data.result?.requestPreview,
-            responsePreview: data.result?.responsePreview
+            responsePreview: data.result?.responsePreview,
+            debugType: data.result?.debugType
           }));
           dispatch(selectNode(data.nodeId));
         } else if (data.status === 'completed') {
@@ -1072,57 +1068,6 @@ function FlowCanvas() {
             </div>
           ))}
         </div>
-
-        {/* FlowSummary bottom cards */}
-        {!canvasExpanded && (
-          <div className="h-[140px] border-t border-border bg-surface grid grid-cols-2 gap-4 p-4 shrink-0 z-10 overflow-y-auto">
-            <div className="border border-border rounded-sm p-3 flex flex-col justify-between">
-              <div>
-                <h3 className="text-xs font-semibold">Programaciones activas</h3>
-                <p className="text-[10px] text-muted">Próximas ejecuciones automáticas de este flujo.</p>
-              </div>
-              {flowSchedules.length > 0 ? (
-                flowSchedules.map(s => (
-                  <div key={s.id} className="flex items-center gap-2 pt-2 border-t border-border mt-2">
-                    <div className="w-6 h-6 rounded-full bg-accent-light text-accent flex items-center justify-center shrink-0">
-                      <Clock size={12} />
-                    </div>
-                    <div className="text-[11px] truncate">
-                      <strong>{s.name || 'Programación Activa'}</strong>
-                      <span className="block text-[10px] text-muted">Cron: {s.cron_expression}</span>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2 text-[11px] text-muted">
-                  Sin programaciones activas
-                </div>
-              )}
-            </div>
-
-            <div className="border border-border rounded-sm p-3 flex flex-col justify-between">
-              <div>
-                <h3 className="text-xs font-semibold">Último resultado de ejecución</h3>
-                <p className="text-[10px] text-muted">Historial del último disparo manual o automático.</p>
-              </div>
-              {currentFlow.last_run_at ? (
-                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2">
-                  <div className="w-2 h-2 rounded-full bg-success shrink-0"></div>
-                  <div className="text-[11px]">
-                    <strong>Ejecución Exitosa</strong>
-                    <span className="block text-[10px] text-muted">
-                      Duración: {currentFlow.last_run_duration_ms}ms • Registros: {currentFlow.last_run_record_count}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2 text-[11px] text-muted">
-                  Ninguna ejecución previa
-                </div>
-              )}
-            </div>
-          </div>
-        )}
       </div>
       {/* Missing Params Modal */}
       {missingParamsContext && (
