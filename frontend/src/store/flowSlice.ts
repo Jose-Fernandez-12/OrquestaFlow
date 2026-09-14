@@ -28,18 +28,6 @@ export interface Flow {
   updated_at: string;
 }
 
-export interface IterationDebugRecord {
-  iterationIndex: number;
-  requestPreview?: any | null;
-  responsePreview?: any | null;
-}
-
-export interface NodeDebugPreview {
-  requestPreview?: any | null;
-  responsePreview?: any | null;
-  history?: IterationDebugRecord[];
-}
-
 interface FlowState {
   flows: Flow[];
   currentFlow: Flow | null;
@@ -52,7 +40,6 @@ interface FlowState {
   intermediateContext: Record<string, any>;
   debugRequestPreview: any | null;
   debugResponsePreview: any | null;
-  debugPreviewsByNode: Record<string, NodeDebugPreview>;
   nodeResults: Record<string, any>;
   nodeProgress: Record<string, { current: number; total: number }>;
   nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
@@ -74,7 +61,6 @@ const initialState: FlowState = {
   intermediateContext: {},
   debugRequestPreview: null,
   debugResponsePreview: null,
-  debugPreviewsByNode: {},
   nodeResults: {},
   nodeProgress: {},
   nodeTimers: {},
@@ -199,76 +185,20 @@ const flowSlice = createSlice({
         state.executingNodeIds.push(action.payload);
       }
       state.pausedNodeIds = state.pausedNodeIds.filter(id => id !== action.payload);
-      if (state.debugPreviewsByNode?.[action.payload]) {
-        state.debugRequestPreview = state.debugPreviewsByNode[action.payload].requestPreview || null;
-        state.debugResponsePreview = state.debugPreviewsByNode[action.payload].responsePreview || null;
-      } else {
-        state.debugResponsePreview = null;
-      }
     },
-    setNodePaused(state, action: PayloadAction<{ 
-      nodeId: string; 
-      context?: any; 
-      requestPreview?: any; 
-      responsePreview?: any;
-      debugType?: string;
-    }>) {
-      const { nodeId, context, requestPreview, responsePreview, debugType } = action.payload;
+    setNodePaused(state, action: PayloadAction<{ nodeId: string; context?: any; requestPreview?: any; responsePreview?: any }>) {
+      const { nodeId, context, requestPreview, responsePreview } = action.payload;
       if (!state.pausedNodeIds.includes(nodeId)) {
         state.pausedNodeIds.push(nodeId);
       }
       if (context) {
         state.intermediateContext = context;
       }
-      if (!state.debugPreviewsByNode) {
-        state.debugPreviewsByNode = {};
-      }
-      if (!state.debugPreviewsByNode[nodeId]) {
-        state.debugPreviewsByNode[nodeId] = { requestPreview: null, responsePreview: null, history: [] };
-      }
-
-      const nodeEntry = state.debugPreviewsByNode[nodeId];
-      if (!nodeEntry.history) nodeEntry.history = [];
-
-      const currentIterIndex = requestPreview?.iteration?.current ?? responsePreview?.iteration?.current ?? 1;
-      let record = nodeEntry.history.find(h => h.iterationIndex === currentIterIndex);
-      if (!record) {
-        record = {
-          iterationIndex: currentIterIndex,
-          requestPreview: null,
-          responsePreview: null
-        };
-        nodeEntry.history.push(record);
-        nodeEntry.history.sort((a, b) => a.iterationIndex - b.iterationIndex);
-      }
-
-      if (debugType === 'http_request' || (requestPreview && !responsePreview)) {
-        nodeEntry.requestPreview = requestPreview;
-        nodeEntry.responsePreview = null;
-        record.requestPreview = requestPreview;
-        record.responsePreview = null;
+      if (requestPreview !== undefined) {
         state.debugRequestPreview = requestPreview;
-        state.debugResponsePreview = null;
-      } else if (debugType === 'http_response' || responsePreview) {
-        nodeEntry.responsePreview = responsePreview;
-        record.responsePreview = responsePreview;
+      }
+      if (responsePreview !== undefined) {
         state.debugResponsePreview = responsePreview;
-        if (requestPreview) {
-          nodeEntry.requestPreview = requestPreview;
-          record.requestPreview = requestPreview;
-          state.debugRequestPreview = requestPreview;
-        }
-      } else {
-        if (requestPreview !== undefined) {
-          nodeEntry.requestPreview = requestPreview;
-          record.requestPreview = requestPreview;
-          state.debugRequestPreview = requestPreview;
-        }
-        if (responsePreview !== undefined) {
-          nodeEntry.responsePreview = responsePreview;
-          record.responsePreview = responsePreview;
-          state.debugResponsePreview = responsePreview;
-        }
       }
     },
     setExecutionMode(state, action: PayloadAction<'normal' | 'debug'>) {
@@ -285,10 +215,6 @@ const flowSlice = createSlice({
         state.nodeResults[nodeId] = result;
       }
       delete state.nodeTimers[nodeId];
-      if (state.selectedNodeId === nodeId) {
-        state.debugRequestPreview = null;
-        state.debugResponsePreview = null;
-      }
     },
     setNodeError(state, action: PayloadAction<{ nodeId: string; error?: any }>) {
       const { nodeId, error } = action.payload;
@@ -317,7 +243,6 @@ const flowSlice = createSlice({
       state.intermediateContext = {};
       state.debugRequestPreview = null;
       state.debugResponsePreview = null;
-      state.debugPreviewsByNode = {};
       state.nodeResults = {};
       state.nodeProgress = {};
       state.nodeTimers = {};

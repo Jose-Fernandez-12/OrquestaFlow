@@ -4,8 +4,6 @@ import { API_URL } from '../lib/api';
 export interface Query {
   id: string;
   name: string;
-  group_name?: string | null;
-  region?: string | null;
   sql_text: string;
   params: string; // JSON array
   connection_ids: string; // JSON array
@@ -29,7 +27,6 @@ interface QueryState {
   results: QueryResult | null;
   loading: boolean;
   executing: boolean;
-  activeExecutionLogId: string | null;
   error: string | null;
 }
 
@@ -39,7 +36,6 @@ const initialState: QueryState = {
   results: null,
   loading: false,
   executing: false,
-  activeExecutionLogId: null,
   error: null,
 };
 
@@ -49,33 +45,25 @@ export const fetchQueries = createAsyncThunk('queries/fetchAll', async () => {
   return data.data as Query[];
 });
 
-export const createQuery = createAsyncThunk(
-  'queries/create',
-  async (body: { name: string; group_name?: string | null; region?: string | null; sql_text: string; connection_ids?: string[]; display_columns?: string[] }) => {
-    const res = await fetch(`${API_URL}/queries`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || data.error || 'Failed to create query');
-    return data.data as Query;
-  }
-);
+export const createQuery = createAsyncThunk('queries/create', async (body: { name: string; sql_text: string; connection_ids?: string[]; display_columns?: string }) => {
+  const res = await fetch(`${API_URL}/queries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  return data.data as Query;
+});
 
-export const updateQuery = createAsyncThunk(
-  'queries/update',
-  async ({ id, ...body }: { id: string; name?: string; group_name?: string | null; region?: string | null; sql_text?: string; connection_ids?: string[]; display_columns?: string[] }) => {
-    const res = await fetch(`${API_URL}/queries/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || data.error || 'Failed to update query');
-    return data.data as Query;
-  }
-);
+export const updateQuery = createAsyncThunk('queries/update', async ({ id, ...body }: { id: string; name?: string; sql_text?: string; connection_ids?: string[]; display_columns?: string }) => {
+  const res = await fetch(`${API_URL}/queries/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  return data.data as Query;
+});
 
 export const deleteQuery = createAsyncThunk('queries/delete', async (id: string) => {
   const res = await fetch(`${API_URL}/queries/${id}`, { method: 'DELETE' });
@@ -83,34 +71,18 @@ export const deleteQuery = createAsyncThunk('queries/delete', async (id: string)
   return id;
 });
 
-export const executeQuery = createAsyncThunk(
-  'queries/execute',
-  async ({ id, connection_ids, params, logId }: { id: string; connection_ids: string[]; params?: Record<string, string>; logId?: string }) => {
-    const res = await fetch(`${API_URL}/queries/${id}/execute`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ connection_ids, params, logId }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.message || data.error || 'Error executing query');
-    }
-    return data.data as QueryResult;
+export const executeQuery = createAsyncThunk('queries/execute', async ({ id, connection_ids, params }: { id: string; connection_ids: string[]; params?: Record<string, string> }) => {
+  const res = await fetch(`${API_URL}/queries/${id}/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connection_ids, params }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || data.error || 'Error executing query');
   }
-);
-
-export const cancelQuery = createAsyncThunk(
-  'queries/cancel',
-  async ({ id, logId }: { id: string; logId?: string }) => {
-    const res = await fetch(`${API_URL}/queries/${id}/cancel`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ logId }),
-    });
-    const data = await res.json();
-    return data.data;
-  }
-);
+  return data.data as QueryResult;
+});
 
 const querySlice = createSlice({
   name: 'queries',
@@ -122,9 +94,6 @@ const querySlice = createSlice({
     },
     clearResults(state) {
       state.results = null;
-    },
-    setActiveExecutionLogId(state, action) {
-      state.activeExecutionLogId = action.payload;
     },
   },
   extraReducers: (builder) => {
@@ -153,25 +122,16 @@ const querySlice = createSlice({
           state.currentQuery = null;
         }
       })
-      .addCase(executeQuery.pending, (state, action) => {
-        state.executing = true;
-        state.activeExecutionLogId = action.meta.arg.logId || null;
-      })
+      .addCase(executeQuery.pending, (state) => { state.executing = true; })
       .addCase(executeQuery.fulfilled, (state, action) => {
         state.executing = false;
-        state.activeExecutionLogId = null;
         state.results = action.payload;
       })
       .addCase(executeQuery.rejected, (state) => {
         state.executing = false;
-        state.activeExecutionLogId = null;
-      })
-      .addCase(cancelQuery.fulfilled, (state) => {
-        state.executing = false;
-        state.activeExecutionLogId = null;
       });
   },
 });
 
-export const { setCurrentQuery, clearResults, setActiveExecutionLogId } = querySlice.actions;
+export const { setCurrentQuery, clearResults } = querySlice.actions;
 export default querySlice.reducer;
