@@ -30,8 +30,8 @@ import {
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { useAppDispatch } from '../../store/hooks';
-import { resumeDebugNode, type IterationDebugRecord, type NodeDebugPreview } from '../../store/flowSlice';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { resumeDebugNode, setDebugModalOpen, type IterationDebugRecord, type NodeDebugPreview } from '../../store/flowSlice';
 import { cn } from '../../lib/utils';
 
 export interface HttpRequestPreview {
@@ -70,6 +70,8 @@ interface DebugContextViewerProps {
   responsePreview?: HttpResponsePreview | null;
   iterationHistory?: IterationDebugRecord[];
   allNodePreviews?: Record<string, NodeDebugPreview>;
+  modalOnly?: boolean;
+  bannerOnly?: boolean;
 }
 
 type ModalTab = 'request' | 'response' | 'input';
@@ -83,10 +85,13 @@ export function DebugContextViewer({
   requestPreview,
   responsePreview,
   iterationHistory = [],
-  allNodePreviews = {}
+  allNodePreviews = {},
+  modalOnly = false,
+  bannerOnly = false,
 }: DebugContextViewerProps) {
   const dispatch = useAppDispatch();
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
+  const isModalOpen = isDebugModalOpen;
   const [activeTab, setActiveTab] = useState<ModalTab>('request');
   const [copied, setCopied] = useState(false);
   const [copiedPayload, setCopiedPayload] = useState(false);
@@ -274,9 +279,20 @@ export function DebugContextViewer({
     setCollapsedPaths(prev => ({ ...prev, [path]: !prev[path] }));
   };
 
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        dispatch(setDebugModalOpen(false));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isModalOpen, dispatch]);
+
   const openModalWithTab = (tab: ModalTab) => {
     setActiveTab(tab);
-    setIsModalOpen(true);
+    dispatch(setDebugModalOpen(true));
   };
 
   const activeSourceInfo = upstreamAncestorNodes.find(n => n.id === activeSourceId);
@@ -387,19 +403,17 @@ export function DebugContextViewer({
 
   const currentIteration = responsePreview?.iteration || requestPreview?.iteration || (totalIterations > 1 ? { current: activeIterationNumber, total: totalIterations } : undefined);
 
-  return (
-    <>
-      {/* Sleek, Integrated Debug Sidebar Banner */}
-      <div className={cn(
-        "rounded-md border p-3 space-y-2.5 transition-all text-xs shadow-xs",
-        responsePreview && !responsePreview.ok
-          ? "border-rose-500/30 bg-rose-500/5"
-          : responsePreview && responsePreview.ok
-            ? "border-emerald-500/30 bg-emerald-500/5"
-            : requestPreview
-              ? "border-blue-500/30 bg-blue-500/5"
-              : "border-amber-500/30 bg-amber-500/5"
-      )}>
+  const renderBanner = () => (
+    <div className={cn(
+      "rounded-md border p-3 space-y-2.5 transition-all text-xs shadow-xs",
+      responsePreview && !responsePreview.ok
+        ? "border-rose-500/30 bg-rose-500/5"
+        : responsePreview && responsePreview.ok
+          ? "border-emerald-500/30 bg-emerald-500/5"
+          : requestPreview
+            ? "border-blue-500/30 bg-blue-500/5"
+            : "border-amber-500/30 bg-amber-500/5"
+    )}>
         {/* Header with status pill and action icons */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
@@ -658,9 +672,11 @@ export function DebugContextViewer({
           )}
         </div>
       </div>
+    );
 
-      {/* Spacious, Multi-Tab Inspection Modal */}
-      {isModalOpen && createPortal(
+    const renderModal = () => {
+      if (!isModalOpen) return null;
+      return createPortal(
         <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
           <div className="bg-surface rounded-lg shadow-raised border border-border w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
@@ -719,8 +735,9 @@ export function DebugContextViewer({
                 </Button>
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => dispatch(setDebugModalOpen(false))}
                   className="p-1.5 hover:bg-muted rounded-md text-muted hover:text-fg transition-colors cursor-pointer"
+                  title="Cerrar modal de inspección"
                 >
                   <X size={18} />
                 </button>
@@ -1494,7 +1511,6 @@ export function DebugContextViewer({
                             setActiveTab('request');
                           } else {
                             dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }));
-                            setIsModalOpen(false);
                           }
                         }
                       }}
@@ -1531,7 +1547,6 @@ export function DebugContextViewer({
                         size="sm"
                         onClick={() => {
                           dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }));
-                          setIsModalOpen(false);
                         }}
                         className="gap-2 text-fg"
                         title="Enviar todas las peticiones restantes sin pausar"
@@ -1546,12 +1561,22 @@ export function DebugContextViewer({
                       size="sm"
                       onClick={() => {
                         dispatch(resumeDebugNode({ id: flowId, action: 'continue' }));
-                        setIsModalOpen(false);
                       }}
                       className="gap-2 text-fg"
                     >
                       <PlayCircle size={14} />
                       <span>Continuar todo</span>
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => dispatch(setDebugModalOpen(false))}
+                      className="gap-1.5 text-xs text-muted hover:text-fg ml-2 cursor-pointer"
+                      title="Cerrar ventana de inspección"
+                    >
+                      <X size={13} />
+                      <span>Cerrar</span>
                     </Button>
                   </>
                 )}
@@ -1560,7 +1585,15 @@ export function DebugContextViewer({
           </div>
         </div>,
         document.body
-      )}
-    </>
-  );
-}
+      );
+    };
+
+    if (modalOnly) return <>{renderModal()}</>;
+    if (bannerOnly) return <>{renderBanner()}</>;
+    return (
+      <>
+        {renderBanner()}
+        {renderModal()}
+      </>
+    );
+  }

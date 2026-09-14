@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Input } from '../../../ui/input';
 import { Button } from '../../../ui/button';
 import { Plus, Trash2, Wand2 } from 'lucide-react';
@@ -156,23 +156,37 @@ export function KeyValueEditor({
 }: KeyValueEditorProps) {
   const [showRaw, setShowRaw] = useState(defaultRaw);
   const [newKey, setNewKey] = useState('');
+  const [localEntries, setLocalEntries] = useState<KeyValuePair[]>(() => parseToEntries(jsonString));
+  const isInternalChangeRef = useRef(false);
 
-  const entries = parseToEntries(jsonString);
+  useEffect(() => {
+    if (isInternalChangeRef.current) {
+      isInternalChangeRef.current = false;
+      return;
+    }
+    setLocalEntries(parseToEntries(jsonString));
+  }, [jsonString]);
 
   const updateEntry = (index: number, field: 'key' | 'value', val: string) => {
-    const updated = [...entries];
+    const updated = [...localEntries];
     updated[index] = { ...updated[index], [field]: val };
+    setLocalEntries(updated);
+    isInternalChangeRef.current = true;
     onChange(entriesToJson(updated));
   };
 
   const removeEntry = (index: number) => {
-    const updated = entries.filter((_, i) => i !== index);
+    const updated = localEntries.filter((_, i) => i !== index);
+    setLocalEntries(updated);
+    isInternalChangeRef.current = true;
     onChange(entriesToJson(updated));
   };
 
   const addEntry = () => {
-    const keyToAdd = newKey.trim() || `key_${entries.length + 1}`;
-    const updated = [...entries, { key: keyToAdd, value: '' }];
+    const keyToAdd = newKey.trim() || `key_${localEntries.length + 1}`;
+    const updated = [...localEntries, { key: keyToAdd, value: '' }];
+    setLocalEntries(updated);
+    isInternalChangeRef.current = true;
     onChange(entriesToJson(updated));
     setNewKey('');
   };
@@ -192,7 +206,7 @@ export function KeyValueEditor({
           <button
             type="button"
             onClick={handleRepair}
-            className="text-[10px] text-muted hover:text-accent flex items-center gap-1 font-mono transition-colors"
+            className="text-[10px] text-muted hover:text-accent flex items-center gap-1 font-mono transition-colors cursor-pointer"
             title="Reparar formato JSON y comillas escapadas"
           >
             <Wand2 size={11} />
@@ -201,7 +215,7 @@ export function KeyValueEditor({
           <button
             type="button"
             onClick={() => setShowRaw(!showRaw)}
-            className="text-[10px] text-accent hover:underline font-mono"
+            className="text-[10px] text-accent hover:underline font-mono cursor-pointer"
           >
             {showRaw ? 'Vista Guiada' : 'Ver JSON raw'}
           </button>
@@ -217,8 +231,8 @@ export function KeyValueEditor({
         />
       ) : (
         <div className="space-y-2 border border-border rounded-sm p-2.5 bg-bg/50">
-          {entries.length > 0 ? (
-            entries.map((entry, i) => (
+          {localEntries.length > 0 ? (
+            localEntries.map((entry, i) => (
               <div key={i} className="flex gap-2 items-center">
                 <Input
                   className="h-7 text-xs font-mono flex-1"

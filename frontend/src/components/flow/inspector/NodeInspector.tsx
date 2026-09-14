@@ -2,7 +2,8 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import { Button } from '../../ui/button';
 import { Trash2, Braces, Repeat, Check, Copy, ChevronDown } from 'lucide-react';
-import { useAppSelector } from '../../../store/hooks';
+import { useAppSelector, useAppDispatch } from '../../../store/hooks';
+import { selectNode } from '../../../store/flowSlice';
 import { cn } from '../../../lib/utils';
 import { InspectorHeader } from './InspectorHeader';
 import { VariableDrawer } from './VariableDrawer';
@@ -36,6 +37,7 @@ export function NodeInspector({
   edges,
   selectedNodeId,
 }: NodeInspectorProps) {
+  const dispatch = useAppDispatch();
   const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
   const [isVariableDrawerOpen, setIsVariableDrawerOpen] = useState(false);
@@ -66,7 +68,7 @@ export function NodeInspector({
       setNodes(nds =>
         nds.map(n => {
           if (n.id === selectedNodeId) {
-            return { ...n, data: { ...n.data, [key]: value } };
+            return { ...n, selected: true, data: { ...n.data, [key]: value } };
           }
           return n;
         })
@@ -162,7 +164,11 @@ export function NodeInspector({
       />
 
       {/* Header */}
-      <InspectorHeader node={node} updateNodeData={updateNodeData} />
+      <InspectorHeader
+        node={node}
+        updateNodeData={updateNodeData}
+        onClose={() => dispatch(selectNode(null))}
+      />
 
       {/* Action bar (Variable Panel trigger + Helpers) */}
       <div className="px-4 py-2 border-b border-border bg-bg/40 flex items-center justify-between shrink-0">
@@ -217,6 +223,7 @@ export function NodeInspector({
             responsePreview={debugResponsePreview}
             iterationHistory={iterationHistory}
             allNodePreviews={allNodePreviews}
+            bannerOnly={true}
           />
         </div>
       )}

@@ -129,6 +129,17 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
           >
             {node.id.length > 12 ? node.id.slice(0, 12) + '...' : node.id}
           </span>
+
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1 rounded-md text-muted hover:text-fg hover:bg-bg transition-colors cursor-pointer"
+              title="Cerrar panel de propiedades"
+            >
+              <X size={15} />
+            </button>
+          )}
         </div>
       </div>
     </div>
