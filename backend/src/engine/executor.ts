@@ -588,9 +588,25 @@ async function executeHttpNode(
       }
     }
 
-    // Combine user abort signal with a 30-second network timeout ONLY when actually fetching
+    // Dynamic HTTP network timeout: node-level setting > system setting > default 30s
+    let httpTimeoutMs = 30000;
+    if (node.data?.timeout) {
+      const nodeSec = parseInt(node.data.timeout, 10);
+      if (!isNaN(nodeSec) && nodeSec > 0) httpTimeoutMs = nodeSec * 1000;
+    } else {
+      try {
+        const db = getDb();
+        const row = db.prepare("SELECT value FROM system_settings WHERE key = 'http_timeout_seconds'").get() as any;
+        if (row?.value) {
+          const sysSec = parseInt(row.value, 10);
+          if (!isNaN(sysSec) && sysSec > 0) httpTimeoutMs = sysSec * 1000;
+        }
+      } catch {}
+    }
+
     const fetchController = new AbortController();
-    const timeoutId = setTimeout(() => fetchController.abort(new Error('Timeout de 30 segundos agotado')), 30000);
+    const timeoutSeconds = Math.round(httpTimeoutMs / 1000);
+    const timeoutId = setTimeout(() => fetchController.abort(new Error(`Timeout de ${timeoutSeconds} segundos agotado`)), httpTimeoutMs);
     
     if (signal) {
       signal.addEventListener('abort', () => fetchController.abort(new Error('Ejecución detenida por el usuario')), { once: true });

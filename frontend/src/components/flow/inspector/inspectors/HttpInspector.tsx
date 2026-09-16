@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Input } from '../../../ui/input';
 import { Button } from '../../../ui/button';
-import { Globe, ShieldCheck, Send, ArrowDownToLine, Repeat, Plus, Trash2, Wand2 } from 'lucide-react';
+import { Globe, ShieldCheck, Send, ArrowDownToLine, Repeat, Plus, Trash2, Wand2, Clock } from 'lucide-react';
 import { useAppSelector } from '../../../../store/hooks';
 import { InspectorTabs } from '../InspectorTabs';
 import { JsonSelectorModal } from '../editors/JsonSelectorModal';
@@ -304,6 +304,28 @@ export function HttpInspector({
                 <option value="XML">XML</option>
                 <option value="Text">Texto plano</option>
               </select>
+            </div>
+
+            <div className="space-y-1.5 pt-1">
+              <div className="flex justify-between items-center">
+                <label className="text-xs font-medium flex items-center gap-1.5">
+                  <Clock size={13} className="text-accent" />
+                  Tiempo de espera (Timeout)
+                </label>
+                <span className="text-[11px] text-muted">segundos</span>
+              </div>
+              <Input
+                type="number"
+                min={1}
+                max={600}
+                placeholder="Por defecto global (30s)"
+                value={(node.data?.timeout as string) || ''}
+                onChange={(e) => updateNodeData('timeout', e.target.value)}
+                className="h-9 text-xs font-mono"
+              />
+              <p className="text-[10px] text-muted">
+                Opcional. Deja vacío para usar el valor configurado globalmente en el sistema.
+              </p>
             </div>
           </div>
         )}

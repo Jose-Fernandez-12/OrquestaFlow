@@ -6,10 +6,17 @@ import { hideToast } from '../../store/uiSlice';
 import { AlertCircle, X } from 'lucide-react';
 import { useEffect } from 'react';
 import { cn } from '../../lib/utils';
+import { SettingsModal } from '../settings/SettingsModal';
+import { HelpModal } from '../help/HelpModal';
+import { fetchSettings } from '../../store/settingsSlice';
 
 export function AppLayout() {
   const dispatch = useAppDispatch();
   const { toastVisible, toastMessage } = useAppSelector((state: any) => state.ui);
+
+  useEffect(() => {
+    dispatch(fetchSettings());
+  }, [dispatch]);
 
   useEffect(() => {
     if (toastVisible) {
@@ -26,6 +33,10 @@ export function AppLayout() {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <Outlet />
       </main>
+
+      {/* Global Modals */}
+      <SettingsModal />
+      <HelpModal />
 
       {/* Global Toast Notification */}
       {toastVisible && (

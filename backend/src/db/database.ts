@@ -124,6 +124,41 @@ export async function initDb(): Promise<void> {
     // Ignore if exists
   }
 
+  try {
+    wrappedDb.exec(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+  } catch (e: any) {
+    // Ignore if exists
+  }
+
+  // Seed default settings if table is empty
+  try {
+    const settingsCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM system_settings').get() as { count: number };
+    if (settingsCount.count === 0) {
+      const defaultSettings = [
+        ['http_timeout_seconds', '30'],
+        ['mssql_connection_timeout_seconds', '30'],
+        ['mssql_request_timeout_seconds', '300'],
+        ['script_timeout_seconds', '60'],
+        ['http_max_retries', '1'],
+        ['table_preview_row_limit', '500'],
+        ['user_display_name', 'Jose Fernandez'],
+        ['user_role_label', 'Administrador']
+      ];
+      for (const [key, val] of defaultSettings) {
+        wrappedDb.prepare(`INSERT INTO system_settings (key, value) VALUES (?, ?)`).run(key, val);
+      }
+      console.log('[DB] Seeded default system_settings');
+    }
+  } catch (e: any) {
+    console.error('[DB] Error initializing system_settings:', e);
+  }
+
   // Seed demo data if tables are empty
   const flowCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM flows').get() as { count: number };
   if (flowCount.count === 0) {

@@ -110,9 +110,18 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       const { promisify } = await import('util');
       const execFileAsync = promisify(execFile);
 
+      let scriptTimeoutMs = 60000;
+      try {
+        const row = db.prepare("SELECT value FROM system_settings WHERE key = 'script_timeout_seconds'").get() as any;
+        if (row?.value) {
+          const s = parseInt(row.value, 10);
+          if (!isNaN(s) && s > 0) scriptTimeoutMs = s * 1000;
+        }
+      } catch {}
+
       const startTime = Date.now();
       const result = await execFileAsync(pythonPath, [scriptPath, ...args], {
-        timeout: 120000, // 2 min timeout
+        timeout: scriptTimeoutMs,
         maxBuffer: 10 * 1024 * 1024 // 10MB output
       });
       const duration = Date.now() - startTime;

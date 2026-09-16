@@ -14,6 +14,23 @@ function buildMssqlConfig(connection: any) {
   const user = connection.username || process.env[`DB_USER_${key}`] || process.env.DB_USER_DEFAULT || 'sa';
   const password = connection.password || process.env[`DB_PASSWORD_${key}`] || process.env.DB_PASSWORD_DEFAULT || 'SecretPassword123!';
 
+  // Dynamic timeouts from system_settings with defaults
+  let connTimeoutMs = 30000;
+  let reqTimeoutMs = 300000;
+  try {
+    const db = getDb();
+    const connSetting = db.prepare("SELECT value FROM system_settings WHERE key = 'mssql_connection_timeout_seconds'").get() as any;
+    if (connSetting?.value) {
+      const parsed = parseInt(connSetting.value, 10);
+      if (!isNaN(parsed) && parsed > 0) connTimeoutMs = parsed * 1000;
+    }
+    const reqSetting = db.prepare("SELECT value FROM system_settings WHERE key = 'mssql_request_timeout_seconds'").get() as any;
+    if (reqSetting?.value) {
+      const parsed = parseInt(reqSetting.value, 10);
+      if (!isNaN(parsed) && parsed > 0) reqTimeoutMs = parsed * 1000;
+    }
+  } catch {}
+
   return {
     user,
     password,
@@ -24,8 +41,8 @@ function buildMssqlConfig(connection: any) {
       encrypt: connection.host.includes('.database.windows.net') || false, // Azure SQL requires encryption
       trustServerCertificate: true,
     },
-    connectionTimeout: 30000,
-    requestTimeout: 300000,
+    connectionTimeout: connTimeoutMs,
+    requestTimeout: reqTimeoutMs,
   };
 }
 

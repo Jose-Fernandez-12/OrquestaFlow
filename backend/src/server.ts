@@ -15,6 +15,7 @@ import { scriptRoutes } from './routes/scripts.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { exportRoutes } from './routes/export.js';
 import { fileManagerRoutes } from './routes/files.js';
+import { settingsRoutes } from './routes/settings.js';
 
 config();
 
@@ -75,6 +76,7 @@ async function start(): Promise<void> {
   await app.register(scheduleRoutes, { prefix: '/api/schedules' });
   await app.register(exportRoutes, { prefix: '/api/export' });
   await app.register(fileManagerRoutes, { prefix: '/api/file-manager' });
+  await app.register(settingsRoutes, { prefix: '/api/settings' });
 
   // Health check
   app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
