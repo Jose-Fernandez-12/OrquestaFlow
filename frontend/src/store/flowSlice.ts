@@ -58,6 +58,7 @@ interface FlowState {
   nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
+  isDebugModalOpen: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -80,6 +81,7 @@ const initialState: FlowState = {
   nodeTimers: {},
   canvasExpanded: false,
   nodeLibraryExpanded: true,
+  isDebugModalOpen: false,
   loading: false,
   error: null,
 };
@@ -321,12 +323,16 @@ const flowSlice = createSlice({
       state.nodeResults = {};
       state.nodeProgress = {};
       state.nodeTimers = {};
+      state.isDebugModalOpen = false;
     },
     toggleCanvasExpanded(state) {
       state.canvasExpanded = !state.canvasExpanded;
     },
     toggleNodeLibraryExpanded(state) {
       state.nodeLibraryExpanded = !state.nodeLibraryExpanded;
+    },
+    setDebugModalOpen(state, action: PayloadAction<boolean>) {
+      state.isDebugModalOpen = action.payload;
     },
   },
   extraReducers: (builder) => {
@@ -363,6 +369,7 @@ const flowSlice = createSlice({
         state.executingNodeIds = [];
         state.pausedNodeIds = [];
         state.nodeTimers = {};
+        state.isDebugModalOpen = false;
       })
       .addCase(deleteFlow.fulfilled, (state, action) => {
         state.flows = state.flows.filter(f => f.id !== action.payload);
@@ -389,6 +396,7 @@ export const {
   resetNodeStates,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,
+  setDebugModalOpen,
 } = flowSlice.actions;
 
 export default flowSlice.reducer;

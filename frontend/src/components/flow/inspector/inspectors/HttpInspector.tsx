@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Input } from '../../../ui/input';
 import { Button } from '../../../ui/button';
-import { Globe, ShieldCheck, Send, ArrowDownToLine, Repeat, Plus, Trash2, Wand2 } from 'lucide-react';
+import { Globe, ShieldCheck, Send, ArrowDownToLine, Repeat, Plus, Trash2, Wand2, Clock } from 'lucide-react';
 import { useAppSelector } from '../../../../store/hooks';
 import { InspectorTabs } from '../InspectorTabs';
 import { JsonSelectorModal } from '../editors/JsonSelectorModal';
@@ -87,10 +87,15 @@ export function HttpInspector({
     setNewParamKey('');
   };
 
-  // URL Path Parameters Detection ({param_...})
+  // URL Path Parameters Detection ({param_...}, {paramName}, or dynamic {{...}})
   const pathTokens = React.useMemo(() => {
-    const paramTokens = endpoint.match(/(?<!\{)\{(param_[^{}]*)\}(?!\})/g) || [];
-    return Array.from(new Set(paramTokens));
+    const unmapped = endpoint.match(/(?<!\{)\{([a-zA-Z0-9_-]+)\}(?!\})/g) || [];
+    const mapped = endpoint.match(/\{\{([^{}]+)\}\}/g) || [];
+    return {
+      unmapped: Array.from(new Set(unmapped)),
+      mapped: Array.from(new Set(mapped)),
+      total: unmapped.length + mapped.length
+    };
   }, [endpoint]);
 
   const tabs: TabDefinition[] = [
@@ -176,6 +181,9 @@ export function HttpInspector({
               <Input
                 value={endpoint}
                 onChange={(e) => {
+                  updateNodeData('endpoint', e.target.value);
+                }}
+                onBlur={(e) => {
                   const newUrl = e.target.value;
                   if (newUrl.includes('?')) {
                     const qIndex = newUrl.indexOf('?');
@@ -200,6 +208,7 @@ export function HttpInspector({
                         if (n.id === selectedNodeId) {
                           return {
                             ...n,
+                            selected: true,
                             data: {
                               ...n.data,
                               endpoint: baseUrl,
@@ -210,27 +219,26 @@ export function HttpInspector({
                         return n;
                       })
                     );
-                  } else {
-                    updateNodeData('endpoint', newUrl);
                   }
                 }}
                 placeholder="https://api.example.com/v1/users/{param_id}"
                 className="font-mono text-xs"
               />
 
-              {/* Path Parameters in URL Detector */}
-              {pathTokens.length > 0 && (
+              {/* Path Parameters in URL Detector (both unmapped and mapped) */}
+              {pathTokens.total > 0 && (
                 <div className="p-2.5 bg-bg border border-border rounded-md space-y-2 mt-2">
                   <div className="flex items-center justify-between text-xs font-medium text-fg">
                     <span className="flex items-center gap-1.5">
                       <span className="text-[10px] bg-accent/10 text-accent font-mono px-1.5 py-0.5 rounded border border-accent/20">
                         Ruta
                       </span>
-                      Parámetros de ruta detectados ({pathTokens.length})
+                      Parámetros de ruta en URL ({pathTokens.total})
                     </span>
                   </div>
                   <div className="space-y-1.5">
-                    {pathTokens.map(token => (
+                    {/* Unmapped tokens ({param_...} or {token}) */}
+                    {pathTokens.unmapped.map(token => (
                       <div
                         key={token}
                         className="flex items-center gap-2 bg-surface p-1.5 rounded border border-border"
@@ -245,6 +253,32 @@ export function HttpInspector({
                               key={upNode.id}
                               node={upNode}
                               customLabel="Seleccionar campo"
+                              onSelectValue={(val) => {
+                                const nextUrl = endpoint.replace(token, val);
+                                updateNodeData('endpoint', nextUrl);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Mapped tokens ({{...}}) */}
+                    {pathTokens.mapped.map(token => (
+                      <div
+                        key={token}
+                        className="flex items-center gap-2 bg-surface p-1.5 rounded border border-accent/30 bg-accent/5"
+                      >
+                        <span className="text-xs font-mono font-semibold text-accent shrink-0 px-1.5 py-0.5 bg-surface rounded border border-accent/40" title={token}>
+                          {token}
+                        </span>
+                        <span className="text-[10px] text-emerald-600 font-medium shrink-0">Mapeado</span>
+                        <div className="flex-1 flex gap-1 items-center justify-end">
+                          {upstreamDataNodes.map(upNode => (
+                            <JsonSelectorModal
+                              key={upNode.id}
+                              node={upNode}
+                              customLabel="Cambiar"
                               onSelectValue={(val) => {
                                 const nextUrl = endpoint.replace(token, val);
                                 updateNodeData('endpoint', nextUrl);
@@ -270,6 +304,28 @@ export function HttpInspector({
                 <option value="XML">XML</option>
                 <option value="Text">Texto plano</option>
               </select>
+            </div>
+
+            <div className="space-y-1.5 pt-1">
+              <div className="flex justify-between items-center">
+                <label className="text-xs font-medium flex items-center gap-1.5">
+                  <Clock size={13} className="text-accent" />
+                  Tiempo de espera (Timeout)
+                </label>
+                <span className="text-[11px] text-muted">segundos</span>
+              </div>
+              <Input
+                type="number"
+                min={1}
+                max={600}
+                placeholder="Por defecto global (30s)"
+                value={(node.data?.timeout as string) || ''}
+                onChange={(e) => updateNodeData('timeout', e.target.value)}
+                className="h-9 text-xs font-mono"
+              />
+              <p className="text-[10px] text-muted">
+                Opcional. Deja vacío para usar el valor configurado globalmente en el sistema.
+              </p>
             </div>
           </div>
         )}

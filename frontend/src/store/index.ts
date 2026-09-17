@@ -5,6 +5,7 @@ import connectionReducer from './connectionSlice';
 import scriptReducer from './scriptSlice';
 import scheduleReducer from './scheduleSlice';
 import uiReducer from './uiSlice';
+import settingsReducer from './settingsSlice';
 
 export const store = configureStore({
   reducer: {
@@ -14,6 +15,7 @@ export const store = configureStore({
     scripts: scriptReducer,
     schedules: scheduleReducer,
     ui: uiReducer,
+    settings: settingsReducer,
   },
 });
 
