@@ -4,7 +4,7 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { config } from 'dotenv';
 import { join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { getDb, closeDb } from './db/database.js';
 import { closeAllMssqlPools } from './engine/mssql.js';
 import { stopAllSchedulerJobs } from './engine/scheduler.js';
@@ -79,7 +79,18 @@ async function start(): Promise<void> {
   await app.register(settingsRoutes, { prefix: '/api/settings' });
 
   // Health check
-  app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+  app.get('/api/health', async () => {
+    let version = '1.3.0';
+    try {
+      const pkgPath = join(process.cwd(), 'package.json');
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+        if (pkg.version) version = pkg.version;
+      }
+    } catch {}
+
+    return { status: 'ok', version, timestamp: new Date().toISOString() };
+  });
 
   // Graceful shutdown
   const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
