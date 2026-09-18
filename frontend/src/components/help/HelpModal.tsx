@@ -31,6 +31,7 @@ export function HelpModal() {
   const [activeTab, setActiveTab] = useState<'nodes' | 'syntax' | 'health' | 'shortcuts'>('nodes');
   const [healthStatus, setHealthStatus] = useState<{
     status: string;
+    version?: string;
     timestamp?: string;
     latencyMs?: number;
     checked: boolean;
@@ -48,6 +49,7 @@ export function HelpModal() {
       const data = await res.json();
       setHealthStatus({
         status: data.status || 'ok',
+        version: data.version,
         timestamp: data.timestamp || new Date().toISOString(),
         latencyMs,
         checked: true,
@@ -335,7 +337,9 @@ export function HelpModal() {
                   </div>
                   <div className="p-3 bg-bg rounded border border-border">
                     <span className="text-[10px] text-muted uppercase font-semibold block">Versión de API</span>
-                    <span className="text-sm font-mono font-bold text-fg">v1.2.0</span>
+                    <span className="text-sm font-mono font-bold text-fg">
+                      {healthStatus.version ? (healthStatus.version.startsWith('v') ? healthStatus.version : `v${healthStatus.version}`) : 'v1.3.0'}
+                    </span>
                   </div>
                   <div className="p-3 bg-bg rounded border border-border">
                     <span className="text-[10px] text-muted uppercase font-semibold block">Hora Servidor</span>
