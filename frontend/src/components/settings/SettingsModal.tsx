@@ -7,7 +7,6 @@ import {
   Globe,
   Code2,
   Sliders,
-  User,
   RotateCcw,
   Save,
   CheckCircle2,
@@ -26,7 +25,7 @@ export function SettingsModal() {
   const isOpen = useAppSelector((state) => state.ui.settingsModalOpen);
   const { settings, saving, loading } = useAppSelector((state) => state.settings);
 
-  const [activeTab, setActiveTab] = useState<'timeouts' | 'display' | 'profile'>('timeouts');
+  const [activeTab, setActiveTab] = useState<'timeouts' | 'display'>('timeouts');
   const [formData, setFormData] = useState<SystemSettings>(settings);
   const [hasChanges, setHasChanges] = useState(false);
 
@@ -126,19 +125,6 @@ export function SettingsModal() {
           >
             <Sliders size={14} />
             Visualización y Tablas
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('profile')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'profile'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <User size={14} />
-            Perfil y Usuario
           </button>
         </div>
 
@@ -279,36 +265,6 @@ export function SettingsModal() {
                 </select>
                 <p className="text-[11px] text-muted">
                   Controla la cantidad de registros renderizados en pantalla al explorar resultados de consultas SQL o archivos cargados en nodos de datos.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'profile' && (
-            <div className="space-y-4">
-              <div className="space-y-3 p-3.5 bg-bg rounded-md border border-border">
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-fg">Nombre para mostrar</label>
-                  <Input
-                    type="text"
-                    value={formData.user_display_name || ''}
-                    onChange={(e) => handleChange('user_display_name', e.target.value)}
-                    placeholder="Ej. Jose Fernandez"
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-fg">Rol o Etiqueta de usuario</label>
-                  <Input
-                    type="text"
-                    value={formData.user_role_label || ''}
-                    onChange={(e) => handleChange('user_role_label', e.target.value)}
-                    placeholder="Ej. Administrador"
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <p className="text-[11px] text-muted">
-                  Esta información se refleja en el pie de la barra lateral izquierda y en las firmas de ejecución local.
                 </p>
               </div>
             </div>
