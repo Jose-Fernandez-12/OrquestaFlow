@@ -681,6 +681,10 @@ function generateExportNode(node: any, stepNum: number, total: number, edges: an
   const format = (data.format || 'CSV').toUpperCase();
   const rawFileName = data.fileName || `exportacion_${node.id}`;
   const dataSource = data.dataSource || '';
+  const exportMode = data.exportMode || 'single';
+  const columns = Array.isArray(data.columns) ? data.columns : [];
+  const joins = Array.isArray(data.joins) ? data.joins : [];
+  const headerColor = data.headerColor || '#1E293B';
 
   lines.push(`# === [${stepNum}/${total}] Nodo: export - ${label} ===`);
   lines.push(`logger.info("[${stepNum}/${total}] Exportando datos: ${label}")`);
@@ -700,21 +704,60 @@ function generateExportNode(node: any, stepNum: number, total: number, edges: an
   }
 
   lines.push(`    import pandas as _pd`);
-  lines.push(`    ${varName}_records = normalize_for_export(${varName}_raw)`);
-  lines.push(`    ${varName}_df = _pd.DataFrame(${varName}_records)`);
 
   const fileNamePy = templateToPython(rawFileName);
-  const ext = format === 'EXCEL' || format === 'XLSX' ? '.xlsx' : '.csv';
+  const isExcel = format === 'EXCEL' || format === 'XLSX';
+  const ext = isExcel ? '.xlsx' : '.csv';
 
   lines.push(`    ${varName}_filename = str(${fileNamePy}).rstrip(".xlsx").rstrip(".csv") + "${ext}"`);
-  if (ext === '.xlsx') {
-    lines.push(`    ${varName}_df.to_excel(${varName}_filename, index=False)`);
+
+  if (exportMode === 'multi' && isExcel) {
+    const multiSheetConfig = (data.multiSheetConfig as Record<string, string>) || {};
+    const nodeIds = Object.keys(multiSheetConfig);
+    lines.push(`    with _pd.ExcelWriter(${varName}_filename, engine="openpyxl") as _writer:`);
+    if (nodeIds.length === 0) {
+      lines.push(`        _pd.DataFrame([{"Mensaje": "Sin datos"}]).to_excel(_writer, sheet_name="Datos Vacio", index=False)`);
+    } else {
+      for (const nid of nodeIds) {
+        const sheetName = (multiSheetConfig[nid] || `Hoja_${nid.substring(0, 5)}`).substring(0, 31);
+        const uVar = pyVarName(nid);
+        lines.push(`        _sheet_raw_${uVar} = context.get(${JSON.stringify(nid)}, [])`);
+        lines.push(`        _sheet_records_${uVar} = flatten_rows(_sheet_raw_${uVar})`);
+        lines.push(`        _sheet_df_${uVar} = _pd.DataFrame(_sheet_records_${uVar}) if _sheet_records_${uVar} else _pd.DataFrame([{"Mensaje": "Sin registros"}])`);
+        lines.push(`        _sheet_df_${uVar}.to_excel(_writer, sheet_name=${JSON.stringify(sheetName)}, index=False)`);
+      }
+    }
+    lines.push(`    format_excel_file(${varName}_filename, header_color=${JSON.stringify(headerColor)})`);
+    lines.push(`    ${varName}_total_records = sum(len(flatten_rows(context.get(nid, []))) for nid in ${JSON.stringify(nodeIds)})`);
+    lines.push(`    context[${JSON.stringify(node.id)}] = {"filePath": ${varName}_filename, "records": ${varName}_total_records, "success": True}`);
+    lines.push(`    logger.info(f"  Archivo guardado: {${varName}_filename} (Multi-hoja)")`);
   } else {
-    lines.push(`    ${varName}_df.to_csv(${varName}_filename, index=False, encoding="utf-8-sig")`);
+    // Single sheet mode
+    lines.push(`    ${varName}_records = process_export_data(${varName}_raw, context, columns=${JSON.stringify(columns)}, joins=${JSON.stringify(joins)})`);
+    if (columns.length > 0) {
+      const colHeaders = columns.map((c: any) => c.header).filter(Boolean);
+      lines.push(`    if len(${varName}_records) == 0:`);
+      lines.push(`        ${varName}_df = _pd.DataFrame(columns=${JSON.stringify(colHeaders)})`);
+      lines.push(`    else:`);
+      lines.push(`        ${varName}_df = _pd.DataFrame(${varName}_records)`);
+      lines.push(`        _cols_order = [c for c in ${JSON.stringify(colHeaders)} if c in ${varName}_df.columns]`);
+      lines.push(`        if _cols_order:`);
+      lines.push(`            ${varName}_df = ${varName}_df[_cols_order]`);
+    } else {
+      lines.push(`    ${varName}_df = _pd.DataFrame(${varName}_records)`);
+    }
+
+    if (isExcel) {
+      lines.push(`    ${varName}_df.to_excel(${varName}_filename, index=False, engine="openpyxl")`);
+      lines.push(`    format_excel_file(${varName}_filename, header_color=${JSON.stringify(headerColor)})`);
+    } else {
+      lines.push(`    ${varName}_df.to_csv(${varName}_filename, index=False, encoding="utf-8-sig")`);
+    }
+
+    lines.push(`    context[${JSON.stringify(node.id)}] = {"filePath": ${varName}_filename, "records": len(${varName}_df), "success": True}`);
+    lines.push(`    logger.info(f"  Archivo guardado: {${varName}_filename} ({len(${varName}_df)} registros)")`);
   }
 
-  lines.push(`    context[${JSON.stringify(node.id)}] = {"filePath": ${varName}_filename, "records": len(${varName}_df), "success": True}`);
-  lines.push(`    logger.info(f"  Archivo guardado: {${varName}_filename} ({len(${varName}_df)} registros)")`);
   lines.push(`except Exception as e:`);
   lines.push(`    logger.error(f"  ERROR en export '${label}': {e}")`);
   lines.push(`    sys.exit(1)`);
@@ -1138,39 +1181,36 @@ except ImportError:
   }
 
   // Helper functions
-  parts.push(`def resolve_template(context, template_str):
+  parts.push(`def resolve_path(context, path_str):
+    """Obtiene un valor anidado dentro de un contexto usando notacion de puntos."""
+    if not path_str or not isinstance(path_str, str):
+        return None
+    keys = path_str.strip().split(".")
+    val = context
+    for k in keys:
+        if isinstance(val, dict):
+            val = val.get(k)
+        elif isinstance(val, list) and k.isdigit():
+            idx = int(k)
+            val = val[idx] if 0 <= idx < len(val) else None
+        else:
+            return None
+    return val
+
+
+def resolve_template(context, template_str):
     """Resuelve expresiones {{nodeId.field}} usando el contexto del flujo."""
     if not isinstance(template_str, str):
         return template_str
 
     m_exact = re.fullmatch(r'\\{\\{([^}]+)\\}\\}', template_str.strip())
     if m_exact:
-        keys = m_exact.group(1).strip().split(".")
-        val = context
-        for k in keys:
-            if isinstance(val, dict):
-                val = val.get(k)
-            elif isinstance(val, list) and k.isdigit():
-                idx = int(k)
-                val = val[idx] if 0 <= idx < len(val) else None
-            else:
-                val = None
-                break
+        val = resolve_path(context, m_exact.group(1))
         if val is not None:
             return val
 
     def replacer(match):
-        path = match.group(1).strip()
-        keys = path.split(".")
-        val = context
-        for k in keys:
-            if isinstance(val, dict):
-                val = val.get(k)
-            elif isinstance(val, list) and k.isdigit():
-                idx = int(k)
-                val = val[idx] if 0 <= idx < len(val) else None
-            else:
-                return match.group(0)
+        val = resolve_path(context, match.group(1))
         if val is None:
             return ""
         return json.dumps(val) if isinstance(val, (dict, list)) else str(val)
@@ -1178,28 +1218,205 @@ except ImportError:
     return re.sub(r'\\{\\{([^}]+)\\}\\}', replacer, template_str)
 
 
-def normalize_for_export(data):
-    """Aplana respuestas de APIs o listas anidadas para generar DataFrames limpios."""
+def flatten_rows(data):
+    """Aplana estructuras anidadas de respuestas (data, rows, items) replicando el motor de OrquestaFlow."""
     if data is None:
         return []
     if not isinstance(data, list):
-        data = [data]
-    records = []
+        if isinstance(data, dict):
+            for key in ['rows', 'data', 'items', 'records', 'result', 'results']:
+                if key in data and isinstance(data[key], list):
+                    return flatten_rows(data[key])
+            if 'data' in data and isinstance(data['data'], dict) and data['data']:
+                return [data['data']]
+            for val in data.values():
+                if isinstance(val, list):
+                    return flatten_rows(val)
+            return [data]
+        return [{"valor": data}]
+
+    result = []
     for item in data:
+        if item is None:
+            continue
         if isinstance(item, list):
-            records.extend(normalize_for_export(item))
+            result.extend(flatten_rows(item))
         elif isinstance(item, dict):
             found_inner = False
-            for key in ['data', 'items', 'records', 'rows', 'result', 'results']:
-                if key in item and isinstance(item[key], list) and len(item[key]) > 0:
-                    records.extend(normalize_for_export(item[key]))
+            for key in ['data', 'rows', 'items', 'records', 'result', 'results']:
+                if key in item and isinstance(item[key], list):
+                    result.extend(flatten_rows(item[key]))
                     found_inner = True
                     break
             if not found_inner:
-                records.append(item)
+                if 'data' in item and isinstance(item['data'], dict) and item['data']:
+                    result.append(dict(item['data']))
+                else:
+                    result.append(item)
         else:
-            records.append({"valor": item})
-    return records
+            result.append({"valor": item})
+    return result
+
+
+normalize_for_export = flatten_rows
+
+
+def process_export_data(raw_data, context, columns=None, joins=None):
+    """Procesa, une (joins) y mapea columnas para exportacion identico al motor OrquestaFlow."""
+    base_data_wrapped = []
+    if isinstance(raw_data, list):
+        for idx, root_item in enumerate(raw_data):
+            flat = flatten_rows(root_item)
+            for it in flat:
+                base_data_wrapped.append({"item": it, "rootIndex": idx})
+    else:
+        flat = flatten_rows(raw_data)
+        for it in flat:
+            base_data_wrapped.append({"item": it, "rootIndex": 0})
+
+    base_data = [w["item"] for w in base_data_wrapped]
+
+    # Pre-calcular indices de joins O(1)
+    join_lookups = {}
+    if joins and isinstance(joins, list):
+        for j in joins:
+            node_id = j.get("nodeId")
+            local_key = j.get("localKey")
+            foreign_key = j.get("foreignKey")
+            if node_id and local_key and foreign_key:
+                target_data = context.get(node_id)
+                flat_target = flatten_rows(target_data)
+                if flat_target:
+                    lookup = {}
+                    fk_lower = foreign_key.lower()
+                    for r in flat_target:
+                        if isinstance(r, dict):
+                            actual_key = next((k for k in r.keys() if k.lower() == fk_lower), foreign_key)
+                            val = r.get(actual_key)
+                            if val is not None:
+                                lookup[str(val)] = r
+                    join_lookups[node_id] = {
+                        "lookup": lookup,
+                        "localKey": local_key,
+                        "foreignKey": foreign_key
+                    }
+
+    export_data = base_data
+    if columns and isinstance(columns, list) and len(columns) > 0 and isinstance(base_data, list):
+        export_data = []
+        for item_idx, wrapped in enumerate(base_data_wrapped):
+            item = wrapped["item"]
+            row = {}
+            # Coincidencias de joins para este item
+            joined_matches = {}
+            for j_node_id, j_info in join_lookups.items():
+                lk_lower = j_info["localKey"].lower()
+                actual_lk = next((k for k in item.keys() if k.lower() == lk_lower), j_info["localKey"]) if isinstance(item, dict) else None
+                local_val = item.get(actual_lk) if actual_lk and isinstance(item, dict) else None
+                if local_val is not None:
+                    matched = j_info["lookup"].get(str(local_val))
+                    if matched:
+                        joined_matches[j_node_id] = matched
+
+            for col in columns:
+                c_header = col.get("header")
+                c_key = col.get("key")
+                if not c_header or not c_key:
+                    continue
+                if "{{" in c_key and "}}" in c_key:
+                    iter_ctx = {**context, "_item": item, "_index": item_idx}
+                    val = resolve_template(iter_ctx, c_key)
+                else:
+                    # 1. Resolver clave por puntos en item
+                    val = None
+                    if isinstance(item, dict):
+                        val = item.get(c_key)
+                        if val is None:
+                            ck_lower = c_key.lower()
+                            actual_k = next((k for k in item.keys() if k.lower() == ck_lower), None)
+                            if actual_k:
+                                val = item.get(actual_k)
+                        if val is None and "." in c_key:
+                            curr = item
+                            for part in c_key.split("."):
+                                if not isinstance(curr, dict):
+                                    curr = None
+                                    break
+                                curr = curr.get(part)
+                            val = curr
+
+                    # 2. Buscar en filas coincidentes por joins
+                    if val is None:
+                        for m_row in joined_matches.values():
+                            if isinstance(m_row, dict):
+                                if c_key in m_row:
+                                    val = m_row[c_key]
+                                    break
+                                ck_lower = c_key.lower()
+                                actual_k = next((k for k in m_row.keys() if k.lower() == ck_lower), None)
+                                if actual_k:
+                                    val = m_row[actual_k]
+                                    break
+
+                    # 3. Fallback: resolver en contexto global
+                    if val is None:
+                        val = resolve_path(context, c_key)
+
+                row[c_header] = val if val is not None else ""
+            export_data.append(row)
+
+    elif join_lookups and isinstance(base_data, list):
+        export_data = []
+        for item in base_data:
+            merged = dict(item) if isinstance(item, dict) else {"valor": item}
+            for j_node_id, j_info in join_lookups.items():
+                lk_lower = j_info["localKey"].lower()
+                actual_lk = next((k for k in item.keys() if k.lower() == lk_lower), j_info["localKey"]) if isinstance(item, dict) else None
+                local_val = item.get(actual_lk) if actual_lk and isinstance(item, dict) else None
+                if local_val is not None:
+                    matched = j_info["lookup"].get(str(local_val))
+                    if matched and isinstance(matched, dict):
+                        merged.update(matched)
+            export_data.append(merged)
+
+    return export_data
+
+
+def format_excel_file(file_path, header_color=None):
+    """Aplica formato visual profesional (colores de cabecera, fuentes, alturas y anchos) identico a OrquestaFlow."""
+    try:
+        import openpyxl
+        from openpyxl.styles import PatternFill, Font, Alignment
+        from openpyxl.utils import get_column_letter
+
+        wb = openpyxl.load_workbook(file_path)
+        raw_color = (header_color or "1E293B").lstrip("#").upper()
+        if len(raw_color) == 3:
+            raw_color = "".join(c + c for c in raw_color)
+        if not re.match(r'^[0-9A-F]{6}$', raw_color):
+            raw_color = "1E293B"
+
+        fill = PatternFill(start_color=raw_color, end_color=raw_color, fill_type="solid")
+        font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        alignment = Alignment(vertical="center", horizontal="left")
+
+        for ws in wb.worksheets:
+            if ws.max_row >= 1:
+                ws.row_dimensions[1].height = 24
+                for col_idx, cell in enumerate(ws[1], start=1):
+                    cell.fill = fill
+                    cell.font = font
+                    cell.alignment = alignment
+                    col_letter = get_column_letter(col_idx)
+                    header_val = str(cell.value or "")
+                    ws.column_dimensions[col_letter].width = max(len(header_val) + 4, 16)
+
+                for row_idx in range(2, ws.max_row + 1):
+                    ws.row_dimensions[row_idx].height = 18
+
+        wb.save(file_path)
+    except Exception as e:
+        logger.warning(f"No se pudo aplicar formato visual al Excel: {e}")
 `);
 
   // Main function
