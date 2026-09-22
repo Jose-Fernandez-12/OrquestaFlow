@@ -116,7 +116,7 @@ function FlowCanvas() {
   const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
 
   // Active node for debugging inspection (persisted so modal doesn't flicker/unmount while stepping)
-  const activeDebugNodeId = pausedNodeIds[0] || selectedNodeId;
+  const activeDebugNodeId = pausedNodeIds.length > 0 ? pausedNodeIds[pausedNodeIds.length - 1] : selectedNodeId;
   const [persistedDebugNodeId, setPersistedDebugNodeId] = useState<string | null>(null);
 
   useEffect(() => {
