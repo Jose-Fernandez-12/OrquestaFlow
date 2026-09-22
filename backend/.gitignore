@@ -6,3 +6,5 @@ __pycache__/
 test*.py
 temp_check.py
 src/test_transpile.ts
+src/scan_secrets.ts
+src/check_queries.ts

@@ -26,11 +26,19 @@ export interface TranspilerContext {
   queries: Record<string, TranspilerQueryInfo>;
 }
 
+export interface TranspilerSqlFile {
+  fileName: string;
+  queryName: string;
+  nodeLabel: string;
+  sql: string;
+}
+
 export interface TranspilerOutput {
   script: string;
   requirementsTxt: string;
   envExample: string;
   readmeMd: string;
+  sqlFiles: TranspilerSqlFile[];
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +72,6 @@ function buildTopologicalOrder(nodes: any[], edges: any[]): any[] {
     }
   });
 
-  // Handle forEach sub-graph nodes
   const forEachNodes = nodes.filter(n => n.type === 'forEach');
   const forEachManagedNodeIds = new Set<string>();
 
@@ -88,7 +95,6 @@ function buildTopologicalOrder(nodes: any[], edges: any[]): any[] {
     }
   }
 
-  // Kahn BFS
   const queue: string[] = [];
   nodes.forEach(n => {
     if (inDegree[n.id] === 0 && !forEachManagedNodeIds.has(n.id)) {
@@ -450,7 +456,16 @@ function generateHttpNode(node: any, stepNum: number, total: number, edges: any[
   return lines.join('\n');
 }
 
-function generateQueryNode(node: any, stepNum: number, total: number, queryInfo: TranspilerQueryInfo | undefined, edges: any[], nodes: any[]): string {
+function generateQueryNode(
+  node: any,
+  stepNum: number,
+  total: number,
+  queryInfo: TranspilerQueryInfo | undefined,
+  edges: any[],
+  nodes: any[],
+  flowName: string,
+  sqlFiles: TranspilerSqlFile[]
+): string {
   const lines: string[] = [];
   const data = node.data || {};
   const label = data.label || node.id;
@@ -459,12 +474,40 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
   lines.push(`# === [${stepNum}/${total}] Nodo: query - ${label} ===`);
   lines.push(`logger.info("[${stepNum}/${total}] Ejecutando consulta SQL: ${label}")`);
 
-  if (!queryInfo) {
-    lines.push(`# ADVERTENCIA: No se encontro informacion de la query configurada en este nodo.`);
+  if (!queryInfo || !queryInfo.sql_text) {
+    lines.push(`# ADVERTENCIA: No se encontro informacion de la consulta SQL configurada en este nodo.`);
     lines.push(`context[${JSON.stringify(node.id)}] = []`);
     lines.push('');
     return lines.join('\n');
   }
+
+  // Create individual SQL file for this query in the queries/ directory
+  const querySlug = (label || queryInfo.name || 'query')
+    .toLowerCase()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
+  const sqlFileName = `${String(stepNum).padStart(2, '0')}_${querySlug}.sql`;
+
+  const connSummary = (queryInfo.connections || [])
+    .map(c => `${c.name} (${c.database_name} @ ${c.host})`)
+    .join(', ') || 'Default';
+
+  sqlFiles.push({
+    fileName: sqlFileName,
+    queryName: queryInfo.name || label,
+    nodeLabel: label,
+    sql: `-- ==============================================================================
+-- Flujo: ${flowName}
+-- Paso: [${stepNum}/${total}]
+-- Nodo: ${label}
+-- Consulta: ${queryInfo.name}
+-- Base de Datos: ${connSummary}
+-- Generado por OrquestaFlow
+-- ==============================================================================
+
+${queryInfo.sql_text}
+`
+  });
 
   let queryParamMapping: Record<string, string> = {};
   if (data.queryParams && data.queryParams.trim()) {
@@ -502,31 +545,56 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
     }
   }
 
-  const pythonSql = queryInfo.sql_text.replace(/#param_([a-zA-Z_][a-zA-Z0-9_]*)/g, '?');
+  // Load SQL query from queries/ folder with fallback to inlined SQL
+  lines.push(`# Cargar consulta SQL (${queryInfo.name}) desde archivo queries/${sqlFileName} o fallback`);
+  lines.push(`_sql_file = os.path.join(os.path.dirname(__file__), "queries", "${sqlFileName}")`);
+  lines.push(`if os.path.exists(_sql_file):`);
+  lines.push(`    with open(_sql_file, "r", encoding="utf-8") as _f:`);
+  lines.push(`        _raw_sql = _f.read()`);
+  lines.push(`else:`);
+  lines.push(`    _raw_sql = ${JSON.stringify(queryInfo.sql_text)}`);
+  lines.push(`_sql_exec = re.sub(r'#param_[a-zA-Z_][a-zA-Z0-9_]*\\b', '?', _raw_sql)`);
 
-  if (queryInfo.connections.length === 1) {
-    const conn = queryInfo.connections[0];
+  const connections = queryInfo.connections && queryInfo.connections.length > 0
+    ? queryInfo.connections
+    : [{
+      id: 'default',
+      name: 'SQL Server',
+      host: 'localhost',
+      database_name: '',
+      port: 1433,
+      env_credential_key: 'SQLSERVER',
+      driver: 'ODBC Driver 17 for SQL Server'
+    }];
+
+  if (connections.length === 1) {
+    const conn = connections[0];
     const envKey = (conn.env_credential_key || 'SQLSERVER').toUpperCase();
     const port = conn.port || 1433;
     const driver = conn.driver || 'ODBC Driver 17 for SQL Server';
 
-    lines.push(`${varName}_conn_str = (`);
-    lines.push(`    "DRIVER={${driver}};"`);
-    lines.push(`    "SERVER=${conn.host},${port};"`);
-    lines.push(`    "DATABASE=${conn.database_name};"`);
-    lines.push(`    f"UID={os.getenv('DB_USER_${envKey}', os.getenv('DB_USER_DEFAULT', ''))};"`);
-    lines.push(`    f"PWD={os.getenv('DB_PASSWORD_${envKey}', os.getenv('DB_PASSWORD_DEFAULT', ''))}"`);
+    lines.push(`# Configuracion de conexion para: ${conn.name} (${envKey})`);
+    lines.push(`_driver_${varName} = os.getenv("DB_DRIVER_${envKey}", "${driver}")`);
+    lines.push(`_host_${varName} = os.getenv("DB_HOST_${envKey}", "${conn.host}")`);
+    lines.push(`_port_${varName} = os.getenv("DB_PORT_${envKey}", "${port}")`);
+    lines.push(`_db_${varName} = os.getenv("DB_NAME_${envKey}", "${conn.database_name}")`);
+    lines.push(`_user_${varName} = os.getenv("DB_USER_${envKey}", os.getenv("DB_USER_DEFAULT", ""))`);
+    lines.push(`_pwd_${varName} = os.getenv("DB_PASSWORD_${envKey}", os.getenv("DB_PASSWORD_DEFAULT", ""))`);
+    lines.push(`${varName}_conn_str = os.getenv(`);
+    lines.push(`    "DB_CONN_STR_${envKey}",`);
+    lines.push(`    f"DRIVER={{{_driver_${varName}}}};SERVER={_host_${varName}},{_port_${varName}};DATABASE={_db_${varName}};UID={_user_${varName}};PWD={_pwd_${varName}}"`);
     lines.push(`)`);
+
     lines.push(`try:`);
     lines.push(`    import pyodbc`);
     lines.push(`    ${varName}_db = pyodbc.connect(${varName}_conn_str)`);
     lines.push(`    ${varName}_cursor = ${varName}_db.cursor()`);
 
     if (sqlParams.length === 0) {
-      lines.push(`    ${varName}_cursor.execute(${JSON.stringify(pythonSql)})`);
+      lines.push(`    ${varName}_cursor.execute(_sql_exec)`);
     } else {
       const paramList = `[${sqlParams.map(p => `${varName}_sql_params[${JSON.stringify(p)}]`).join(', ')}]`;
-      lines.push(`    ${varName}_cursor.execute(${JSON.stringify(pythonSql)}, ${paramList})`);
+      lines.push(`    ${varName}_cursor.execute(_sql_exec, ${paramList})`);
     }
 
     lines.push(`    ${varName}_cols = [d[0] for d in ${varName}_cursor.description]`);
@@ -539,7 +607,7 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
     }
 
     lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_rows`);
-    lines.push(`    logger.info(f"  OK - {len(${varName}_rows)} filas")`);
+    lines.push(`    logger.info(f"  OK - {len(${varName}_rows)} filas obtenidas")`);
     lines.push(`    ${varName}_db.close()`);
     lines.push(`except Exception as e:`);
     lines.push(`    logger.error(f"  ERROR en query '${label}': {e}")`);
@@ -547,29 +615,32 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
   } else {
     // Multi-connection
     lines.push(`${varName}_all_rows = []`);
-    for (const conn of queryInfo.connections) {
+    for (const conn of connections) {
       const envKey = (conn.env_credential_key || 'SQLSERVER').toUpperCase();
       const port = conn.port || 1433;
       const driver = conn.driver || 'ODBC Driver 17 for SQL Server';
 
-      lines.push(`# Conexion: ${conn.name} (${conn.host})`);
+      lines.push(`# Conexion: ${conn.name} (${envKey})`);
       lines.push(`try:`);
       lines.push(`    import pyodbc`);
-      lines.push(`    _conn_str = (`);
-      lines.push(`        "DRIVER={${driver}};"`);
-      lines.push(`        "SERVER=${conn.host},${port};"`);
-      lines.push(`        "DATABASE=${conn.database_name};"`);
-      lines.push(`        f"UID={os.getenv('DB_USER_${envKey}', os.getenv('DB_USER_DEFAULT', ''))};"`);
-      lines.push(`        f"PWD={os.getenv('DB_PASSWORD_${envKey}', os.getenv('DB_PASSWORD_DEFAULT', ''))}"`);
+      lines.push(`    _driver = os.getenv("DB_DRIVER_${envKey}", "${driver}")`);
+      lines.push(`    _host = os.getenv("DB_HOST_${envKey}", "${conn.host}")`);
+      lines.push(`    _port = os.getenv("DB_PORT_${envKey}", "${port}")`);
+      lines.push(`    _db_name = os.getenv("DB_NAME_${envKey}", "${conn.database_name}")`);
+      lines.push(`    _user = os.getenv("DB_USER_${envKey}", os.getenv("DB_USER_DEFAULT", ""))`);
+      lines.push(`    _pwd = os.getenv("DB_PASSWORD_${envKey}", os.getenv("DB_PASSWORD_DEFAULT", ""))`);
+      lines.push(`    _conn_str = os.getenv(`);
+      lines.push(`        "DB_CONN_STR_${envKey}",`);
+      lines.push(`        f"DRIVER={{{_driver}}};SERVER={_host},{_port};DATABASE={_db_name};UID={_user};PWD={_pwd}"`);
       lines.push(`    )`);
       lines.push(`    _db = pyodbc.connect(_conn_str)`);
       lines.push(`    _cursor = _db.cursor()`);
 
       if (sqlParams.length === 0) {
-        lines.push(`    _cursor.execute(${JSON.stringify(pythonSql)})`);
+        lines.push(`    _cursor.execute(_sql_exec)`);
       } else {
         const paramList = `[${sqlParams.map(p => `${varName}_sql_params[${JSON.stringify(p)}]`).join(', ')}]`;
-        lines.push(`    _cursor.execute(${JSON.stringify(pythonSql)}, ${paramList})`);
+        lines.push(`    _cursor.execute(_sql_exec, ${paramList})`);
       }
 
       lines.push(`    _cols = [d[0] for d in _cursor.description]`);
@@ -758,7 +829,9 @@ function generateForEachNode(
   subgraphNodes: any[],
   edges: any[],
   nodes: any[],
-  ctx: TranspilerContext
+  ctx: TranspilerContext,
+  flowName: string,
+  sqlFiles: TranspilerSqlFile[]
 ): string {
   const lines: string[] = [];
   const data = node.data || {};
@@ -802,7 +875,7 @@ function generateForEachNode(
         subCode = generateHttpNode(subNode, subStep as any, total, edges, nodes);
         break;
       case 'query':
-        subCode = generateQueryNode(subNode, subStep as any, total, ctx.queries[subNode.data?.queryId], edges, nodes);
+        subCode = generateQueryNode(subNode, subStep as any, total, ctx.queries[subNode.data?.queryId], edges, nodes, flowName, sqlFiles);
         break;
       case 'export':
         subCode = generateExportNode(subNode, subStep as any, total, edges, nodes);
@@ -864,6 +937,7 @@ export function transpileFlowToPython(
 ): TranspilerOutput {
   const nodes: any[] = definition.nodes || [];
   const edges: any[] = definition.edges || [];
+  const sqlFiles: TranspilerSqlFile[] = [];
 
   const slug = flowName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
 
@@ -873,7 +947,8 @@ export function transpileFlowToPython(
       script: emptyScript,
       requirementsTxt: 'python-dotenv>=1.0.0\n',
       envExample: '# Sin variables requeridas\n',
-      readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.`
+      readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.`,
+      sqlFiles: []
     };
   }
 
@@ -925,7 +1000,7 @@ export function transpileFlowToPython(
   }
   const requirementsTxt = reqs.join('\n') + '\n';
 
-  // 2. Build .env.example
+  // 2. Build .env.example with complete connection settings
   const envLines: string[] = [
     `# ==============================================================================`,
     `# Variables de Entorno para el Flujo: ${flowName}`,
@@ -935,23 +1010,54 @@ export function transpileFlowToPython(
   ];
 
   if (needsPyodbc) {
-    envLines.push('# Credenciales de Base de Datos');
+    envLines.push('# ==============================================================================');
+    envLines.push('# Configuracion de Bases de Datos (SQL Server)');
+    envLines.push('# ==============================================================================');
     const seenKeys = new Set<string>();
-    Object.values(ctx.queries).flatMap(q => q.connections).forEach(c => {
-      const key = (c.env_credential_key || 'SQLSERVER').toUpperCase();
-      if (!seenKeys.has(key)) {
-        seenKeys.add(key);
-        envLines.push(`DB_USER_${key}=`);
-        envLines.push(`DB_PASSWORD_${key}=`);
+
+    for (const q of Object.values(ctx.queries)) {
+      for (const c of (q.connections || [])) {
+        const key = (c.env_credential_key || 'SQLSERVER').toUpperCase();
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          const driver = c.driver || 'ODBC Driver 17 for SQL Server';
+          const port = c.port || 1433;
+          envLines.push(`# Conexion: ${c.name} (Clave: ${key})`);
+          envLines.push(`DB_HOST_${key}=${c.host}`);
+          envLines.push(`DB_NAME_${key}=${c.database_name}`);
+          envLines.push(`DB_PORT_${key}=${port}`);
+          envLines.push(`DB_DRIVER_${key}=${driver}`);
+          envLines.push(`DB_USER_${key}=`);
+          envLines.push(`DB_PASSWORD_${key}=`);
+          envLines.push(`# Cadena de conexion completa opcional (si se define, tiene prioridad sobre las variables anteriores):`);
+          envLines.push(`DB_CONN_STR_${key}=DRIVER={${driver}};SERVER=${c.host},${port};DATABASE=${c.database_name};UID=;PWD=`);
+          envLines.push('');
+        }
       }
-    });
+    }
+
+    if (seenKeys.size === 0) {
+      envLines.push('# Conexion SQL Server por defecto');
+      envLines.push('DB_HOST_SQLSERVER=localhost');
+      envLines.push('DB_NAME_SQLSERVER=');
+      envLines.push('DB_PORT_SQLSERVER=1433');
+      envLines.push('DB_DRIVER_SQLSERVER=ODBC Driver 17 for SQL Server');
+      envLines.push('DB_USER_SQLSERVER=');
+      envLines.push('DB_PASSWORD_SQLSERVER=');
+      envLines.push('DB_CONN_STR_SQLSERVER=');
+      envLines.push('');
+    }
+
+    envLines.push('# Credenciales genericas de respaldo:');
     envLines.push('DB_USER_DEFAULT=');
     envLines.push('DB_PASSWORD_DEFAULT=');
     envLines.push('');
   }
 
   if (needsRequests) {
-    envLines.push('# Autenticacion HTTP (si aplica)');
+    envLines.push('# ==============================================================================');
+    envLines.push('# Autenticacion HTTP (Tokens / Basic Auth)');
+    envLines.push('# ==============================================================================');
     envLines.push('HTTP_BEARER_TOKEN=');
     envLines.push('HTTP_BASIC_USER=');
     envLines.push('HTTP_BASIC_PASSWORD=');
@@ -960,7 +1066,9 @@ export function transpileFlowToPython(
 
   const fileSourceNodes = nodes.filter(n => ['dataSource', 'fileSource'].includes(n.type) && n.data?.mode !== 'merge');
   if (fileSourceNodes.length > 0) {
-    envLines.push('# Rutas de archivos para nodos de datos');
+    envLines.push('# ==============================================================================');
+    envLines.push('# Rutas de archivos locales para nodos de datos');
+    envLines.push('# ==============================================================================');
     for (const fsNode of fileSourceNodes) {
       const label = fsNode.data?.label || fsNode.id;
       const envKey = label.toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_]/g, '');
@@ -970,79 +1078,7 @@ export function transpileFlowToPython(
   }
   const envExample = envLines.join('\n');
 
-  // 3. Build README.md
-  const readmeLines: string[] = [
-    `# Flujo: ${flowName}`,
-    '',
-    `Script en Python generado automaticamente por **OrquestaFlow** el ${now}.`,
-    '',
-    `## Contenido del Paquete`,
-    `- \`${slug}_flow.py\`: Script principal ejecutable que corre el flujo de forma autonoma.`,
-    `- \`flow.json\`: Definicion completa del flujo (nodos, conexiones y metadatos).`,
-    `- \`requirements.txt\`: Lista de dependencias necesarias.`,
-    `- \`.env.example\`: Plantilla de variables de entorno y credenciales requeridas.`,
-    '',
-    `## Requisitos Previos`,
-    `- Python 3.9 o superior`,
-    needsPyodbc ? `- [ODBC Driver 17 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) (o superior) instalado en el sistema` : '',
-    '',
-    `## Instalacion y Configuracion`,
-    '',
-    `1. **Crear y activar un entorno virtual (recomendado):**`,
-    '   ```bash',
-    '   # En Windows:',
-    '   python -m venv venv',
-    '   .\\venv\\Scripts\\activate',
-    '',
-    '   # En Linux / macOS:',
-    '   python3 -m venv venv',
-    '   source venv/bin/activate',
-    '   ```',
-    '',
-    `2. **Instalar dependencias:**`,
-    '   ```bash',
-    '   pip install -r requirements.txt',
-    '   ```',
-    '',
-    `3. **Configurar credenciales:**`,
-    '   Copia el archivo `.env.example` a `.env`:',
-    '   ```bash',
-    '   # En Windows:',
-    '   copy .env.example .env',
-    '',
-    '   # En Linux / macOS:',
-    '   cp .env.example .env',
-    '   ```',
-    '   Abre el archivo `.env` y asigna tus usuarios, contrasenas y tokens correspondientes.',
-    '',
-    `## Ejecucion`,
-    '',
-    '```bash',
-    `python ${slug}_flow.py`,
-    '```',
-    ''
-  ];
-
-  if (fileSourceNodes.length > 0) {
-    readmeLines.push(
-      'Si el flujo utiliza archivos locales, puedes pasar las rutas como argumentos CLI:',
-      '```bash',
-      `python ${slug}_flow.py "C:\\ruta\\al\\archivo_1.xlsx"`,
-      '```',
-      ''
-    );
-  }
-
-  readmeLines.push('## Estructura de Pasos del Flujo', '');
-  readmeLines.push('| Paso | Tipo de Nodo | Etiqueta |');
-  readmeLines.push('|---|---|---|');
-  orderedNodes.forEach((n, idx) => {
-    readmeLines.push(`| ${idx + 1} | \`${n.type}\` | ${n.data?.label || n.id} |`);
-  });
-  readmeLines.push('');
-  const readmeMd = readmeLines.filter(line => line !== undefined).join('\n');
-
-  // 4. Build Script
+  // 3. Build Script code (collects sqlFiles along the way)
   const parts: string[] = [];
 
   parts.push(`#!/usr/bin/env python3`);
@@ -1093,7 +1129,6 @@ except ImportError:
     if not isinstance(template_str, str):
         return template_str
 
-    # Si es exactamente una sola referencia, devolver el objeto nativo directamente
     m_exact = re.fullmatch(r'\\{\\{([^}]+)\\}\\}', template_str.strip())
     if m_exact:
         keys = m_exact.group(1).strip().split(".")
@@ -1175,7 +1210,7 @@ def normalize_for_export(data):
         code = generateHttpNode(node, step, total, edges, nodes);
         break;
       case 'query':
-        code = generateQueryNode(node, step, total, ctx.queries[node.data?.queryId], edges, nodes);
+        code = generateQueryNode(node, step, total, ctx.queries[node.data?.queryId], edges, nodes, flowName, sqlFiles);
         break;
       case 'export':
         code = generateExportNode(node, step, total, edges, nodes);
@@ -1193,7 +1228,8 @@ def normalize_for_export(data):
         code = generateForEachNode(
           node, step, total,
           forEachSubgraphMap[node.id] || [],
-          edges, nodes, ctx
+          edges, nodes, ctx,
+          flowName, sqlFiles
         );
         break;
       case 'forEachEnd':
@@ -1218,10 +1254,115 @@ def normalize_for_export(data):
   parts.push(`    run_flow()`);
   parts.push(``);
 
+  // 4. Build README.md
+  const readmeLines: string[] = [
+    `# Flujo: ${flowName}`,
+    '',
+    `Script en Python generado automaticamente por **OrquestaFlow** el ${now}.`,
+    '',
+    `## Contenido del Paquete`,
+    `- \`${slug}_flow.py\`: Script principal ejecutable que corre el flujo de forma autonoma.`,
+    `- \`flow.json\`: Definicion completa del flujo (nodos, conexiones y metadatos).`,
+    `- \`requirements.txt\`: Lista de dependencias necesarias.`,
+    `- \`.env.example\`: Plantilla con variables de entorno, hosts y cadenas de conexion de base de datos.`,
+  ];
+
+  if (sqlFiles.length > 0) {
+    readmeLines.push(`- \`queries/\`: Carpeta con los archivos \`.sql\` de cada consulta a base de datos ejecutada por el flujo.`);
+  }
+
+  readmeLines.push(
+    '',
+    `## Requisitos Previos`,
+    `- Python 3.9 o superior`,
+    needsPyodbc ? `- [ODBC Driver 17 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) (o superior) instalado en el sistema` : '',
+    '',
+    `## Instalacion y Configuracion`,
+    '',
+    `1. **Crear y activar un entorno virtual (recomendado):**`,
+    '   ```bash',
+    '   # En Windows:',
+    '   python -m venv venv',
+    '   .\\venv\\Scripts\\activate',
+    '',
+    '   # En Linux / macOS:',
+    '   python3 -m venv venv',
+    '   source venv/bin/activate',
+    '   ```',
+    '',
+    `2. **Instalar dependencias:**`,
+    '   ```bash',
+    '   pip install -r requirements.txt',
+    '   ```',
+    '',
+    `3. **Configurar variables de entorno y base de datos:**`,
+    '   Copia el archivo `.env.example` a `.env`:',
+    '   ```bash',
+    '   # En Windows:',
+    '   copy .env.example .env',
+    '',
+    '   # En Linux / macOS:',
+    '   cp .env.example .env',
+    '   ```',
+    '   Abre el archivo `.env` para ajustar los servidores (`DB_HOST_*`), nombres de BD (`DB_NAME_*`), usuarios y contrasenas.',
+    '',
+    `## Ejecucion`,
+    '',
+    '```bash',
+    `python ${slug}_flow.py`,
+    '```',
+    ''
+  );
+
+  if (sqlFiles.length > 0) {
+    readmeLines.push(
+      '## Consultas SQL del Flujo',
+      '',
+      'Las consultas ejecutadas por los nodos SQL se encuentran desacopladas en la carpeta `queries/`:',
+      '',
+      '| Archivo | Consulta | Nodo del Flujo |',
+      '|---|---|---|'
+    );
+    sqlFiles.forEach(sf => {
+      readmeLines.push(`| \`queries/${sf.fileName}\` | ${sf.queryName} | ${sf.nodeLabel} |`);
+    });
+    readmeLines.push('');
+  } else {
+    readmeLines.push(
+      '## Origen de los Datos',
+      '',
+      'Este flujo no contiene nodos de tipo consulta SQL directa (obtiene o procesa datos a traves de peticiones HTTP, APIs externas o listas de datos estaticas).',
+      ''
+    );
+  }
+
+  if (fileSourceNodes.length > 0) {
+    readmeLines.push(
+      '## Carga de Archivos Locales',
+      '',
+      'Puedes pasar las rutas de archivos como argumentos de linea de comandos:',
+      '```bash',
+      `python ${slug}_flow.py "C:\\ruta\\al\\archivo_1.xlsx"`,
+      '```',
+      ''
+    );
+  }
+
+  readmeLines.push('## Estructura de Pasos del Flujo', '');
+  readmeLines.push('| Paso | Tipo de Nodo | Etiqueta |');
+  readmeLines.push('|---|---|---|');
+  orderedNodes.forEach((n, idx) => {
+    readmeLines.push(`| ${idx + 1} | \`${n.type}\` | ${n.data?.label || n.id} |`);
+  });
+  readmeLines.push('');
+
+  const readmeMd = readmeLines.filter(line => line !== undefined).join('\n');
+
   return {
     script: parts.join('\n'),
     requirementsTxt,
     envExample,
-    readmeMd
+    readmeMd,
+    sqlFiles
   };
 }
