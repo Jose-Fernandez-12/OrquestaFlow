@@ -1,4 +1,5 @@
 import { FastifyInstance } from 'fastify';
+import JSZip from 'jszip';
 import { getDb } from '../db/database.js';
 import { transpileFlowToPython, TranspilerContext, TranspilerQueryInfo } from '../engine/pythonTranspiler.js';
 
@@ -61,16 +62,52 @@ export async function pythonExportRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      const { script } = transpileFlowToPython(flow.name, definition, ctx);
-      const fileName = `${flow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')}_flow.py`;
+      const { script, requirementsTxt, envExample, readmeMd } = transpileFlowToPython(flow.name, definition, ctx);
+      const slug = flow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+      const scriptFileName = `${slug}_flow.py`;
+      const zipFileName = `${slug}_bundle.zip`;
+
+      const zip = new JSZip();
+
+      // 1. Python executable script
+      zip.file(scriptFileName, script);
+
+      // 2. Python requirements.txt
+      zip.file('requirements.txt', requirementsTxt);
+
+      // 3. Environment variables template
+      zip.file('.env.example', envExample);
+
+      // 4. Instructions and documentation
+      zip.file('README.md', readmeMd);
+
+      // 5. Complete flow data (definition and queries metadata)
+      const flowData = {
+        id: flow.id,
+        name: flow.name,
+        description: flow.description || '',
+        created_at: flow.created_at,
+        updated_at: flow.updated_at,
+        definition,
+        queries: ctx.queries
+      };
+      zip.file('flow.json', JSON.stringify(flowData, null, 2));
+
+      // Generate binary buffer for ZIP
+      const zipBuffer = await zip.generateAsync({
+        type: 'nodebuffer',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 }
+      });
 
       reply
-        .header('Content-Type', 'text/x-python; charset=utf-8')
-        .header('Content-Disposition', `attachment; filename="${fileName}"`)
-        .send(script);
+        .header('Content-Type', 'application/zip')
+        .header('Content-Disposition', `attachment; filename="${zipFileName}"`)
+        .header('Access-Control-Expose-Headers', 'Content-Disposition')
+        .send(zipBuffer);
     } catch (err: any) {
       app.log.error(err);
-      return reply.status(500).send({ error: `Error al generar el script: ${err.message}` });
+      return reply.status(500).send({ error: `Error al generar el paquete ZIP: ${err.message}` });
     }
   });
 }

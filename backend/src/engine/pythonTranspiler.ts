@@ -1,6 +1,6 @@
 /**
  * pythonTranspiler.ts
- * Convierte la definicion JSON de un flujo de OrquestaFlow a un script Python ejecutable.
+ * Convierte la definicion JSON de un flujo de OrquestaFlow a un script Python ejecutable y autonomo.
  */
 
 export interface TranspilerConnectionInfo {
@@ -26,8 +26,15 @@ export interface TranspilerContext {
   queries: Record<string, TranspilerQueryInfo>;
 }
 
+export interface TranspilerOutput {
+  script: string;
+  requirementsTxt: string;
+  envExample: string;
+  readmeMd: string;
+}
+
 // ---------------------------------------------------------------------------
-// Topological sort (Kahn) – same logic as executor.ts
+// Topological sort (Kahn)
 // ---------------------------------------------------------------------------
 function buildTopologicalOrder(nodes: any[], edges: any[]): any[] {
   const inDegree: Record<string, number> = {};
@@ -38,7 +45,6 @@ function buildTopologicalOrder(nodes: any[], edges: any[]): any[] {
     adjList[n.id] = [];
   });
 
-  // Normalize edges (same as executor)
   const normalizedEdges = edges.map(edge => {
     const srcNode = nodes.find(n => n.id === edge.source);
     const tgtNode = nodes.find(n => n.id === edge.target);
@@ -58,15 +64,13 @@ function buildTopologicalOrder(nodes: any[], edges: any[]): any[] {
     }
   });
 
-  // Mark forEach sub-graph nodes so they are inlined inside the forEach block
+  // Handle forEach sub-graph nodes
   const forEachNodes = nodes.filter(n => n.type === 'forEach');
   const forEachManagedNodeIds = new Set<string>();
-  const forEachEndMap: Record<string, string> = {}; // forEachNodeId -> forEachEndNodeId
 
   for (const feNode of forEachNodes) {
     const endId = findForEachEndNode(feNode.id, adjList, nodes);
     if (endId) {
-      forEachEndMap[feNode.id] = endId;
       const subIds = getForEachSubgraphNodes(feNode.id, endId, adjList, nodes);
       subIds.forEach(sid => {
         forEachManagedNodeIds.add(sid);
@@ -162,7 +166,6 @@ function getEffectiveDataSources(nodeId: string, edges: any[], nodes: any[]): st
 // Template analysis helpers
 // ---------------------------------------------------------------------------
 
-/** Returns all {{...}} placeholders used in a string or object */
 function extractTemplatePlaceholders(value: any): string[] {
   if (typeof value !== 'string') {
     return extractTemplatePlaceholders(JSON.stringify(value ?? ''));
@@ -171,7 +174,6 @@ function extractTemplatePlaceholders(value: any): string[] {
   return matches.map(m => m[1].trim());
 }
 
-/** Returns the set of node IDs that are UPSTREAM of nodeId */
 function getUpstreamNodeIds(nodeId: string, edges: any[], nodes: any[]): Set<string> {
   const upstream = new Set<string>();
   const queue = [nodeId];
@@ -190,16 +192,12 @@ function getUpstreamNodeIds(nodeId: string, edges: any[], nodes: any[]): Set<str
   return upstream;
 }
 
-/** Given a placeholder like "nodeId.field.subfield", returns true if nodeId is upstream */
 function isPlaceholderResolvable(placeholder: string, upstreamNodeIds: Set<string>, nodes: any[]): boolean {
   const firstPart = placeholder.split('.')[0].trim();
-  // Special vars that are always available
   if (['_item', '_index', '_total', 'item'].includes(firstPart)) return true;
-  // Check if it maps to an upstream node
   return nodes.some(n => n.id === firstPart && upstreamNodeIds.has(firstPart));
 }
 
-/** Detect unresolvable placeholders in a string. Returns list of variable names to ask via input() */
 function detectInteractiveParams(fields: string[], nodeId: string, edges: any[], nodes: any[]): string[] {
   const upstream = getUpstreamNodeIds(nodeId, edges, nodes);
   const unresolvable = new Set<string>();
@@ -215,23 +213,19 @@ function detectInteractiveParams(fields: string[], nodeId: string, edges: any[],
 }
 
 // ---------------------------------------------------------------------------
-// Python template resolution code generator
+// Python helper string generators
 // ---------------------------------------------------------------------------
 
-/** Converts a {{nodeId.field}} template string to a Python f-string or resolve_template() call */
 function templateToPython(template: string | undefined): string {
   if (!template) return '""';
   if (!template.includes('{{')) return JSON.stringify(template);
-  // Single exact match: {{nodeId.field}} -> direct dict access
   const exactMatch = template.trim().match(/^\{\{([^}]+)\}\}$/);
   if (exactMatch) {
     return contextAccessPython(exactMatch[1].trim());
   }
-  // Mixed string: use resolve_template()
   return `resolve_template(context, ${JSON.stringify(template)})`;
 }
 
-/** Converts "nodeId.field.sub" to context["nodeId"]["field"]["sub"] (with safe get) */
 function contextAccessPython(path: string): string {
   const parts = path.split('.');
   if (parts.length === 1) return `context.get(${JSON.stringify(parts[0])})`;
@@ -242,19 +236,20 @@ function contextAccessPython(path: string): string {
   return acc;
 }
 
-/** Sanitize a node id to be a valid python variable name */
+/** Sanitize a node id to always produce a valid, safe Python variable name */
 function pyVarName(nodeId: string): string {
-  return nodeId.replace(/[^a-zA-Z0-9_]/g, '_');
+  const sanitized = nodeId.replace(/[^a-zA-Z0-9_]/g, '_');
+  return `node_${sanitized}`;
 }
-
-// ---------------------------------------------------------------------------
-// Node code generators
-// ---------------------------------------------------------------------------
 
 function indent(code: string, spaces: number): string {
   const pad = ' '.repeat(spaces);
   return code.split('\n').map(line => (line.trim() === '' ? '' : pad + line)).join('\n');
 }
+
+// ---------------------------------------------------------------------------
+// Node code generators
+// ---------------------------------------------------------------------------
 
 function generateStartNode(node: any, stepNum: number, total: number): string {
   return [
@@ -286,27 +281,28 @@ function generateHttpNode(node: any, stepNum: number, total: number, edges: any[
   const iterateOver = data.iterateOver || '';
   const iterateMode = data.iterateMode || false;
 
-  // Detect interactive params
+  // Detect interactive params (variables that cannot be resolved upstream)
   const fieldsToCheck = [endpoint, headers, body, params].filter(Boolean);
   const interactiveParams = detectInteractiveParams(fieldsToCheck, node.id, edges, nodes);
   for (const ph of interactiveParams) {
-    const safeVarName = pyVarName(ph.replace(/\./g, '_'));
-    lines.push(`${varName}_param_${safeVarName} = input("Ingrese valor para '${ph}': ")`);
+    const safeParamVar = `${varName}_input_${ph.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+    lines.push(`${safeParamVar} = input("Ingrese valor para '${ph}': ")`);
     lines.push(`context[${JSON.stringify(ph.split('.')[0])}] = context.get(${JSON.stringify(ph.split('.')[0])}, {})`);
-    // Inject into context path
     const parts = ph.split('.');
     if (parts.length === 1) {
-      lines.push(`context[${JSON.stringify(parts[0])}] = ${varName}_param_${safeVarName}`);
+      lines.push(`context[${JSON.stringify(parts[0])}] = ${safeParamVar}`);
     }
   }
 
-  // Build headers dict
+  // Base headers dict
   lines.push(`${varName}_headers = {"Content-Type": "application/json"}`);
   if (headers && headers.trim()) {
     lines.push(`try:`);
-    lines.push(`    ${varName}_headers.update(json.loads(resolve_template(context, ${JSON.stringify(headers)})))`);
+    lines.push(`    _custom_hdrs = json.loads(resolve_template(context, ${JSON.stringify(headers)}))`);
+    lines.push(`    if isinstance(_custom_hdrs, dict): ${varName}_headers.update(_custom_hdrs)`);
     lines.push(`except Exception: pass`);
   }
+
   // Auth
   if (authType === 'bearer') {
     const token = data.authToken || '';
@@ -323,75 +319,127 @@ function generateHttpNode(node: any, stepNum: number, total: number, edges: any[
     lines.push(`    ${varName}_headers["Authorization"] = "Basic " + _b64.b64encode(f"{${varName}_basic_user}:{${varName}_basic_pwd}".encode()).decode()`);
   }
 
-  // Build URL with query params
-  lines.push(`${varName}_url = resolve_template(context, ${JSON.stringify(endpoint)})`);
-  if (params && params.trim()) {
-    lines.push(`try:`);
-    lines.push(`    ${varName}_qparams = json.loads(resolve_template(context, ${JSON.stringify(params)}))`);
-    lines.push(`    from urllib.parse import urlencode, urlparse, urlunparse, parse_qs`);
-    lines.push(`    _parsed = urlparse(${varName}_url)`);
-    lines.push(`    ${varName}_url = urlunparse(_parsed._replace(query=urlencode(${varName}_qparams)))`);
-    lines.push(`except Exception: pass`);
-  }
-
-  // Body
   const hasBody = ['POST', 'PUT', 'PATCH'].includes(method) && body && body.trim();
-  if (hasBody) {
-    lines.push(`${varName}_body = resolve_template(context, ${JSON.stringify(body)})`);
-    lines.push(`if isinstance(${varName}_body, str):`);
-    lines.push(`    try: ${varName}_body = json.loads(${varName}_body)`);
-    lines.push(`    except Exception: pass`);
-  }
-
-  // Determine iteration
-  const iterExpr = iterateOver && iterateOver.trim() && iterateOver.trim() !== '{{ID_NODO}}' ? iterateOver : null;
+  const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+  const cleanIterOver = (iterateOver || '').trim();
+  const iterExpr = cleanIterOver && cleanIterOver !== '{{ID_NODO}}' && !cleanIterOver.startsWith('{{_item') ? cleanIterOver : null;
   const needsIteration = iterExpr || iterateMode;
 
   if (needsIteration) {
-    lines.push(`${varName}_items = resolve_template(context, ${JSON.stringify(iterExpr || '')}) if ${JSON.stringify(iterExpr || '')} else None`);
+    lines.push(`${varName}_items = None`);
+    if (iterExpr) {
+      lines.push(`try:`);
+      lines.push(`    ${varName}_items = resolve_template(context, ${JSON.stringify(iterExpr)})`);
+      lines.push(`except Exception: pass`);
+    }
+    lines.push(`if not isinstance(${varName}_items, list) or len(${varName}_items) == 0:`);
+    lines.push(`    for _uid in ${JSON.stringify(upstreamIds)}:`);
+    lines.push(`        _val = context.get(_uid)`);
+    lines.push(`        if isinstance(_val, list) and len(_val) > 0:`);
+    lines.push(`            ${varName}_items = _val`);
+    lines.push(`            break`);
     lines.push(`if not isinstance(${varName}_items, list):`);
-    lines.push(`    ${varName}_items = next((v for v in context.values() if isinstance(v, list)), [None])`);
+    lines.push(`    ${varName}_items = next((v for v in context.values() if isinstance(v, list) and len(v) > 0), [None])`);
+
     lines.push(`${varName}_results = []`);
     lines.push(`for _iter_idx, _iter_item in enumerate(${varName}_items):`);
     lines.push(`    _iter_context = {**context, "_item": _iter_item, "_index": _iter_idx, "_total": len(${varName}_items)}`);
+    lines.push(`    _iter_headers = dict(${varName}_headers)`);
+    lines.push(`    _iter_url = resolve_template(_iter_context, ${JSON.stringify(endpoint)})`);
+
+    if (params && params.trim()) {
+      lines.push(`    _iter_params = None`);
+      lines.push(`    try:`);
+      lines.push(`        _p_raw = resolve_template(_iter_context, ${JSON.stringify(params)})`);
+      lines.push(`        _iter_params = json.loads(_p_raw) if isinstance(_p_raw, str) else _p_raw`);
+      lines.push(`    except Exception: pass`);
+    }
+
+    if (hasBody) {
+      lines.push(`    _iter_body = None`);
+      lines.push(`    try:`);
+      lines.push(`        _b_raw = resolve_template(_iter_context, ${JSON.stringify(body)})`);
+      lines.push(`        if isinstance(_b_raw, str):`);
+      lines.push(`            try: _iter_body = json.loads(_b_raw)`);
+      lines.push(`            except Exception: _iter_body = _b_raw`);
+      lines.push(`        else: _iter_body = _b_raw`);
+      lines.push(`    except Exception: pass`);
+    }
+
     lines.push(`    try:`);
     lines.push(`        _resp = requests.request(`);
     lines.push(`            ${JSON.stringify(method)},`);
-    lines.push(`            resolve_template(_iter_context, ${JSON.stringify(endpoint)}),`);
-    lines.push(`            headers=${varName}_headers,`);
-    if (hasBody) lines.push(`            json=resolve_template(_iter_context, ${JSON.stringify(body)}),`);
+    lines.push(`            _iter_url,`);
+    if (params && params.trim()) lines.push(`            params=_iter_params,`);
+    lines.push(`            headers=_iter_headers,`);
+    if (hasBody) {
+      lines.push(`            json=_iter_body if isinstance(_iter_body, (dict, list)) else None,`);
+      lines.push(`            data=_iter_body if isinstance(_iter_body, str) else None,`);
+    }
     lines.push(`            timeout=30`);
     lines.push(`        )`);
     lines.push(`        _resp.raise_for_status()`);
+    lines.push(`        try:`);
+    lines.push(`            _resp_data = _resp.json()`);
+    lines.push(`        except Exception:`);
+    lines.push(`            _resp_data = {"text": _resp.text, "status_code": _resp.status_code}`);
+
     if (extractPath) {
-      lines.push(`        _data = _resp.json()`);
-      lines.push(`        for _k in ${JSON.stringify(extractPath.split('.'))}: _data = _data.get(_k, _data) if isinstance(_data, dict) else _data`);
-      lines.push(`        ${varName}_results.append(_data)`);
-    } else {
-      lines.push(`        ${varName}_results.append(_resp.json())`);
+      lines.push(`        for _k in ${JSON.stringify(extractPath.split('.'))}:`);
+      lines.push(`            _resp_data = _resp_data.get(_k, _resp_data) if isinstance(_resp_data, dict) else _resp_data`);
     }
+    lines.push(`        ${varName}_results.append(_resp_data)`);
     lines.push(`        logger.info(f"  [{_iter_idx+1}/{len(${varName}_items)}] OK - Status {_resp.status_code}")`);
     lines.push(`    except Exception as e:`);
     lines.push(`        logger.error(f"  [{_iter_idx+1}] ERROR: {e}")`);
     lines.push(`        sys.exit(1)`);
+
     lines.push(`context[${JSON.stringify(node.id)}] = ${varName}_results`);
   } else {
+    // Single execution
+    lines.push(`_req_url = resolve_template(context, ${JSON.stringify(endpoint)})`);
+    if (params && params.trim()) {
+      lines.push(`_req_params = None`);
+      lines.push(`try:`);
+      lines.push(`    _p_raw = resolve_template(context, ${JSON.stringify(params)})`);
+      lines.push(`    _req_params = json.loads(_p_raw) if isinstance(_p_raw, str) else _p_raw`);
+      lines.push(`except Exception: pass`);
+    }
+
+    if (hasBody) {
+      lines.push(`_req_body = None`);
+      lines.push(`try:`);
+      lines.push(`    _b_raw = resolve_template(context, ${JSON.stringify(body)})`);
+      lines.push(`    if isinstance(_b_raw, str):`);
+      lines.push(`        try: _req_body = json.loads(_b_raw)`);
+      lines.push(`        except Exception: _req_body = _b_raw`);
+      lines.push(`    else: _req_body = _b_raw`);
+      lines.push(`except Exception: pass`);
+    }
+
     lines.push(`try:`);
     lines.push(`    ${varName}_resp = requests.request(`);
     lines.push(`        ${JSON.stringify(method)},`);
-    lines.push(`        ${varName}_url,`);
+    lines.push(`        _req_url,`);
+    if (params && params.trim()) lines.push(`        params=_req_params,`);
     lines.push(`        headers=${varName}_headers,`);
-    if (hasBody) lines.push(`        json=${varName}_body,`);
+    if (hasBody) {
+      lines.push(`        json=_req_body if isinstance(_req_body, (dict, list)) else None,`);
+      lines.push(`        data=_req_body if isinstance(_req_body, str) else None,`);
+    }
     lines.push(`        timeout=30`);
     lines.push(`    )`);
     lines.push(`    ${varName}_resp.raise_for_status()`);
+    lines.push(`    try:`);
+    lines.push(`        ${varName}_data = ${varName}_resp.json()`);
+    lines.push(`    except Exception:`);
+    lines.push(`        ${varName}_data = {"text": ${varName}_resp.text, "status_code": ${varName}_resp.status_code}`);
+
     if (extractPath) {
-      lines.push(`    ${varName}_data = ${varName}_resp.json()`);
-      lines.push(`    for _k in ${JSON.stringify(extractPath.split('.'))}: ${varName}_data = ${varName}_data.get(_k, ${varName}_data) if isinstance(${varName}_data, dict) else ${varName}_data`);
-      lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_data`);
-    } else {
-      lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_resp.json()`);
+      lines.push(`    for _k in ${JSON.stringify(extractPath.split('.'))}:`);
+      lines.push(`        ${varName}_data = ${varName}_data.get(_k, ${varName}_data) if isinstance(${varName}_data, dict) else ${varName}_data`);
     }
+    lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_data`);
     lines.push(`    logger.info(f"  OK - Status {${varName}_resp.status_code}")`);
     lines.push(`except Exception as e:`);
     lines.push(`    logger.error(f"  ERROR en ${label}: {e}")`);
@@ -418,7 +466,6 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
     return lines.join('\n');
   }
 
-  // Parse SQL params defined on the node or query
   let queryParamMapping: Record<string, string> = {};
   if (data.queryParams && data.queryParams.trim()) {
     try { queryParamMapping = JSON.parse(data.queryParams); } catch { }
@@ -428,7 +475,6 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
   const paramMatches = [...queryInfo.sql_text.matchAll(/(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
   const sqlParams = [...new Set(paramMatches.map(m => m[1]))];
 
-  // Interactive params: those without a mapping to context
   const upstream = getUpstreamNodeIds(node.id, edges, nodes);
   const interactiveParams: string[] = [];
   for (const p of sqlParams) {
@@ -446,7 +492,6 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
     lines.push(`${varName}_param_${p} = input("Ingrese valor para parametro SQL '${p}': ")`);
   }
 
-  // Build params dict
   lines.push(`${varName}_sql_params = {}`);
   for (const p of sqlParams) {
     if (interactiveParams.includes(p)) {
@@ -457,17 +502,18 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
     }
   }
 
-  // Convert #param_name to ? for pyodbc
   const pythonSql = queryInfo.sql_text.replace(/#param_([a-zA-Z_][a-zA-Z0-9_]*)/g, '?');
 
-  // Generate connection and execution per connection
   if (queryInfo.connections.length === 1) {
     const conn = queryInfo.connections[0];
     const envKey = (conn.env_credential_key || 'SQLSERVER').toUpperCase();
+    const port = conn.port || 1433;
+    const driver = conn.driver || 'ODBC Driver 17 for SQL Server';
+
     lines.push(`${varName}_conn_str = (`);
-    lines.push(`    f"DRIVER={{${conn.driver || 'ODBC Driver 17 for SQL Server'}}};"`);
-    lines.push(`    f"SERVER=${conn.host},{conn.port || 1433};"`);
-    lines.push(`    f"DATABASE=${conn.database_name};"`);
+    lines.push(`    "DRIVER={${driver}};"`);
+    lines.push(`    "SERVER=${conn.host},${port};"`);
+    lines.push(`    "DATABASE=${conn.database_name};"`);
     lines.push(`    f"UID={os.getenv('DB_USER_${envKey}', os.getenv('DB_USER_DEFAULT', ''))};"`);
     lines.push(`    f"PWD={os.getenv('DB_PASSWORD_${envKey}', os.getenv('DB_PASSWORD_DEFAULT', ''))}"`);
     lines.push(`)`);
@@ -475,11 +521,17 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
     lines.push(`    import pyodbc`);
     lines.push(`    ${varName}_db = pyodbc.connect(${varName}_conn_str)`);
     lines.push(`    ${varName}_cursor = ${varName}_db.cursor()`);
-    lines.push(`    ${varName}_cursor.execute(${JSON.stringify(pythonSql)}, list(${varName}_sql_params.values()))`);
+
+    if (sqlParams.length === 0) {
+      lines.push(`    ${varName}_cursor.execute(${JSON.stringify(pythonSql)})`);
+    } else {
+      const paramList = `[${sqlParams.map(p => `${varName}_sql_params[${JSON.stringify(p)}]`).join(', ')}]`;
+      lines.push(`    ${varName}_cursor.execute(${JSON.stringify(pythonSql)}, ${paramList})`);
+    }
+
     lines.push(`    ${varName}_cols = [d[0] for d in ${varName}_cursor.description]`);
     lines.push(`    ${varName}_rows = [dict(zip(${varName}_cols, r)) for r in ${varName}_cursor.fetchall()]`);
 
-    // extractMode
     const extractMode = data.extractMode || 'all';
     if (extractMode === 'selected_columns') {
       const cols = (data.extractColumns || '').split(',').map((c: string) => c.trim()).filter(Boolean);
@@ -493,23 +545,33 @@ function generateQueryNode(node: any, stepNum: number, total: number, queryInfo:
     lines.push(`    logger.error(f"  ERROR en query '${label}': {e}")`);
     lines.push(`    sys.exit(1)`);
   } else {
-    // Multiple connections: collect all results
+    // Multi-connection
     lines.push(`${varName}_all_rows = []`);
     for (const conn of queryInfo.connections) {
       const envKey = (conn.env_credential_key || 'SQLSERVER').toUpperCase();
+      const port = conn.port || 1433;
+      const driver = conn.driver || 'ODBC Driver 17 for SQL Server';
+
       lines.push(`# Conexion: ${conn.name} (${conn.host})`);
       lines.push(`try:`);
       lines.push(`    import pyodbc`);
       lines.push(`    _conn_str = (`);
-      lines.push(`        f"DRIVER={{${conn.driver || 'ODBC Driver 17 for SQL Server'}}};"`);
-      lines.push(`        f"SERVER=${conn.host},{conn.port || 1433};"`);
-      lines.push(`        f"DATABASE=${conn.database_name};"`);
+      lines.push(`        "DRIVER={${driver}};"`);
+      lines.push(`        "SERVER=${conn.host},${port};"`);
+      lines.push(`        "DATABASE=${conn.database_name};"`);
       lines.push(`        f"UID={os.getenv('DB_USER_${envKey}', os.getenv('DB_USER_DEFAULT', ''))};"`);
       lines.push(`        f"PWD={os.getenv('DB_PASSWORD_${envKey}', os.getenv('DB_PASSWORD_DEFAULT', ''))}"`);
       lines.push(`    )`);
       lines.push(`    _db = pyodbc.connect(_conn_str)`);
       lines.push(`    _cursor = _db.cursor()`);
-      lines.push(`    _cursor.execute(${JSON.stringify(pythonSql)}, list(${varName}_sql_params.values()))`);
+
+      if (sqlParams.length === 0) {
+        lines.push(`    _cursor.execute(${JSON.stringify(pythonSql)})`);
+      } else {
+        const paramList = `[${sqlParams.map(p => `${varName}_sql_params[${JSON.stringify(p)}]`).join(', ')}]`;
+        lines.push(`    _cursor.execute(${JSON.stringify(pythonSql)}, ${paramList})`);
+      }
+
       lines.push(`    _cols = [d[0] for d in _cursor.description]`);
       lines.push(`    _rows = [dict(zip(_cols, r)) for r in _cursor.fetchall()]`);
       lines.push(`    ${varName}_all_rows.extend(_rows)`);
@@ -532,37 +594,37 @@ function generateExportNode(node: any, stepNum: number, total: number, edges: an
   const label = data.label || node.id;
   const varName = pyVarName(node.id);
   const format = (data.format || 'CSV').toUpperCase();
-  const fileName = data.fileName || `exportacion_${node.id}`;
+  const rawFileName = data.fileName || `exportacion_${node.id}`;
   const dataSource = data.dataSource || '';
 
   lines.push(`# === [${stepNum}/${total}] Nodo: export - ${label} ===`);
   lines.push(`logger.info("[${stepNum}/${total}] Exportando datos: ${label}")`);
   lines.push(`try:`);
 
-  // Resolve data source
   if (dataSource && dataSource.trim()) {
     const exactMatch = dataSource.match(/^\{\{(.+)\}\}$/);
     const pathStr = exactMatch ? exactMatch[1] : dataSource;
-    lines.push(`    ${varName}_data = ${contextAccessPython(pathStr)} or []`);
+    lines.push(`    ${varName}_raw = ${contextAccessPython(pathStr)} or []`);
   } else {
-    // Use last non-start upstream node
     const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
     if (upstreamIds.length > 0) {
-      lines.push(`    ${varName}_data = context.get(${JSON.stringify(upstreamIds[0])}, [])`);
+      lines.push(`    ${varName}_raw = context.get(${JSON.stringify(upstreamIds[0])}, [])`);
     } else {
-      lines.push(`    ${varName}_data = next((v for k, v in reversed(list(context.items())) if k != "start" and isinstance(v, list)), [])`);
+      lines.push(`    ${varName}_raw = next((v for k, v in reversed(list(context.items())) if k != "start" and isinstance(v, list)), [])`);
     }
   }
 
   lines.push(`    import pandas as _pd`);
-  lines.push(`    ${varName}_df = _pd.DataFrame(${varName}_data) if isinstance(${varName}_data, list) else _pd.DataFrame([${varName}_data])`);
+  lines.push(`    ${varName}_records = normalize_for_export(${varName}_raw)`);
+  lines.push(`    ${varName}_df = _pd.DataFrame(${varName}_records)`);
 
-  const fileNamePy = templateToPython(fileName);
-  if (format === 'EXCEL' || format === 'XLSX') {
-    lines.push(`    ${varName}_filename = str(${fileNamePy}).rstrip(".xlsx") + ".xlsx"`);
+  const fileNamePy = templateToPython(rawFileName);
+  const ext = format === 'EXCEL' || format === 'XLSX' ? '.xlsx' : '.csv';
+
+  lines.push(`    ${varName}_filename = str(${fileNamePy}).rstrip(".xlsx").rstrip(".csv") + "${ext}"`);
+  if (ext === '.xlsx') {
     lines.push(`    ${varName}_df.to_excel(${varName}_filename, index=False)`);
   } else {
-    lines.push(`    ${varName}_filename = str(${fileNamePy}).rstrip(".csv") + ".csv"`);
     lines.push(`    ${varName}_df.to_csv(${varName}_filename, index=False, encoding="utf-8-sig")`);
   }
 
@@ -587,16 +649,17 @@ function generateDataSourceNode(node: any, stepNum: number, total: number, edges
   lines.push(`logger.info("[${stepNum}/${total}] Cargando datos: ${label}")`);
 
   if (mode === 'merge') {
-    // Smart Relational Join in Python using pandas
     const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
     lines.push(`# Modo merge: unifica datos de nodos upstream por llave comun (id/code)`);
     lines.push(`${varName}_frames = []`);
     for (const uid of upstreamIds) {
-      lines.push(`_val_${pyVarName(uid)} = context.get(${JSON.stringify(uid)}, [])`);
-      lines.push(`if _val_${pyVarName(uid)}:`);
+      const uVar = pyVarName(uid);
+      lines.push(`_val_${uVar} = context.get(${JSON.stringify(uid)}, [])`);
+      lines.push(`if _val_${uVar}:`);
       lines.push(`    import pandas as _pd`);
-      lines.push(`    _rows_${pyVarName(uid)} = _val_${pyVarName(uid)} if isinstance(_val_${pyVarName(uid)}, list) else [_val_${pyVarName(uid)}]`);
-      lines.push(`    ${varName}_frames.append(_pd.DataFrame(_rows_${pyVarName(uid)}))`);
+      lines.push(`    _rows_${uVar} = normalize_for_export(_val_${uVar})`);
+      lines.push(`    if _rows_${uVar}:`);
+      lines.push(`        ${varName}_frames.append(_pd.DataFrame(_rows_${uVar}))`);
     }
     lines.push(`if len(${varName}_frames) == 0:`);
     lines.push(`    context[${JSON.stringify(node.id)}] = []`);
@@ -604,7 +667,6 @@ function generateDataSourceNode(node: any, stepNum: number, total: number, edges
     lines.push(`    import pandas as _pd`);
     lines.push(`    ${varName}_result = ${varName}_frames[0]`);
     lines.push(`    for _other_df in ${varName}_frames[1:]:`);
-    lines.push(`        # Buscar llave comun priorizando campos con 'id' o 'code'`);
     lines.push(`        _left_cols = set(${varName}_result.columns.str.lower())`);
     lines.push(`        _right_cols = set(_other_df.columns.str.lower())`);
     lines.push(`        _common = _left_cols & _right_cols`);
@@ -614,7 +676,6 @@ function generateDataSourceNode(node: any, stepNum: number, total: number, edges
     lines.push(`            _right_key = next(c for c in _other_df.columns if c.lower() == _best_key)`);
     lines.push(`            ${varName}_result = ${varName}_result.merge(_other_df, left_on=_left_key, right_on=_right_key, how="left")`);
     lines.push(`        else:`);
-    lines.push(`            # Fallback: union por indice`);
     lines.push(`            ${varName}_result = _pd.concat([${varName}_result, _other_df], axis=1)`);
     lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_result.to_dict(orient="records")`);
     lines.push(`    logger.info(f"  OK - {len(${varName}_result)} registros unificados")`);
@@ -712,7 +773,6 @@ function generateForEachNode(
     lines.push(`${varName}_items = resolve_template(context, ${JSON.stringify(iterateOverExpr)})`);
     lines.push(`if not isinstance(${varName}_items, list): ${varName}_items = [${varName}_items]`);
   } else {
-    // Auto-detect: first array in upstream context
     const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
     if (upstreamIds.length > 0) {
       lines.push(`${varName}_items = context.get(${JSON.stringify(upstreamIds[0])}, [])`);
@@ -729,7 +789,6 @@ function generateForEachNode(
   lines.push(`    context["_total"] = len(${varName}_items)`);
   lines.push(`    logger.info(f"  Iteracion {_index+1}/{len(${varName}_items)}")`);
 
-  // Generate subgraph nodes indented inside the for loop
   const subOrdered = buildTopologicalOrder(subgraphNodes, edges.filter(
     e => subgraphNodes.some(n => n.id === e.source) && subgraphNodes.some(n => n.id === e.target)
   ));
@@ -763,7 +822,6 @@ function generateForEachNode(
     lines.push(indent(subCode, 4));
   }
 
-  // Collect results from terminal subgraph node
   if (subOrdered.length > 0) {
     const lastSubNode = subOrdered[subOrdered.length - 1];
     lines.push(`    _iter_result = context.get(${JSON.stringify(lastSubNode.id)})`);
@@ -783,7 +841,6 @@ function generateForEachNode(
 function generateForEachEndNode(node: any, stepNum: number, total: number, forEachNode: any): string {
   const lines: string[] = [];
   const label = node.data?.label || node.id;
-  const feVarName = forEachNode ? pyVarName(forEachNode.id) : pyVarName(node.id);
 
   lines.push(`# === [${stepNum}/${total}] Nodo: forEachEnd - ${label} ===`);
   if (forEachNode) {
@@ -800,10 +857,6 @@ function generateForEachEndNode(node: any, stepNum: number, total: number, forEa
 // Main transpiler entry point
 // ---------------------------------------------------------------------------
 
-export interface TranspilerOutput {
-  script: string;
-}
-
 export function transpileFlowToPython(
   flowName: string,
   definition: { nodes: any[]; edges: any[] },
@@ -812,15 +865,20 @@ export function transpileFlowToPython(
   const nodes: any[] = definition.nodes || [];
   const edges: any[] = definition.edges || [];
 
+  const slug = flowName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+
   if (nodes.length === 0) {
+    const emptyScript = `#!/usr/bin/env python3\n# Flujo sin nodos: ${flowName}\nprint("El flujo no tiene nodos configurados.")\n`;
     return {
-      script: `#!/usr/bin/env python3\n# Flujo sin nodos: ${flowName}\nprint("El flujo no tiene nodos configurados.")\n`
+      script: emptyScript,
+      requirementsTxt: 'python-dotenv>=1.0.0\n',
+      envExample: '# Sin variables requeridas\n',
+      readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.`
     };
   }
 
   const orderedNodes = buildTopologicalOrder(nodes, edges);
 
-  // Build forEach sub-graph maps
   const inDegree: Record<string, number> = {};
   const adjList: Record<string, string[]> = {};
   nodes.forEach(n => { inDegree[n.id] = 0; adjList[n.id] = []; });
@@ -851,17 +909,142 @@ export function transpileFlowToPython(
     }
   }
 
-  // Determine which env vars are needed
   const needsRequests = nodes.some(n => ['httpGet', 'httpPost', 'httpRequest'].includes(n.type));
   const needsPyodbc = nodes.some(n => n.type === 'query');
   const needsPandas = nodes.some(n => ['export', 'dataSource', 'fileSource'].includes(n.type));
 
   const now = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' });
 
-  // Build script
+  // 1. Build requirements.txt
+  const reqs: string[] = ['python-dotenv>=1.0.0'];
+  if (needsRequests) reqs.push('requests>=2.31.0');
+  if (needsPyodbc) reqs.push('pyodbc>=5.0.0');
+  if (needsPandas) {
+    reqs.push('pandas>=2.0.0');
+    reqs.push('openpyxl>=3.1.0');
+  }
+  const requirementsTxt = reqs.join('\n') + '\n';
+
+  // 2. Build .env.example
+  const envLines: string[] = [
+    `# ==============================================================================`,
+    `# Variables de Entorno para el Flujo: ${flowName}`,
+    `# Copie este archivo como '.env' antes de ejecutar el script.`,
+    `# ==============================================================================`,
+    ''
+  ];
+
+  if (needsPyodbc) {
+    envLines.push('# Credenciales de Base de Datos');
+    const seenKeys = new Set<string>();
+    Object.values(ctx.queries).flatMap(q => q.connections).forEach(c => {
+      const key = (c.env_credential_key || 'SQLSERVER').toUpperCase();
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        envLines.push(`DB_USER_${key}=`);
+        envLines.push(`DB_PASSWORD_${key}=`);
+      }
+    });
+    envLines.push('DB_USER_DEFAULT=');
+    envLines.push('DB_PASSWORD_DEFAULT=');
+    envLines.push('');
+  }
+
+  if (needsRequests) {
+    envLines.push('# Autenticacion HTTP (si aplica)');
+    envLines.push('HTTP_BEARER_TOKEN=');
+    envLines.push('HTTP_BASIC_USER=');
+    envLines.push('HTTP_BASIC_PASSWORD=');
+    envLines.push('');
+  }
+
+  const fileSourceNodes = nodes.filter(n => ['dataSource', 'fileSource'].includes(n.type) && n.data?.mode !== 'merge');
+  if (fileSourceNodes.length > 0) {
+    envLines.push('# Rutas de archivos para nodos de datos');
+    for (const fsNode of fileSourceNodes) {
+      const label = fsNode.data?.label || fsNode.id;
+      const envKey = label.toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_]/g, '');
+      envLines.push(`FILE_PATH_${envKey}=`);
+    }
+    envLines.push('');
+  }
+  const envExample = envLines.join('\n');
+
+  // 3. Build README.md
+  const readmeLines: string[] = [
+    `# Flujo: ${flowName}`,
+    '',
+    `Script en Python generado automaticamente por **OrquestaFlow** el ${now}.`,
+    '',
+    `## Contenido del Paquete`,
+    `- \`${slug}_flow.py\`: Script principal ejecutable que corre el flujo de forma autonoma.`,
+    `- \`flow.json\`: Definicion completa del flujo (nodos, conexiones y metadatos).`,
+    `- \`requirements.txt\`: Lista de dependencias necesarias.`,
+    `- \`.env.example\`: Plantilla de variables de entorno y credenciales requeridas.`,
+    '',
+    `## Requisitos Previos`,
+    `- Python 3.9 o superior`,
+    needsPyodbc ? `- [ODBC Driver 17 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) (o superior) instalado en el sistema` : '',
+    '',
+    `## Instalacion y Configuracion`,
+    '',
+    `1. **Crear y activar un entorno virtual (recomendado):**`,
+    '   ```bash',
+    '   # En Windows:',
+    '   python -m venv venv',
+    '   .\\venv\\Scripts\\activate',
+    '',
+    '   # En Linux / macOS:',
+    '   python3 -m venv venv',
+    '   source venv/bin/activate',
+    '   ```',
+    '',
+    `2. **Instalar dependencias:**`,
+    '   ```bash',
+    '   pip install -r requirements.txt',
+    '   ```',
+    '',
+    `3. **Configurar credenciales:**`,
+    '   Copia el archivo `.env.example` a `.env`:',
+    '   ```bash',
+    '   # En Windows:',
+    '   copy .env.example .env',
+    '',
+    '   # En Linux / macOS:',
+    '   cp .env.example .env',
+    '   ```',
+    '   Abre el archivo `.env` y asigna tus usuarios, contrasenas y tokens correspondientes.',
+    '',
+    `## Ejecucion`,
+    '',
+    '```bash',
+    `python ${slug}_flow.py`,
+    '```',
+    ''
+  ];
+
+  if (fileSourceNodes.length > 0) {
+    readmeLines.push(
+      'Si el flujo utiliza archivos locales, puedes pasar las rutas como argumentos CLI:',
+      '```bash',
+      `python ${slug}_flow.py "C:\\ruta\\al\\archivo_1.xlsx"`,
+      '```',
+      ''
+    );
+  }
+
+  readmeLines.push('## Estructura de Pasos del Flujo', '');
+  readmeLines.push('| Paso | Tipo de Nodo | Etiqueta |');
+  readmeLines.push('|---|---|---|');
+  orderedNodes.forEach((n, idx) => {
+    readmeLines.push(`| ${idx + 1} | \`${n.type}\` | ${n.data?.label || n.id} |`);
+  });
+  readmeLines.push('');
+  const readmeMd = readmeLines.filter(line => line !== undefined).join('\n');
+
+  // 4. Build Script
   const parts: string[] = [];
 
-  // Header
   parts.push(`#!/usr/bin/env python3`);
   parts.push(`"""
 Script auto-generado por OrquestaFlow
@@ -869,16 +1052,13 @@ Flujo: ${flowName}
 Generado: ${now}
 
 Dependencias necesarias:
-    pip install python-dotenv${needsRequests ? ' requests' : ''}${needsPyodbc ? ' pyodbc' : ''}${needsPandas ? ' pandas openpyxl' : ''}
+    pip install -r requirements.txt
 
-Variables de entorno requeridas (crear archivo .env):
-${needsPyodbc ? Object.values(ctx.queries).flatMap(q => q.connections).map(c => {
-    const key = (c.env_credential_key || 'SQLSERVER').toUpperCase();
-    return `    DB_USER_${key}=<usuario>\n    DB_PASSWORD_${key}=<contrasena>`;
-  }).filter((v, i, a) => a.indexOf(v) === i).join('\n') : '    (Sin conexiones de base de datos)'}
+Variables de entorno requeridas:
+    Consulte el archivo .env.example generado con este paquete.
 
 Uso:
-    python ${flowName.toLowerCase().replace(/\s+/g, '_')}_flow.py [ruta_archivo_1] [ruta_archivo_2] ...
+    python ${slug}_flow.py [ruta_archivo_1] [ruta_archivo_2] ...
 """
 
 import os
@@ -898,7 +1078,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 `);
 
-  // Conditional imports
   if (needsRequests) {
     parts.push(`try:
     import requests
@@ -913,6 +1092,24 @@ except ImportError:
     """Resuelve expresiones {{nodeId.field}} usando el contexto del flujo."""
     if not isinstance(template_str, str):
         return template_str
+
+    # Si es exactamente una sola referencia, devolver el objeto nativo directamente
+    m_exact = re.fullmatch(r'\\{\\{([^}]+)\\}\\}', template_str.strip())
+    if m_exact:
+        keys = m_exact.group(1).strip().split(".")
+        val = context
+        for k in keys:
+            if isinstance(val, dict):
+                val = val.get(k)
+            elif isinstance(val, list) and k.isdigit():
+                idx = int(k)
+                val = val[idx] if 0 <= idx < len(val) else None
+            else:
+                val = None
+                break
+        if val is not None:
+            return val
+
     def replacer(match):
         path = match.group(1).strip()
         keys = path.split(".")
@@ -920,12 +1117,40 @@ except ImportError:
         for k in keys:
             if isinstance(val, dict):
                 val = val.get(k)
+            elif isinstance(val, list) and k.isdigit():
+                idx = int(k)
+                val = val[idx] if 0 <= idx < len(val) else None
             else:
                 return match.group(0)
         if val is None:
             return ""
         return json.dumps(val) if isinstance(val, (dict, list)) else str(val)
+
     return re.sub(r'\\{\\{([^}]+)\\}\\}', replacer, template_str)
+
+
+def normalize_for_export(data):
+    """Aplana respuestas de APIs o listas anidadas para generar DataFrames limpios."""
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        data = [data]
+    records = []
+    for item in data:
+        if isinstance(item, list):
+            records.extend(normalize_for_export(item))
+        elif isinstance(item, dict):
+            found_inner = False
+            for key in ['data', 'items', 'records', 'rows', 'result', 'results']:
+                if key in item and isinstance(item[key], list) and len(item[key]) > 0:
+                    records.extend(normalize_for_export(item[key]))
+                    found_inner = True
+                    break
+            if not found_inner:
+                records.append(item)
+        else:
+            records.append({"valor": item})
+    return records
 `);
 
   // Main function
@@ -993,5 +1218,10 @@ except ImportError:
   parts.push(`    run_flow()`);
   parts.push(``);
 
-  return { script: parts.join('\n') };
+  return {
+    script: parts.join('\n'),
+    requirementsTxt,
+    envExample,
+    readmeMd
+  };
 }

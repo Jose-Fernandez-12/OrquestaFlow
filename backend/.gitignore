@@ -2,3 +2,7 @@ node_modules
 dist
 .env
 data/
+__pycache__/
+test*.py
+temp_check.py
+src/test_transpile.ts
