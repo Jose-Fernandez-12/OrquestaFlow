@@ -579,6 +579,7 @@ ${queryInfo.sql_text}
     lines.push(`_port_${varName} = os.getenv("DB_PORT_${envKey}", "${port}")`);
     lines.push(`_db_${varName} = os.getenv("DB_NAME_${envKey}", "${conn.database_name}")`);
     lines.push(`_user_${varName} = os.getenv("DB_USER_${envKey}", os.getenv("DB_USER_DEFAULT", ""))`);
+    lines.push(`_pwd_${varName} = os.getenv("DB_PASSWORD_${envKey}", os.getenv("DB_PASSWORD_DEFAULT", ""))`);
     lines.push(`_custom_conn_${varName} = os.getenv("DB_CONN_STR_${envKey}", "").strip()`);
     lines.push(`if _custom_conn_${varName} and "UID=;" not in _custom_conn_${varName} and "PWD=;" not in _custom_conn_${varName}:`);
     lines.push(`    ${varName}_conn_str = _custom_conn_${varName}`);
