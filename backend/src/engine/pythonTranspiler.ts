@@ -579,11 +579,17 @@ ${queryInfo.sql_text}
     lines.push(`_port_${varName} = os.getenv("DB_PORT_${envKey}", "${port}")`);
     lines.push(`_db_${varName} = os.getenv("DB_NAME_${envKey}", "${conn.database_name}")`);
     lines.push(`_user_${varName} = os.getenv("DB_USER_${envKey}", os.getenv("DB_USER_DEFAULT", ""))`);
-    lines.push(`_pwd_${varName} = os.getenv("DB_PASSWORD_${envKey}", os.getenv("DB_PASSWORD_DEFAULT", ""))`);
-    lines.push(`${varName}_conn_str = os.getenv(`);
-    lines.push(`    "DB_CONN_STR_${envKey}",`);
-    lines.push(`    f"DRIVER={{{_driver_${varName}}}};SERVER={_host_${varName}},{_port_${varName}};DATABASE={_db_${varName}};UID={_user_${varName}};PWD={_pwd_${varName}}"`);
-    lines.push(`)`);
+    lines.push(`_custom_conn_${varName} = os.getenv("DB_CONN_STR_${envKey}", "").strip()`);
+    lines.push(`if _custom_conn_${varName} and "UID=;" not in _custom_conn_${varName} and "PWD=;" not in _custom_conn_${varName}:`);
+    lines.push(`    ${varName}_conn_str = _custom_conn_${varName}`);
+    lines.push(`else:`);
+    lines.push(`    ${varName}_conn_str = (`);
+    lines.push(`        f"DRIVER={{{_driver_${varName}}}};"`);
+    lines.push(`        f"SERVER={_host_${varName}},{_port_${varName}};"`);
+    lines.push(`        f"DATABASE={_db_${varName}};"`);
+    lines.push(`        f"UID={_user_${varName}};"`);
+    lines.push(`        f"PWD={_pwd_${varName}}"`);
+    lines.push(`    )`);
 
     lines.push(`try:`);
     lines.push(`    import pyodbc`);
@@ -629,10 +635,17 @@ ${queryInfo.sql_text}
       lines.push(`    _db_name = os.getenv("DB_NAME_${envKey}", "${conn.database_name}")`);
       lines.push(`    _user = os.getenv("DB_USER_${envKey}", os.getenv("DB_USER_DEFAULT", ""))`);
       lines.push(`    _pwd = os.getenv("DB_PASSWORD_${envKey}", os.getenv("DB_PASSWORD_DEFAULT", ""))`);
-      lines.push(`    _conn_str = os.getenv(`);
-      lines.push(`        "DB_CONN_STR_${envKey}",`);
-      lines.push(`        f"DRIVER={{{_driver}}};SERVER={_host},{_port};DATABASE={_db_name};UID={_user};PWD={_pwd}"`);
-      lines.push(`    )`);
+      lines.push(`    _custom_conn = os.getenv("DB_CONN_STR_${envKey}", "").strip()`);
+      lines.push(`    if _custom_conn and "UID=;" not in _custom_conn and "PWD=;" not in _custom_conn:`);
+      lines.push(`        _conn_str = _custom_conn`);
+      lines.push(`    else:`);
+      lines.push(`        _conn_str = (`);
+      lines.push(`            f"DRIVER={{{_driver}}};"`);
+      lines.push(`            f"SERVER={_host},{_port};"`);
+      lines.push(`            f"DATABASE={_db_name};"`);
+      lines.push(`            f"UID={_user};"`);
+      lines.push(`            f"PWD={_pwd}"`);
+      lines.push(`        )`);
       lines.push(`    _db = pyodbc.connect(_conn_str)`);
       lines.push(`    _cursor = _db.cursor()`);
 
@@ -1029,8 +1042,8 @@ export function transpileFlowToPython(
           envLines.push(`DB_DRIVER_${key}=${driver}`);
           envLines.push(`DB_USER_${key}=`);
           envLines.push(`DB_PASSWORD_${key}=`);
-          envLines.push(`# Cadena de conexion completa opcional (si se define, tiene prioridad sobre las variables anteriores):`);
-          envLines.push(`DB_CONN_STR_${key}=DRIVER={${driver}};SERVER=${c.host},${port};DATABASE=${c.database_name};UID=;PWD=`);
+          envLines.push(`# Cadena de conexion completa opcional (descomentar solo si se desea usar en lugar de las variables individuales):`);
+          envLines.push(`# DB_CONN_STR_${key}=DRIVER={${driver}};SERVER=${c.host},${port};DATABASE=${c.database_name};UID=tu_usuario;PWD=tu_contrasena`);
           envLines.push('');
         }
       }
