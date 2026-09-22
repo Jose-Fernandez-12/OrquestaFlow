@@ -33,6 +33,316 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     return { data: flow };
   });
 
+  // Import flow from JSON bundle or legacy format
+  app.post<{
+    Body: {
+      name?: string;
+      description?: string;
+      definition?: any;
+      flow?: { name?: string; description?: string; definition?: any };
+      queries?: Array<{
+        id: string;
+        name: string;
+        group_name?: string | null;
+        region?: string | null;
+        sql_text: string;
+        params?: any;
+        connection_ids?: any;
+        display_columns?: any;
+      }>;
+      connections?: Array<{
+        id: string;
+        name: string;
+        group_name?: string | null;
+        region?: string | null;
+        city?: string | null;
+        host: string;
+        database_name?: string;
+        port?: number;
+        driver?: string;
+        env_credential_key?: string | null;
+        username?: string;
+        password?: string;
+      }>;
+      nodes?: any[];
+      edges?: any[];
+    };
+  }>('/import', async (request) => {
+    const db = getDb();
+    const body = request.body || {};
+
+    // 1. Resolve flow metadata & definition
+    const flowName = body.name || body.flow?.name || 'Flujo importado';
+    const flowDesc = body.description || body.flow?.description || '';
+    const rawDefinition = body.definition || body.flow?.definition;
+
+    let definitionObj: { nodes: any[]; edges: any[] } = { nodes: [], edges: [] };
+    if (rawDefinition) {
+      if (typeof rawDefinition === 'string') {
+        try {
+          definitionObj = JSON.parse(rawDefinition);
+        } catch {
+          definitionObj = { nodes: [], edges: [] };
+        }
+      } else if (typeof rawDefinition === 'object' && rawDefinition !== null) {
+        definitionObj = rawDefinition;
+      }
+    } else if (Array.isArray(body.nodes)) {
+      definitionObj = {
+        nodes: body.nodes,
+        edges: Array.isArray(body.edges) ? body.edges : []
+      };
+    }
+
+    if (!Array.isArray(definitionObj.nodes)) definitionObj.nodes = [];
+    if (!Array.isArray(definitionObj.edges)) definitionObj.edges = [];
+
+    // 2. Process connections
+    const rawConnections = body.connections || [];
+    const connectionIdMap = new Map<string, string>(); // oldId -> localId
+    const createdConnections: Array<{ id: string; name: string; host: string; database_name: string }> = [];
+    const reusedConnections: Array<{ id: string; name: string; host: string; database_name: string }> = [];
+
+    for (const conn of rawConnections) {
+      if (!conn.host) continue;
+
+      // Check if connection already exists by ID or host + database_name
+      let existing = db.prepare('SELECT * FROM connections WHERE id = ?').get(conn.id) as any;
+      if (!existing && conn.host && conn.database_name) {
+        existing = db.prepare('SELECT * FROM connections WHERE host = ? AND database_name = ?').get(conn.host, conn.database_name) as any;
+      }
+
+      if (existing) {
+        connectionIdMap.set(conn.id, existing.id);
+        reusedConnections.push({
+          id: existing.id,
+          name: existing.name,
+          host: existing.host,
+          database_name: existing.database_name
+        });
+      } else {
+        const newConnId = uuid();
+        connectionIdMap.set(conn.id, newConnId);
+        db.prepare(`
+          INSERT INTO connections (id, name, group_name, region, city, host, database_name, port, driver, username, password, env_credential_key)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          newConnId,
+          conn.name || `Conexión ${conn.database_name || conn.host}`,
+          conn.group_name || null,
+          conn.region || 'Default',
+          conn.city || null,
+          conn.host,
+          conn.database_name || '',
+          conn.port || 1433,
+          conn.driver || 'ODBC Driver 17 for SQL Server',
+          conn.username || '',
+          conn.password || '',
+          conn.env_credential_key || null
+        );
+
+        createdConnections.push({
+          id: newConnId,
+          name: conn.name || `Conexión ${conn.database_name || conn.host}`,
+          host: conn.host,
+          database_name: conn.database_name || ''
+        });
+      }
+    }
+
+    // 3. Process queries
+    const rawQueries = body.queries || [];
+    const queryIdMap = new Map<string, string>(); // oldQueryId -> localQueryId
+    const createdQueries: Array<{ id: string; name: string }> = [];
+    const reusedQueries: Array<{ id: string; name: string }> = [];
+
+    for (const q of rawQueries) {
+      if (!q.sql_text) continue;
+
+      // Remap connection_ids
+      let cids: string[] = [];
+      try {
+        cids = Array.isArray(q.connection_ids)
+          ? q.connection_ids
+          : JSON.parse(q.connection_ids || '[]');
+      } catch {
+        cids = [];
+      }
+      const remappedCids = cids.map(cid => connectionIdMap.get(cid) || cid);
+
+      // Check if query exists by ID
+      let existingQuery = db.prepare('SELECT * FROM queries WHERE id = ?').get(q.id) as any;
+      if (!existingQuery) {
+        existingQuery = db.prepare('SELECT * FROM queries WHERE name = ? AND sql_text = ?').get(q.name, q.sql_text) as any;
+      }
+
+      if (existingQuery) {
+        queryIdMap.set(q.id, existingQuery.id);
+        reusedQueries.push({ id: existingQuery.id, name: existingQuery.name });
+      } else {
+        const newQueryId = uuid();
+        queryIdMap.set(q.id, newQueryId);
+
+        let paramsStr = '[]';
+        if (Array.isArray(q.params)) {
+          paramsStr = JSON.stringify(q.params);
+        } else if (typeof q.params === 'string') {
+          paramsStr = q.params;
+        }
+
+        let displayColsStr = '[]';
+        if (Array.isArray(q.display_columns)) {
+          displayColsStr = JSON.stringify(q.display_columns);
+        } else if (typeof q.display_columns === 'string') {
+          displayColsStr = q.display_columns;
+        }
+
+        db.prepare(`
+          INSERT INTO queries (id, name, group_name, region, sql_text, params, connection_ids, display_columns)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          newQueryId,
+          q.name || 'Consulta importada',
+          q.group_name || null,
+          q.region || null,
+          q.sql_text,
+          paramsStr,
+          JSON.stringify(remappedCids),
+          displayColsStr
+        );
+
+        createdQueries.push({ id: newQueryId, name: q.name || 'Consulta importada' });
+      }
+    }
+
+    // 4. Update query nodes in the flow definition with mapped query IDs
+    for (const node of definitionObj.nodes) {
+      if (node.type === 'query' && node.data?.queryId) {
+        const remapped = queryIdMap.get(node.data.queryId as string);
+        if (remapped) {
+          node.data.queryId = remapped;
+        }
+      }
+    }
+
+    // 5. Create new flow in SQLite
+    const newFlowId = uuid();
+    const finalDefinitionStr = JSON.stringify(definitionObj);
+
+    db.prepare(`
+      INSERT INTO flows (id, name, description, definition, is_locked)
+      VALUES (?, ?, ?, ?, 0)
+    `).run(newFlowId, flowName, flowDesc, finalDefinitionStr);
+
+    const createdFlow = db.prepare('SELECT * FROM flows WHERE id = ?').get(newFlowId);
+
+    return {
+      data: createdFlow,
+      summary: {
+        createdConnections,
+        reusedConnections,
+        createdQueries,
+        reusedQueries,
+        requiresCredentials: createdConnections.length > 0
+      }
+    };
+  });
+
+  // Export flow as complete JSON bundle (including queries and sanitized connections)
+  app.get<{ Params: { id: string } }>('/:id/export-json', async (request, reply) => {
+    const db = getDb();
+    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
+    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+
+    let definition: { nodes: any[]; edges: any[] } = { nodes: [], edges: [] };
+    try {
+      definition = typeof flow.definition === 'string' ? JSON.parse(flow.definition) : flow.definition;
+    } catch {
+      definition = { nodes: [], edges: [] };
+    }
+
+    const nodes: any[] = definition.nodes || [];
+    const queryNodes = nodes.filter(n => n.type === 'query');
+
+    const queriesMap = new Map<string, any>();
+    const connectionsMap = new Map<string, any>();
+
+    for (const qNode of queryNodes) {
+      const queryId = qNode.data?.queryId as string;
+      if (queryId && !queriesMap.has(queryId)) {
+        const queryInfo = db.prepare('SELECT * FROM queries WHERE id = ?').get(queryId) as any;
+        if (queryInfo) {
+          let connectionIds: string[] = [];
+          try {
+            connectionIds = typeof queryInfo.connection_ids === 'string' ? JSON.parse(queryInfo.connection_ids) : (queryInfo.connection_ids || []);
+          } catch {}
+
+          let params: any[] = [];
+          try {
+            params = typeof queryInfo.params === 'string' ? JSON.parse(queryInfo.params) : (queryInfo.params || []);
+          } catch {}
+
+          let displayColumns: any[] = [];
+          try {
+            displayColumns = typeof queryInfo.display_columns === 'string' ? JSON.parse(queryInfo.display_columns) : (queryInfo.display_columns || []);
+          } catch {}
+
+          queriesMap.set(queryId, {
+            id: queryInfo.id,
+            name: queryInfo.name,
+            group_name: queryInfo.group_name || null,
+            region: queryInfo.region || null,
+            sql_text: queryInfo.sql_text,
+            params,
+            connection_ids: connectionIds,
+            display_columns: displayColumns
+          });
+
+          for (const cid of connectionIds) {
+            if (!connectionsMap.has(cid)) {
+              const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(cid) as any;
+              if (conn) {
+                connectionsMap.set(cid, {
+                  id: conn.id,
+                  name: conn.name,
+                  group_name: conn.group_name || null,
+                  region: conn.region || 'Default',
+                  city: conn.city || null,
+                  host: conn.host,
+                  database_name: conn.database_name,
+                  port: conn.port || 1433,
+                  driver: conn.driver || 'ODBC Driver 17 for SQL Server',
+                  env_credential_key: conn.env_credential_key || null,
+                  username: '',
+                  password: ''
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const bundle = {
+      version: '1.0',
+      format: 'orquestaflow-bundle',
+      exported_at: new Date().toISOString(),
+      flow: {
+        name: flow.name,
+        description: flow.description || '',
+        definition
+      },
+      queries: Array.from(queriesMap.values()),
+      connections: Array.from(connectionsMap.values())
+    };
+
+    const slug = (flow.name || 'flujo').toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+    reply
+      .header('Content-Type', 'application/json')
+      .header('Content-Disposition', `attachment; filename="${slug}_flow.json"`)
+      .send(bundle);
+  });
+
   // Update flow
   app.put<{ Params: { id: string }; Body: { name?: string; description?: string; definition?: string; status?: string; is_locked?: number } }>(
     '/:id',
