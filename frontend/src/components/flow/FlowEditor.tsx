@@ -640,7 +640,7 @@ function FlowCanvas() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Error desconocido' }));
-        dispatch(showToast({ message: err.error || 'Error al exportar el script', type: 'error' }));
+        dispatch(showToast(err.error || 'Error al exportar el script'));
         return;
       }
       const blob = await res.blob();
@@ -654,9 +654,9 @@ function FlowCanvas() {
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
       }, 1000);
-      dispatch(showToast({ message: 'Script Python exportado correctamente', type: 'success' }));
+      dispatch(showToast('Script Python exportado correctamente'));
     } catch (e) {
-      dispatch(showToast({ message: 'Error al exportar el script Python', type: 'error' }));
+      dispatch(showToast('Error al exportar el script Python'));
     }
   };
 
