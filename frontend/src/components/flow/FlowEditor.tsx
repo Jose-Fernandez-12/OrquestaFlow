@@ -43,12 +43,14 @@ import {
   PlayCircle,
   Loader2,
   Pause,
-  Eye
+  Eye,
+  Upload
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
+import { ImportFlowModal } from './ImportFlowModal';
 import { 
   fetchFlows, 
   fetchFlow,
@@ -210,6 +212,7 @@ function FlowCanvas() {
     }
   }, [pausedNodeIds.length, isLiveExecuting]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const downloadedUrlsRef = useRef(new Set<string>());
 
   const autoDownloadFile = (downloadUrl: string, fileName: string) => {
@@ -616,14 +619,11 @@ function FlowCanvas() {
 
   const handleExportJSON = () => {
     if (!currentFlow) return;
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({
-      name: currentFlow.name,
-      description: currentFlow.description,
-      definition: currentFlow.definition
-    }, null, 2));
+    const url = getApiUrl(`/flows/${currentFlow.id}/export-json`);
     const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `${currentFlow.name.toLowerCase().replace(/\s+/g, '_')}_flow.json`);
+    downloadAnchor.setAttribute("href", url);
+    const slug = (currentFlow.name || 'flujo').toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+    downloadAnchor.setAttribute("download", `${slug}_flow.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -935,6 +935,18 @@ function FlowCanvas() {
                   >
                     <Download size={14} className="text-muted" />
                     <span>Exportar JSON</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      setIsImportModalOpen(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <Upload size={14} className="text-muted" />
+                    <span>Importar JSON</span>
                   </button>
 
                   <div className="h-px bg-border my-1"></div>
@@ -1328,6 +1340,16 @@ function FlowCanvas() {
         flow={currentFlow}
         isOpen={showHistoryModal}
         onClose={() => setShowHistoryModal(false)}
+      />
+
+      {/* Import Flow Modal */}
+      <ImportFlowModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onSuccess={(importedFlow) => {
+          dispatch(fetchFlows());
+          navigate(`/flujos/${importedFlow.id}`);
+        }}
       />
 
     </div>
