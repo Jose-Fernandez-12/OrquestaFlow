@@ -43,7 +43,8 @@ import {
   PlayCircle,
   Loader2,
   Pause,
-  Eye
+  Eye,
+  FileCode2
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -630,6 +631,35 @@ function FlowCanvas() {
     setShowOptionsMenu(false);
   };
 
+  const handleExportPython = async () => {
+    if (!currentFlow) return;
+    setShowOptionsMenu(false);
+    try {
+      const res = await fetch(`${getApiUrl(`/flows/${currentFlow.id}/export-python`)}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Error desconocido' }));
+        dispatch(showToast({ message: err.error || 'Error al exportar el script', type: 'error' }));
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${currentFlow.name.toLowerCase().replace(/\s+/g, '_')}_flow.py`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      }, 1000);
+      dispatch(showToast({ message: 'Script Python exportado correctamente', type: 'success' }));
+    } catch (e) {
+      dispatch(showToast({ message: 'Error al exportar el script Python', type: 'error' }));
+    }
+  };
+
   const handleDeleteCurrentFlowConfirm = async () => {
     if (!currentFlow) return;
     setIsDeleting(true);
@@ -935,6 +965,17 @@ function FlowCanvas() {
                   >
                     <Download size={14} className="text-muted" />
                     <span>Exportar JSON</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleExportPython();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <FileCode2 size={14} className="text-muted" />
+                    <span>Exportar a Python</span>
                   </button>
 
                   <div className="h-px bg-border my-1"></div>
