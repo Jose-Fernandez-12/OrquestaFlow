@@ -4,7 +4,7 @@ import { TYPE_LABELS, TYPE_COLORS, TYPE_BG_COLORS } from './types';
 import {
   Play, Globe, Code, FileOutput, Database, Clock,
   FileSpreadsheet, List, Repeat, Square, Check, Loader2, X,
-  Pause
+  Pause, GitFork, Braces, Radio, KeyRound, Bot
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -25,6 +25,11 @@ const TYPE_ICONS: Record<string, React.ElementType> = {
   dataList: List,
   forEach: Repeat,
   forEachEnd: Square,
+  conditionalBranch: GitFork,
+  jsonTransform: Braces,
+  webhookTrigger: Radio,
+  oauth2Connector: KeyRound,
+  aiChatCompletion: Bot,
 };
 
 interface InspectorHeaderProps {

@@ -73,36 +73,53 @@ export function WebhookTriggerInspector({
         </p>
       </div>
 
-      {/* HMAC Secret */}
       <div className="space-y-1.5">
         <label className="text-xs font-medium flex items-center justify-between">
-          <span>Clave Secreta HMAC (Opcional)</span>
-          <span className="text-[10px] text-muted">SHA-256</span>
+          <span>Secreto (recomendado)</span>
+          <span className="text-[10px] text-muted">HMAC SHA-256 o Bearer</span>
         </label>
         <Input
           type="password"
           value={secret}
           onChange={(e) => updateNodeData('secret', e.target.value)}
-          placeholder="Clave para validar firma..."
+          placeholder="Secreto compartido con el emisor"
           className="font-mono text-xs"
         />
-        <p className="text-[10px] text-muted">
-          Si se configura, se exigirá el encabezado <code>x-webhook-signature: sha256=&lt;hash&gt;</code>.
+        <p className="text-[10px] text-muted leading-relaxed">
+          Con secreto, cada petición debe traer <code>x-webhook-signature: sha256=&lt;HMAC del cuerpo&gt;</code> o{' '}
+          <code>Authorization: Bearer &lt;secreto&gt;</code>; si no, se rechaza con 401. Sin secreto, cualquiera que conozca la URL
+          puede disparar el flujo.
         </p>
       </div>
 
-      {/* Variables usage guide */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium flex items-center justify-between">
+          <span>Payload de prueba (JSON)</span>
+          <span className="text-[10px] text-muted">para ejecuciones manuales</span>
+        </label>
+        <textarea
+          value={String(node.data?.samplePayload ?? '')}
+          onChange={(e) => updateNodeData('samplePayload', e.target.value)}
+          placeholder={'{\n  "cliente_id": 123,\n  "estado": "pagado"\n}'}
+          className="flex w-full min-h-[90px] rounded-sm border border-border bg-bg px-2.5 py-2 text-xs font-mono text-fg focus-visible:outline-none focus-visible:border-accent"
+        />
+        <p className="text-[10px] text-muted">
+          Al ejecutar desde el editor (normal o debug) el nodo entrega este cuerpo, así puedes mapear sus campos sin esperar una llamada real.
+        </p>
+      </div>
+
       <div className="p-2.5 bg-bg border border-border rounded text-xs space-y-1">
         <p className="font-medium text-fg">Uso de datos en el flujo:</p>
         <div className="space-y-0.5 font-mono text-[10px] text-muted">
-          <p>• Payload completo: <span className="text-accent">{`{{${node.id}.body}}`}</span> o <span className="text-accent">{`{{body}}`}</span></p>
-          <p>• Campos específicos: <span className="text-accent">{`{{body.cliente_id}}`}</span></p>
+          <p>• Cuerpo completo: <span className="text-accent">{`{{${node.id}.body}}`}</span></p>
+          <p>• Un campo: <span className="text-accent">{`{{${node.id}.body.cliente_id}}`}</span></p>
+          <p>• Query string: <span className="text-accent">{`{{${node.id}.query.param}}`}</span></p>
         </div>
       </div>
 
       {nodeResult && (
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-fg">Último payload recibido</label>
+          <label className="text-xs font-medium text-fg">{nodeResult.manual ? 'Payload de prueba usado' : 'Último payload recibido'}</label>
           <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
             <JsonTreeViewer data={nodeResult} />
           </div>

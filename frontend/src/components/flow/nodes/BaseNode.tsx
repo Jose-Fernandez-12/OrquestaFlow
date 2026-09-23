@@ -1,5 +1,5 @@
 import React from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { Handle, Position, useUpdateNodeInternals } from '@xyflow/react';
 import {
   Check,
   Loader2,
@@ -20,10 +20,12 @@ import {
   Braces,
   Radio,
   KeyRound,
-  Bot
+  Bot,
+  SkipForward
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
+import { describeRule, getBranchOutputs, getConditionRules, isExperimentalNode, shortExpression } from '../nodeDefinitions';
 
 interface BaseNodeProps {
   id: string;
@@ -69,6 +71,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
   const completed = useAppSelector(state => state.flows.completedNodeIds.includes(id));
   const hasError = useAppSelector(state => state.flows.errorNodeIds.includes(id));
   const paused = useAppSelector(state => state.flows.pausedNodeIds.includes(id));
+  const skipped = useAppSelector(state => state.flows.skippedNodeIds.includes(id));
   const nodeResult = useAppSelector(state => state.flows.nodeResults[id]);
   const progress = useAppSelector(state => state.flows.nodeProgress[id]);
   const timerState = useAppSelector(state => state.flows.nodeTimers[id]);
@@ -199,10 +202,19 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           : executing && !paused && (type === 'forEach' || type === 'forEachEnd')
             ? 'border-sky-500 ring-2 ring-sky-500/30'
             : executing && !paused && 'border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10',
-        completed && !hasError && 'border-success',
+        completed && !hasError && !skipped && 'border-success',
+        skipped && !executing && 'border-dashed opacity-55',
         hasError && !executing && 'border-red-500 ring-2 ring-red-500/30 bg-red-50'
       )}
     >
+      {skipped && !executing && !paused && (
+        <div
+          className="absolute -top-3 -right-3 w-6 h-6 bg-surface border border-border text-muted rounded-full flex items-center justify-center shadow-sm z-20"
+          title="Omitido: la rama condicional no fue seleccionada"
+        >
+          <SkipForward size={12} />
+        </div>
+      )}
       {/* Node Status Badge */}
       {paused && (
         <div className="absolute -top-3 -right-3 w-6 h-6 bg-amber-100 border border-amber-400 text-amber-600 rounded-full flex items-center justify-center shadow-sm z-20 animate-pulse">
@@ -217,7 +229,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           <Loader2 size={12} className="animate-spin" />
         </div>
       )}
-      {completed && !executing && !hasError && (
+      {completed && !executing && !hasError && !skipped && (
         <div className="absolute -top-3 -right-3 w-6 h-6 bg-success text-white rounded-full flex items-center justify-center shadow-sm z-20">
           <Check size={12} strokeWidth={3} />
         </div>
@@ -240,52 +252,15 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
             isConnectableEnd={true}
             className={handleClass}
           />
-          {data?.mode === 'switch' ? (
-            <>
-              {(data.cases || [{ id: '1', caseId: 'case_1' }]).map((c: any, idx: number) => (
-                <Handle
-                  key={c.caseId || idx}
-                  type="source"
-                  position={Position.Right}
-                  id={c.caseId || `case_${c.id}`}
-                  style={{ top: `${28 + idx * 24}px` }}
-                  className={cn(handleClass, "!bg-amber-500 !opacity-100")}
-                  title={`Caso: ${c.value || c.caseId || idx + 1}`}
-                />
-              ))}
-              <Handle
-                type="source"
-                position={Position.Right}
-                id="default"
-                style={{ bottom: '12px' }}
-                className={cn(handleClass, "!bg-muted-foreground !opacity-100")}
-                title="Por defecto (Default)"
-              />
-            </>
-          ) : (
-            <>
-              <Handle
-                type="source"
-                position={Position.Right}
-                id="true"
-                style={{ top: '32%' }}
-                className={cn(handleClass, "!bg-green-500 !opacity-100")}
-                title="Verdadero (True / Si)"
-              />
-              <Handle
-                type="source"
-                position={Position.Right}
-                id="false"
-                style={{ top: '68%' }}
-                className={cn(handleClass, "!bg-red-500 !opacity-100")}
-                title="Falso (False / No)"
-              />
-              <div className="absolute right-3 top-0 bottom-0 flex flex-col justify-around py-3 pointer-events-none text-[8px] font-bold select-none">
-                <span className="text-green-600">SI</span>
-                <span className="text-red-500">NO</span>
-              </div>
-            </>
-          )}
+          <Handle
+            type="source"
+            position={Position.Top}
+            id="top"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
         </>
       ) : (
         <>
@@ -352,8 +327,13 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
               </div>
             )
           ) : (
-            <div className="text-xs text-muted truncate">
-              {typeLabels[type] || type}
+            <div className="text-xs text-muted truncate flex items-center gap-1.5">
+              <span className="truncate">{skipped ? 'Omitido · rama no tomada' : typeLabels[type] || type}</span>
+              {isExperimentalNode(type) && (
+                <span className="shrink-0 text-[8px] font-bold tracking-wide px-1 py-px rounded bg-fuchsia-500/10 text-fuchsia-600 border border-fuchsia-500/25">
+                  BETA
+                </span>
+              )}
             </div>
           )}
 
@@ -496,60 +476,54 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
             </div>
           )}
 
-          {/* Conditional Branch preview */}
-          {type === 'conditionalBranch' && (
-            <div className="mt-1 flex flex-col gap-0.5 text-[10px] text-muted">
-              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border inline-block truncate max-w-[150px]">
-                {data.mode === 'switch' ? `Switch: ${data.switchField || 'campo'}` : `If: ${data.operator || 'equals'}`}
+          {type === 'jsonTransform' && (
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                {data.transformType === 'map' || data.transformType === 'pick'
+                  ? `Mapeo · ${Array.isArray(data.mappings) ? data.mappings.filter((m: any) => m?.from).length : String(data.pickFields || '').split(',').filter((s: string) => s.trim()).length} campos`
+                  : 'JavaScript'}
               </span>
-              {completed && nodeResult?.selectedBranch && (
-                <span className="text-amber-600 font-semibold">
-                  Rama: {String(nodeResult.selectedBranch)}
-                </span>
+              {completed && !skipped && Array.isArray(nodeResult) && (
+                <span className="text-teal-600 font-medium">{nodeResult.length} registros</span>
               )}
             </div>
           )}
 
-          {/* JSON Transform preview */}
-          {type === 'jsonTransform' && (
-            <div className="mt-1 text-[10px] text-muted">
-              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
-                {data.transformType === 'pick' ? 'Seleccionar campos' : 'JavaScript seguro'}
-              </span>
-            </div>
-          )}
-
-          {/* Webhook Trigger preview */}
           {type === 'webhookTrigger' && (
             <div className="mt-1 text-[10px] text-muted truncate">
               <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
-                {data.webhookId ? `/${data.webhookId}` : 'Sin Webhook ID'}
+                POST /{String(data.webhookId || id)}
               </span>
             </div>
           )}
 
-          {/* OAuth2 Connector preview */}
           {type === 'oauth2Connector' && (
-            <div className="mt-1 text-[10px] text-muted">
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
               <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
-                {data.grantType === 'password' ? 'Password' : 'Client Creds'}
+                {data.grantType === 'password' ? 'Password' : data.grantType === 'refresh_token' ? 'Refresh token' : 'Client credentials'}
               </span>
               {completed && nodeResult?.access_token && (
-                <span className="ml-1 text-emerald-600 font-medium">Token OK</span>
+                <span className="text-emerald-600 font-medium">{nodeResult.from_cache ? 'Token (caché)' : 'Token OK'}</span>
               )}
             </div>
           )}
 
-          {/* AI Chat Completion preview */}
           {type === 'aiChatCompletion' && (
-            <div className="mt-1 text-[10px] text-muted truncate">
-              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted min-w-0">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border truncate">
                 {String(data.model || 'gpt-4o-mini')}
               </span>
+              {completed && nodeResult?.usage?.total_tokens && (
+                <span className="text-fuchsia-600 font-medium shrink-0">{nodeResult.usage.total_tokens} tokens</span>
+              )}
             </div>
           )}
         </div>
       </div>
+
+      {type === 'conditionalBranch' && (
+        <ConditionalOutputs nodeId={id} data={data} nodeResult={nodeResult} evaluated={completed && !skipped && !hasError} />
+      )}
 
       {/* Sleek bottom progress bar for timer node while executing */}
       {executing && (type === 'timer' || type === 'delay') && timerState && (
@@ -570,6 +544,81 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+const BRANCH_TONES = {
+  true: { dot: '!bg-emerald-500', text: 'text-emerald-600', active: 'bg-emerald-500/10' },
+  false: { dot: '!bg-rose-500', text: 'text-rose-600', active: 'bg-rose-500/10' },
+  case: { dot: '!bg-amber-500', text: 'text-amber-600', active: 'bg-amber-500/10' },
+  default: { dot: '!bg-slate-400', text: 'text-muted', active: 'bg-slate-500/10' },
+};
+
+function ConditionalOutputs({ nodeId, data, nodeResult, evaluated }: { nodeId: string; data: BaseNodeProps['data']; nodeResult: any; evaluated: boolean }) {
+  const isSwitch = data?.mode === 'switch';
+  const rules = isSwitch ? [] : getConditionRules(data);
+  const outputs = getBranchOutputs(data);
+  const selectedHandle =
+    evaluated && outputs.some(o => o.handle === nodeResult?.selectedHandle) ? nodeResult.selectedHandle : undefined;
+  const updateNodeInternals = useUpdateNodeInternals();
+  const handleKey = outputs.map(o => o.handle).join('|');
+
+  React.useEffect(() => {
+    updateNodeInternals(nodeId);
+  }, [handleKey, nodeId, updateNodeInternals]);
+
+  return (
+    <div className="border-t border-border">
+      <div className="px-3 py-1.5 text-[10px] font-mono text-muted space-y-0.5 max-w-[240px]">
+        {isSwitch ? (
+          <div className="truncate" title={String(data.switchField || '')}>
+            Según <span className="text-fg">{shortExpression(String(data.switchField || '')) || '(sin campo)'}</span>
+          </div>
+        ) : (
+          rules.slice(0, 3).map((rule, idx) => (
+            <div key={rule.id} className="truncate" title={describeRule(rule)}>
+              {idx > 0 && (
+                <span className="text-amber-600 font-semibold mr-1">{data.combinator === 'or' ? 'O' : 'Y'}</span>
+              )}
+              <span className="text-fg">{describeRule(rule)}</span>
+            </div>
+          ))
+        )}
+        {!isSwitch && rules.length > 3 && <div className="italic">+{rules.length - 3} condiciones más</div>}
+      </div>
+
+      <div className="pb-1">
+        {outputs.map(out => {
+          const tone = BRANCH_TONES[out.tone];
+          const isSelected = selectedHandle === out.handle;
+          const isDimmed = selectedHandle !== undefined && !isSelected;
+          return (
+            <div
+              key={out.handle}
+              className={cn(
+                'relative flex items-center justify-end gap-1.5 pr-4 pl-3 py-1 text-[11px] font-medium transition-colors',
+                isSelected && tone.active,
+                isDimmed && 'opacity-40'
+              )}
+            >
+              {isSelected && <Check size={11} className={tone.text} strokeWidth={3} />}
+              <span className={cn('truncate max-w-[170px]', tone.text)}>{out.label}</span>
+              <Handle
+                type="source"
+                position={Position.Right}
+                id={out.handle}
+                isConnectable={true}
+                className={cn(
+                  '!w-3 !h-3 !rounded-full !border-2 !border-surface z-20 cursor-crosshair hover:ring-2 hover:ring-accent/40',
+                  tone.dot
+                )}
+                title={`Salida: ${out.label}`}
+              />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

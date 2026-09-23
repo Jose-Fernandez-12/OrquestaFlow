@@ -23,8 +23,11 @@ export function OAuth2ConnectorInspector({
   const password = (node.data?.password as string) || '';
   const refreshToken = (node.data?.refreshToken as string) || '';
 
+  const authMethod = (node.data?.authMethod as string) === 'basic' ? 'basic' : 'body';
+  const cacheToken = node.data?.cacheToken !== false;
+
   const [copiedToken, setCopiedToken] = useState(false);
-  const tokenVar = `Bearer {{${node.id}.access_token}}`;
+  const tokenVar = `{{${node.id}.authorization_header}}`;
 
   const handleCopyVar = () => {
     navigator.clipboard.writeText(tokenVar);
@@ -77,9 +80,24 @@ export function OAuth2ConnectorInspector({
             type="password"
             value={clientSecret}
             onChange={(e) => updateNodeData('clientSecret', e.target.value)}
-            placeholder="••••••••••••"
+            placeholder="secreto o env:NOMBRE_VARIABLE"
             className="font-mono text-xs"
           />
+          <p className="text-[10px] text-muted">
+            Usa <code>env:MI_SECRETO</code> para leerlo de las variables de entorno del servidor; los secretos escritos aquí no se incluyen al exportar el flujo.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Envío de credenciales del cliente</label>
+          <select
+            value={authMethod}
+            onChange={(e) => updateNodeData('authMethod', e.target.value)}
+            className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
+          >
+            <option value="body">En el cuerpo (client_id / client_secret)</option>
+            <option value="basic">Cabecera Authorization: Basic</option>
+          </select>
         </div>
       </div>
 
@@ -133,10 +151,22 @@ export function OAuth2ConnectorInspector({
         </div>
       )}
 
-      {/* Usage guide */}
+      <label className="flex items-start gap-2 text-xs cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={cacheToken}
+          onChange={(e) => updateNodeData('cacheToken', e.target.checked)}
+          className="accent-accent mt-0.5"
+        />
+        <span>
+          Reutilizar el token mientras no expire
+          <span className="block text-[10px] text-muted">Evita pedir un token nuevo en cada iteración de un bucle o en cada ejecución.</span>
+        </span>
+      </label>
+
       <div className="p-2.5 bg-bg border border-border rounded text-xs space-y-1.5">
         <div className="flex items-center justify-between">
-          <span className="font-medium text-fg">Header de autorización para HTTP:</span>
+          <span className="font-medium text-fg">Valor para la cabecera Authorization:</span>
           <button
             type="button"
             onClick={handleCopyVar}
@@ -155,10 +185,10 @@ export function OAuth2ConnectorInspector({
       {nodeResult?.access_token && (
         <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded text-xs space-y-1">
           <p className="font-semibold text-emerald-600 flex items-center gap-1">
-            <Check size={13} /> Token OAuth2 activo en memoria
+            <Check size={13} /> {nodeResult.from_cache ? 'Token reutilizado de la caché' : 'Token obtenido'}
           </p>
           <p className="text-[11px] text-muted">
-            Tipo: {String(nodeResult.token_type || 'Bearer')} | Expira en: {String(nodeResult.expires_in || 3600)}s
+            Tipo: {String(nodeResult.token_type || 'Bearer')} | Expira en: {String(nodeResult.expires_in || 3600)}s | Obtenido: {String(nodeResult.acquired_at || '').replace('T', ' ').slice(0, 19)}
           </p>
         </div>
       )}

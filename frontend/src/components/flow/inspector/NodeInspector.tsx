@@ -23,7 +23,7 @@ import { JsonTransformInspector } from './inspectors/JsonTransformInspector';
 import { WebhookTriggerInspector } from './inspectors/WebhookTriggerInspector';
 import { OAuth2ConnectorInspector } from './inspectors/OAuth2ConnectorInspector';
 import { AiChatCompletionInspector } from './inspectors/AiChatCompletionInspector';
-import { findParentForEachNode, getForEachItems, getUpstreamNodes } from './utils';
+import { findParentForEachNode, getForEachItems } from './utils';
 
 export interface NodeInspectorProps {
   nodes: Node[];
@@ -129,11 +129,6 @@ export function NodeInspector({
     }
     return [];
   }, [parentLoopItems]);
-
-  const upstreamDataNodes = React.useMemo(() => {
-    if (!node) return [];
-    return getUpstreamNodes(node, edges, nodes);
-  }, [node, edges, nodes]);
 
   const copyVariable = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -369,18 +364,22 @@ export function NodeInspector({
         {type === 'conditionalBranch' && (
           <ConditionalBranchInspector
             node={node}
+            nodes={nodes}
+            edges={edges}
             updateNodeData={updateNodeData}
-            upstreamNodes={upstreamDataNodes}
             nodeResult={nodeResults[node.id]}
+            debugPreview={isPaused ? nodeDebugPreview?.nodePreview : undefined}
           />
         )}
 
         {type === 'jsonTransform' && (
           <JsonTransformInspector
             node={node}
+            nodes={nodes}
+            edges={edges}
             updateNodeData={updateNodeData}
-            upstreamNodes={upstreamDataNodes}
             nodeResult={nodeResults[node.id]}
+            debugPreview={isPaused ? nodeDebugPreview?.nodePreview : undefined}
           />
         )}
 
@@ -403,8 +402,9 @@ export function NodeInspector({
         {type === 'aiChatCompletion' && (
           <AiChatCompletionInspector
             node={node}
+            nodes={nodes}
+            edges={edges}
             updateNodeData={updateNodeData}
-            upstreamNodes={upstreamDataNodes}
             nodeResult={nodeResults[node.id]}
           />
         )}

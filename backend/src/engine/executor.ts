@@ -2,10 +2,12 @@ import { getDb } from '../db/database.js';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import vm from 'vm';
 import { v4 as uuid } from 'uuid';
 import mssql from 'mssql';
 import ExcelJS from 'exceljs';
 import { parseExcelOrCsvFile } from '../routes/files.js';
+import { getSystemSettingsFromDb } from '../routes/settings.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -22,6 +24,15 @@ export interface ActiveExecutionState {
 
 export const activeFlowExecutions = new Map<string, ActiveExecutionState>();
 
+// Only remove the state of the run that scheduled the cleanup; a newer run of the same flow must survive
+function scheduleExecutionCleanup(flowId: string, state: ActiveExecutionState | undefined) {
+  setTimeout(() => {
+    if (state && activeFlowExecutions.get(flowId) === state) {
+      activeFlowExecutions.delete(flowId);
+    }
+  }, 30000);
+}
+
 // Stop flow execution
 export function stopFlowEngine(flowId: string, reason = 'Ejecución detenida por el usuario'): boolean {
   const current = activeFlowExecutions.get(flowId);
@@ -35,9 +46,7 @@ export function stopFlowEngine(flowId: string, reason = 'Ejecución detenida por
     Object.values(current.resumeResolvers).forEach(resolve => resolve('stop'));
     current.resumeResolvers = {};
   }
-  setTimeout(() => {
-    activeFlowExecutions.delete(flowId);
-  }, 30000);
+  scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
   return true;
 }
 
@@ -146,6 +155,12 @@ export async function executeFlowEngine(
   const normalizedEdges = edges.map(edge => {
     const srcNode = nodes.find(n => n.id === edge.source);
     const tgtNode = nodes.find(n => n.id === edge.target);
+    if (tgtNode?.type === 'conditionalBranch' && isBranchHandle(edge.targetHandle)) {
+      return { ...edge, source: edge.target, target: edge.source, sourceHandle: edge.targetHandle, targetHandle: edge.sourceHandle };
+    }
+    if (srcNode?.type === 'conditionalBranch' && isBranchHandle(edge.sourceHandle)) {
+      return edge;
+    }
     if (srcNode && tgtNode) {
       const srcConfigStr = JSON.stringify(srcNode.data || {});
       if (srcConfigStr.includes(tgtNode.id)) {
@@ -198,6 +213,19 @@ export async function executeFlowEngine(
     }
   }
 
+  const experimentalEnabled = getSystemSettingsFromDb().experimental_nodes_enabled;
+  const disabledExperimental = nodes.find(n => EXPERIMENTAL_NODE_TYPES.includes(n.type));
+  if (disabledExperimental && !experimentalEnabled) {
+    activeFlowExecutions.delete(flowId);
+    throw new Error(
+      `El flujo usa el nodo experimental "${disabledExperimental.data?.label || disabledExperimental.type}". Habilita los nodos experimentales en Configuración para ejecutarlo.`
+    );
+  }
+
+  const initialInDegree: Record<string, number> = { ...inDegree };
+  const skippedIncoming: Record<string, number> = {};
+  const skippedNodes = new Set<string>();
+
   const context: Record<string, any> = { ...(options?.initialContext || {}) };
   const runningPromises = new Map<string, Promise<void>>();
   const completedNodes = new Set<string>();
@@ -241,7 +269,7 @@ export async function executeFlowEngine(
               const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(node.type);
               const currentExec = activeFlowExecutions.get(flowId);
               if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
-                notifyProgress(node.id, 'paused', { context: { ...context } });
+                notifyProgress(node.id, 'paused', { context: { ...context }, ...buildDebugPreview(node, context, normalizedEdges, nodes) });
                 await new Promise<void>((resolve) => {
                   if (currentExec.resumeResolvers) {
                     currentExec.resumeResolvers[node.id] = () => resolve();
@@ -311,7 +339,7 @@ export async function executeFlowEngine(
                     break;
                   case 'forEach':
                     output = await executeForEachNode(
-                      node, context, edges, nodes, adjList, notifyProgress,
+                      node, context, normalizedEdges, nodes, adjList, notifyProgress,
                       abortController.signal, flowId
                     );
                     break;
@@ -343,19 +371,23 @@ export async function executeFlowEngine(
                     output = executeConditionalBranchNode(node, context);
                     break;
                   case 'jsonTransform':
-                    output = executeJsonTransformNode(node, context);
+                    output = await executeJsonTransformNode(node, context, normalizedEdges, nodes);
                     break;
                   case 'webhookTrigger':
                     output = executeWebhookTriggerNode(node, context);
                     break;
                   case 'oauth2Connector':
-                    output = await executeOAuth2ConnectorNode(node, context);
+                    output = await executeOAuth2ConnectorNode(node, context, abortController.signal);
                     break;
                   case 'aiChatCompletion':
                     output = await executeAiChatCompletionNode(node, context, abortController.signal);
                     break;
                   default:
                     output = { warning: 'Unknown node type' };
+                }
+
+                if (abortController.signal.aborted) {
+                  throw new Error('Ejecución detenida por el usuario');
                 }
 
                 context[node.id] = output;
@@ -369,19 +401,20 @@ export async function executeFlowEngine(
                 }
                 notifyProgress(node.id, 'completed', output);
 
-                // Unlock dependents or propagate branch selection for conditionalBranch
-                if (node.type === 'conditionalBranch' && output?.selectedHandle) {
-                  const selectedHandle = String(output.selectedHandle);
-                  const outgoingEdges = normalizedEdges.filter(e => e.source === node.id);
-
-                  outgoingEdges.forEach(edge => {
-                    const matchesHandle = !edge.sourceHandle || edge.sourceHandle === selectedHandle;
-                    if (matchesHandle) {
-                      inDegree[edge.target]--;
-                    } else {
-                      markBranchSkipped(edge.target, normalizedEdges, inDegree, completedNodes, notifyProgress);
-                    }
-                  });
+                if (node.type === 'conditionalBranch') {
+                  const branchState: BranchSkipState = {
+                    inDegree, initialInDegree, skippedIncoming, skippedNodes, completedNodes,
+                    adjList, notify: notifyProgress
+                  };
+                  normalizedEdges
+                    .filter(e => e.source === node.id)
+                    .forEach(edge => {
+                      if (edgeFollowsBranch(edge, output.selectedHandle)) {
+                        inDegree[edge.target]--;
+                      } else {
+                        skipIncomingEdge(edge.target, branchState);
+                      }
+                    });
                 } else if (adjList[node.id]) {
                   adjList[node.id].forEach(depId => {
                     inDegree[depId]--;
@@ -406,9 +439,7 @@ export async function executeFlowEngine(
               if (current && current.status !== 'cancelled') {
                 current.status = 'error';
               }
-              setTimeout(() => {
-                activeFlowExecutions.delete(flowId);
-              }, 30000);
+              scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
               reject(err);
             });
           }
@@ -420,9 +451,7 @@ export async function executeFlowEngine(
         if (current && current.status !== 'cancelled') {
           current.status = 'completed';
         }
-        setTimeout(() => {
-          activeFlowExecutions.delete(flowId);
-        }, 30000);
+        scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
         resolve(context);
       }
     };
@@ -800,6 +829,10 @@ function evaluatePathOnObject(obj: any, pathStr: string): any {
       } else {
         val = val[parseInt(idxOrStar, 10)];
       }
+    } else if (Array.isArray(val) && !/^\d+$/.test(token) && token !== 'length' && !(token in val)) {
+      // Field access on a row set (e.g. {{consulta.total}}) reads the first row
+      const first = val[0];
+      val = first !== null && typeof first === 'object' ? first[token] : undefined;
     } else {
       val = val[token];
     }
@@ -1426,8 +1459,7 @@ function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[]
       continue;
     }
     
-    // If source is a timer or delay, trace back to what feeds the timer
-    if (sourceNode.type === 'timer' || sourceNode.type === 'delay') {
+    if (sourceNode.type === 'timer' || sourceNode.type === 'delay' || sourceNode.type === 'conditionalBranch') {
       const upstreamSources = getEffectiveDataSources(sourceNode.id, edges, nodes);
       result.push(...upstreamSources);
     } else if (sourceNode.type !== 'start') {
@@ -1744,11 +1776,9 @@ async function executeForEachNode(
     return [];
   }
 
-  // Identify the terminal node inside the subgraph that connects to forEachEnd
-  const terminalEdge = edges.find(
+  const terminalEdges = edges.filter(
     e => e.target === forEachEndId && subgraphNodeIds.includes(e.source)
   );
-  const terminalSubNodeId = terminalEdge ? terminalEdge.source : null;
 
   // Build local adjList and compute base inDegree for the sub-graph
   const subAdjList: Record<string, string[]> = {};
@@ -1822,6 +1852,8 @@ async function executeForEachNode(
     // Reset sub-graph state for this iteration
     const localInDegree = { ...baseInDegree };
     const localCompleted = new Set<string>();
+    const localSkipped = new Set<string>();
+    const localSkippedIncoming: Record<string, number> = {};
     const localRunning = new Map<string, Promise<void>>();
     let iterationError = false;
     let lastOutput: any = null;
@@ -1846,7 +1878,8 @@ async function executeForEachNode(
                 if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
                   onNodeProgress(subNode.id, 'paused', {
                     context: { ...localContext },
-                    iteration: { current: i + 1, total: items.length, item }
+                    iteration: { current: i + 1, total: items.length, item },
+                    ...buildDebugPreview(subNode, localContext, edges, nodes, { current: i + 1, total: items.length })
                   });
                   await new Promise<void>((resolve) => {
                     if (currentExec.resumeResolvers) {
@@ -1912,10 +1945,10 @@ async function executeForEachNode(
                       output = executeConditionalBranchNode(subNode, localContext);
                       break;
                     case 'jsonTransform':
-                      output = executeJsonTransformNode(subNode, localContext);
+                      output = await executeJsonTransformNode(subNode, localContext, edges, nodes);
                       break;
                     case 'oauth2Connector':
-                      output = await executeOAuth2ConnectorNode(subNode, localContext);
+                      output = await executeOAuth2ConnectorNode(subNode, localContext, signal);
                       break;
                     case 'aiChatCompletion':
                       output = await executeAiChatCompletionNode(subNode, localContext, signal);
@@ -1925,12 +1958,30 @@ async function executeForEachNode(
                   }
 
                   localContext[subNode.id] = output;
-                  lastOutput = output;
+                  if (subNode.type !== 'conditionalBranch') lastOutput = output;
                   localCompleted.add(subNode.id);
                   onNodeProgress(subNode.id, 'completed', output);
 
-                  // Unlock dependents within the sub-graph
-                  if (subAdjList[subNode.id]) {
+                  if (subNode.type === 'conditionalBranch') {
+                    const branchState: BranchSkipState = {
+                      inDegree: localInDegree,
+                      initialInDegree: baseInDegree,
+                      skippedIncoming: localSkippedIncoming,
+                      skippedNodes: localSkipped,
+                      completedNodes: localCompleted,
+                      adjList: subAdjList,
+                      notify: onNodeProgress
+                    };
+                    subEdges
+                      .filter(e => e.source === subNode.id)
+                      .forEach(edge => {
+                        if (edgeFollowsBranch(edge, output.selectedHandle)) {
+                          localInDegree[edge.target]--;
+                        } else {
+                          skipIncomingEdge(edge.target, branchState);
+                        }
+                      });
+                  } else if (subAdjList[subNode.id]) {
                     subAdjList[subNode.id].forEach(depId => {
                       localInDegree[depId]--;
                     });
@@ -1963,10 +2014,22 @@ async function executeForEachNode(
       checkAndRunLocal();
     });
 
-    // Collect the output from the terminal subgraph node (or fallback to lastOutput)
-    const subResult = (terminalSubNodeId && localContext[terminalSubNodeId] !== undefined)
-      ? localContext[terminalSubNodeId]
-      : lastOutput;
+    let subResult: any = lastOutput;
+    if (terminalEdges.length > 0) {
+      const activeTerminal = terminalEdges.find(e => {
+        if (localSkipped.has(e.source)) return false;
+        const out = localContext[e.source];
+        if (nodes.find(n => n.id === e.source)?.type === 'conditionalBranch') {
+          return edgeFollowsBranch(e, out?.selectedHandle);
+        }
+        return out !== undefined;
+      });
+      if (!activeTerminal) {
+        continue;
+      }
+      const terminalIsConditional = nodes.find(n => n.id === activeTerminal.source)?.type === 'conditionalBranch';
+      subResult = terminalIsConditional ? item : localContext[activeTerminal.source];
+    }
 
     // Flatten rows from subResult and enrich with parent item metadata
     const flatSub = flattenRows(subResult);
@@ -2005,298 +2068,632 @@ async function executeForEachNode(
   return iterationResults;
 }
 
+
 // -------------------------------------------------------------
-// New Catalog Nodes Implementation
+// Branching, transformation and experimental nodes
 // -------------------------------------------------------------
 
-// Conditional Branch Handler (If/Else and Switch)
-function executeConditionalBranchNode(node: any, context: Record<string, any>): {
-  result: boolean | string;
-  selectedHandle: string;
-  evaluatedRule?: any;
-} {
-  const mode = node.data?.mode || 'if_else';
+export const EXPERIMENTAL_NODE_TYPES = ['webhookTrigger', 'oauth2Connector', 'aiChatCompletion'];
 
-  if (mode === 'if_else') {
-    const operator = node.data?.operator || 'equals';
-    const leftRaw = node.data?.leftOperand ?? '';
-    const rightRaw = node.data?.rightOperand ?? '';
+function isBranchHandle(handle?: string | null): boolean {
+  if (!handle) return false;
+  return handle === 'true' || handle === 'false' || handle === 'default' || handle.startsWith('case_');
+}
 
-    const leftVal = resolveTemplate(context, String(leftRaw));
-    const rightVal = resolveTemplate(context, String(rightRaw));
+function edgeFollowsBranch(edge: any, selectedHandle?: string): boolean {
+  if (!isBranchHandle(edge.sourceHandle)) return true;
+  return edge.sourceHandle === selectedHandle;
+}
 
-    let isMatch = false;
-    switch (operator) {
-      case 'equals':
-        isMatch = String(leftVal ?? '').trim().toLowerCase() === String(rightVal ?? '').trim().toLowerCase();
-        break;
-      case 'not_equals':
-        isMatch = String(leftVal ?? '').trim().toLowerCase() !== String(rightVal ?? '').trim().toLowerCase();
-        break;
-      case 'greater_than':
-        isMatch = Number(leftVal) > Number(rightVal);
-        break;
-      case 'less_than':
-        isMatch = Number(leftVal) < Number(rightVal);
-        break;
-      case 'greater_or_equal':
-        isMatch = Number(leftVal) >= Number(rightVal);
-        break;
-      case 'less_or_equal':
-        isMatch = Number(leftVal) <= Number(rightVal);
-        break;
-      case 'contains':
-        isMatch = String(leftVal ?? '').toLowerCase().includes(String(rightVal ?? '').toLowerCase());
-        break;
-      case 'not_contains':
-        isMatch = !String(leftVal ?? '').toLowerCase().includes(String(rightVal ?? '').toLowerCase());
-        break;
-      case 'regex':
-        try {
-          const re = new RegExp(String(rightVal));
-          isMatch = re.test(String(leftVal ?? ''));
-        } catch {
-          isMatch = false;
-        }
-        break;
-      case 'is_null':
-      case 'is_empty':
-        isMatch = leftVal === null || leftVal === undefined || leftVal === '' || (Array.isArray(leftVal) && leftVal.length === 0);
-        break;
-      case 'is_not_null':
-      case 'is_not_empty':
-        isMatch = !(leftVal === null || leftVal === undefined || leftVal === '' || (Array.isArray(leftVal) && leftVal.length === 0));
-        break;
-      default:
-        isMatch = Boolean(leftVal);
+interface BranchSkipState {
+  inDegree: Record<string, number>;
+  initialInDegree: Record<string, number>;
+  skippedIncoming: Record<string, number>;
+  skippedNodes: Set<string>;
+  completedNodes: Set<string>;
+  adjList: Record<string, string[]>;
+  notify: (nodeId: string, status: any, result?: any) => void;
+}
+
+// A node is skipped only when every one of its inputs comes from a non-selected branch;
+// merge nodes that still receive an active input run normally.
+function skipIncomingEdge(targetId: string, state: BranchSkipState): void {
+  if (state.completedNodes.has(targetId) || !(targetId in state.inDegree)) return;
+  state.inDegree[targetId]--;
+  state.skippedIncoming[targetId] = (state.skippedIncoming[targetId] || 0) + 1;
+  if (state.inDegree[targetId] > 0) return;
+  if (state.skippedIncoming[targetId] < (state.initialInDegree[targetId] || 0)) return;
+
+  state.skippedNodes.add(targetId);
+  state.completedNodes.add(targetId);
+  state.notify(targetId, 'completed', { skipped: true, reason: 'Rama condicional no seleccionada' });
+  for (const next of state.adjList[targetId] || []) {
+    skipIncomingEdge(next, state);
+  }
+}
+
+// ── Conditional branch ──
+
+interface ConditionRule {
+  id?: string;
+  left?: string;
+  operator?: string;
+  right?: string;
+}
+
+const OPERATOR_ALIASES: Record<string, string> = {
+  greater_than: 'gt',
+  greater_equal: 'gte',
+  greater_or_equal: 'gte',
+  less_than: 'lt',
+  less_equal: 'lte',
+  less_or_equal: 'lte',
+  is_null: 'is_empty',
+  is_not_null: 'is_not_empty',
+};
+
+const UNARY_OPERATORS = ['is_empty', 'is_not_empty', 'is_true', 'is_false'];
+
+function resolveOperand(context: Record<string, any>, raw: unknown): any {
+  if (raw === undefined || raw === null) return '';
+  const text = String(raw);
+  if (text.includes('{{')) return resolveTemplate(context, text);
+  const trimmed = text.trim();
+  const quoted = trimmed.match(/^(['"])([\s\S]*)\1$/);
+  return quoted ? quoted[2] : trimmed;
+}
+
+function toNumber(value: any): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  if (s === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toTimestamp(value: any): number | null {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(value.trim())) return null;
+  const t = Date.parse(value.trim());
+  return Number.isNaN(t) ? null : t;
+}
+
+function toText(value: any): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value).trim();
+}
+
+function isEmptyValue(value: any): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') return Object.keys(value).length === 0;
+  return false;
+}
+
+function valuesEqual(a: any, b: any): boolean {
+  const na = toNumber(a);
+  const nb = toNumber(b);
+  if (na !== null && nb !== null) return na === nb;
+  return toText(a).toLowerCase() === toText(b).toLowerCase();
+}
+
+function compareOrdered(a: any, b: any): number | null {
+  const na = toNumber(a);
+  const nb = toNumber(b);
+  if (na !== null && nb !== null) return na - nb;
+  const ta = toTimestamp(a);
+  const tb = toTimestamp(b);
+  if (ta !== null && tb !== null) return ta - tb;
+  if (a === null || a === undefined || b === null || b === undefined) return null;
+  return toText(a).localeCompare(toText(b), 'es', { sensitivity: 'base', numeric: true });
+}
+
+function evaluateRule(operator: string, left: any, right: any): boolean {
+  switch (operator) {
+    case 'equals':
+      return valuesEqual(left, right);
+    case 'not_equals':
+      return !valuesEqual(left, right);
+    case 'gt':
+    case 'gte':
+    case 'lt':
+    case 'lte': {
+      const cmp = compareOrdered(left, right);
+      if (cmp === null) return false;
+      if (operator === 'gt') return cmp > 0;
+      if (operator === 'gte') return cmp >= 0;
+      if (operator === 'lt') return cmp < 0;
+      return cmp <= 0;
     }
+    case 'contains':
+      return Array.isArray(left)
+        ? left.some(v => valuesEqual(v, right))
+        : toText(left).toLowerCase().includes(toText(right).toLowerCase());
+    case 'not_contains':
+      return !evaluateRule('contains', left, right);
+    case 'starts_with':
+      return toText(left).toLowerCase().startsWith(toText(right).toLowerCase());
+    case 'ends_with':
+      return toText(left).toLowerCase().endsWith(toText(right).toLowerCase());
+    case 'in_list': {
+      const list = Array.isArray(right) ? right : toText(right).split(',').map(s => s.trim()).filter(Boolean);
+      return list.some(v => valuesEqual(left, v));
+    }
+    case 'regex':
+      try {
+        return new RegExp(toText(right), 'i').test(toText(left));
+      } catch {
+        throw new Error(`Expresión regular inválida: ${toText(right)}`);
+      }
+    case 'is_empty':
+      return isEmptyValue(left);
+    case 'is_not_empty':
+      return !isEmptyValue(left);
+    case 'is_true':
+      return left === true || ['true', '1', 'si', 'sí', 'yes'].includes(toText(left).toLowerCase());
+    case 'is_false':
+      return left === false || ['false', '0', 'no'].includes(toText(left).toLowerCase());
+    default:
+      throw new Error(`Operador de comparación desconocido: ${operator}`);
+  }
+}
 
-    const selectedHandle = isMatch ? 'true' : 'false';
+function getConditionRules(data: any): ConditionRule[] {
+  if (Array.isArray(data?.conditions) && data.conditions.length > 0) return data.conditions;
+  return [{ left: data?.leftOperand ?? '', operator: data?.operator || 'equals', right: data?.rightOperand ?? '' }];
+}
+
+export function normalizeSwitchCases(cases: any): Array<{ id: string; value: string; label?: string }> {
+  if (!Array.isArray(cases)) return [];
+  return cases.map((c: any, idx: number) =>
+    typeof c === 'string'
+      ? { id: String(idx + 1), value: c }
+      : { id: String(c?.id ?? idx + 1), value: String(c?.value ?? ''), label: c?.label }
+  );
+}
+
+function executeConditionalBranchNode(node: any, context: Record<string, any>) {
+  const data = node.data || {};
+  const mode = data.mode === 'switch' ? 'switch' : 'if_else';
+
+  if (mode === 'switch') {
+    const expression = data.switchField ?? data.switchValue ?? '';
+    const switchValue = resolveOperand(context, expression);
+    const cases = normalizeSwitchCases(data.cases);
+    const matched = cases.find(c => valuesEqual(switchValue, resolveOperand(context, c.value)));
+    const selectedHandle = matched ? `case_${matched.id}` : 'default';
     return {
-      result: isMatch,
+      mode,
+      result: matched ? matched.value : 'default',
       selectedHandle,
-      evaluatedRule: { operator, leftVal, rightVal, isMatch }
+      branchLabel: matched ? (matched.label || matched.value) : 'Por defecto',
+      switchExpression: expression,
+      switchValue,
     };
-  } else {
-    // Switch mode
-    const expression = node.data?.switchValue ?? '';
-    const switchVal = resolveTemplate(context, String(expression));
-    const cases = Array.isArray(node.data?.cases) ? node.data.cases : [];
-    
-    let matchedHandle = 'default';
-    for (const c of cases) {
-      const caseVal = resolveTemplate(context, String(c.value ?? ''));
-      if (String(switchVal ?? '').trim().toLowerCase() === String(caseVal ?? '').trim().toLowerCase()) {
-        matchedHandle = c.caseId || `case_${c.id}`;
-        break;
-      }
-    }
+  }
 
+  const combinator = data.combinator === 'or' ? 'or' : 'and';
+  const evaluations = getConditionRules(data).map(rule => {
+    const operator = OPERATOR_ALIASES[rule.operator || ''] || rule.operator || 'equals';
+    const unary = UNARY_OPERATORS.includes(operator);
+    const leftValue = resolveOperand(context, rule.left);
+    const rightValue = unary ? undefined : resolveOperand(context, rule.right);
     return {
-      result: matchedHandle,
-      selectedHandle: matchedHandle,
-      evaluatedRule: { switchVal, matchedHandle }
+      left: rule.left,
+      operator,
+      right: unary ? undefined : rule.right,
+      leftValue,
+      rightValue,
+      passed: evaluateRule(operator, leftValue, rightValue),
     };
-  }
-}
-
-// Mark unselected branch nodes as skipped so Kahn DAG does not stall
-function markBranchSkipped(
-  nodeId: string,
-  edges: any[],
-  inDegree: Record<string, number>,
-  completedNodes: Set<string>,
-  notifyProgress: (nodeId: string, status: any, result?: any) => void
-) {
-  if (completedNodes.has(nodeId)) return;
-  completedNodes.add(nodeId);
-  notifyProgress(nodeId, 'completed', { skipped: true, reason: 'Rama condicional no seleccionada' });
-
-  // Propagate to outgoing targets
-  const outgoing = edges.filter(e => e.source === nodeId);
-  outgoing.forEach(edge => {
-    inDegree[edge.target]--;
-    if (inDegree[edge.target] <= 0) {
-      markBranchSkipped(edge.target, edges, inDegree, completedNodes, notifyProgress);
-    }
   });
+
+  const isMatch = combinator === 'or' ? evaluations.some(e => e.passed) : evaluations.every(e => e.passed);
+  return {
+    mode,
+    result: isMatch,
+    selectedHandle: isMatch ? 'true' : 'false',
+    branchLabel: isMatch ? 'Sí' : 'No',
+    combinator,
+    evaluations,
+  };
 }
 
-// Json Transform Handler (safe in-memory mapping and picking)
-function executeJsonTransformNode(node: any, context: Record<string, any>): any {
-  const transformType = node.data?.transformType || 'javascript';
-  const inputExpr = node.data?.inputDataSource || '';
-  let inputData: any = null;
+// ── JSON transform ──
 
-  if (inputExpr && inputExpr.trim()) {
-    inputData = resolveTemplate(context, inputExpr);
-  } else {
-    // Auto-detect upstream
-    const keys = Object.keys(context).reverse();
-    for (const k of keys) {
-      if (k !== 'start' && k !== node.id && context[k] !== undefined) {
-        inputData = context[k];
-        break;
-      }
-    }
+function resolveTransformInput(node: any, context: Record<string, any>, edges: any[], nodes: any[]): any {
+  const expr = String(node.data?.inputData ?? node.data?.inputDataSource ?? '').trim();
+  if (expr) return resolveTemplate(context, expr);
+
+  for (const upstreamId of getEffectiveDataSources(node.id, edges, nodes)) {
+    if (context[upstreamId] !== undefined) return context[upstreamId];
   }
-
-  if (transformType === 'pick') {
-    const fields: string[] = (node.data?.fields || '').split(',').map((s: string) => s.trim()).filter(Boolean);
-    if (Array.isArray(inputData)) {
-      return inputData.map(item => {
-        if (typeof item !== 'object' || !item) return item;
-        const res: Record<string, any> = {};
-        for (const f of fields) {
-          res[f] = resolvePath(item, f);
-        }
-        return res;
-      });
-    } else if (typeof inputData === 'object' && inputData) {
-      const res: Record<string, any> = {};
-      for (const f of fields) {
-        res[f] = resolvePath(inputData, f);
-      }
-      return res;
-    }
-    return inputData;
-  }
-
-  if (transformType === 'javascript') {
-    const scriptCode = node.data?.expression || 'return data;';
-    try {
-      const fn = new Function('data', 'context', `
-        "use strict";
-        ${scriptCode.includes('return') ? scriptCode : `return (${scriptCode});`}
-      `);
-      return fn(inputData, context);
-    } catch (e: any) {
-      throw new Error(`Error en jsonTransform: ${e.message}`);
-    }
-  }
-
-  return inputData;
+  return context._item;
 }
 
-// Webhook Trigger Handler
+function getTransformMappings(data: any): Array<{ from: string; to: string }> {
+  if (Array.isArray(data?.mappings)) {
+    return data.mappings
+      .filter((m: any) => m && String(m.from || '').trim())
+      .map((m: any) => ({ from: String(m.from).trim(), to: String(m.to || m.from).trim() }));
+  }
+  const legacy = String(data?.pickFields ?? data?.fields ?? '');
+  return legacy.split(',').map(s => s.trim()).filter(Boolean).map(f => ({ from: f, to: f }));
+}
+
+function mapRecord(row: any, mappings: Array<{ from: string; to: string }>, keepOthers: boolean, context: Record<string, any>) {
+  if (row === null || typeof row !== 'object') return row;
+  const out: Record<string, any> = keepOthers ? { ...row } : {};
+  for (const { from, to } of mappings) {
+    if (from.includes('{{')) {
+      out[to] = resolveTemplate({ ...context, _item: row, item: row }, from);
+      continue;
+    }
+    let value = evaluatePathOnObject(row, from);
+    if (value === undefined) {
+      const key = Object.keys(row).find(k => k.toLowerCase() === from.toLowerCase());
+      value = key !== undefined ? row[key] : null;
+    }
+    if (keepOthers && from !== to && !from.includes('.')) delete out[from];
+    out[to] = value ?? null;
+  }
+  return out;
+}
+
+function extractRowSet(input: any): any[] | null {
+  if (Array.isArray(input)) return input;
+  if (input && typeof input === 'object' && (Array.isArray(input.rows) || Array.isArray(input.data) || Array.isArray(input.items))) {
+    return flattenRows(input);
+  }
+  return null;
+}
+
+const TRANSFORM_TIMEOUT_MS = 5000;
+
+// Lets users write either a bare expression (data.length) or statements without a return
+function compilesAsExpression(code: string): boolean {
+  try {
+    new vm.Script(`(${code}\n)`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runTransformScript(code: string, data: any, context: Record<string, any>): any {
+  // {{ruta}} inside the script is replaced by a correctly quoted JSON literal
+  const body = code.replace(/\{\{([^}]+)\}\}/g, (_m, pathStr: string) => JSON.stringify(resolvePath(context, pathStr) ?? null));
+  const fnBody = /\breturn\b/.test(body) || !compilesAsExpression(body) ? body : `return (${body}\n);`;
+  const payload = JSON.stringify({
+    data: data ?? null,
+    context,
+    item: context._item ?? null,
+    index: context._index ?? null,
+  });
+
+  // Data is re-created inside the isolated context so the script never touches host objects
+  const script = `
+    const __in = JSON.parse(__payload);
+    const __result = (function (data, context, item, index) {
+      "use strict";
+      ${fnBody}
+    })(__in.data, __in.context, __in.item, __in.index);
+    __result === undefined ? 'null' : JSON.stringify(__result);
+  `;
+
+  try {
+    const serialized = vm.runInNewContext(script, { __payload: payload }, { timeout: TRANSFORM_TIMEOUT_MS, filename: 'transformacion.js' });
+    return JSON.parse(serialized);
+  } catch (e: any) {
+    if (e?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+      throw new Error(`La transformación superó el límite de ${TRANSFORM_TIMEOUT_MS / 1000}s (¿bucle infinito?)`);
+    }
+    throw new Error(`Error en la transformación JavaScript: ${e?.message || e}`);
+  }
+}
+
+async function executeJsonTransformNode(node: any, context: Record<string, any>, edges: any[], nodes: any[]): Promise<any> {
+  const data = node.data || {};
+  const input = resolveTransformInput(node, context, edges, nodes);
+  const mode = data.transformType === 'pick' || data.transformType === 'map' ? 'map' : 'javascript';
+
+  if (mode === 'map') {
+    const mappings = getTransformMappings(data);
+    if (mappings.length === 0) return input;
+    const keepOthers = Boolean(data.keepOthers);
+    const rows = extractRowSet(input);
+    if (rows) return rows.map(row => mapRecord(row, mappings, keepOthers, context));
+    return mapRecord(input, mappings, keepOthers, context);
+  }
+
+  const code = String(data.expression || '').trim() || 'return data;';
+  return runTransformScript(code, input, context);
+}
+
+// ── Webhook trigger ──
+
 function executeWebhookTriggerNode(node: any, context: Record<string, any>): any {
   if (context._webhookPayload) {
     return context._webhookPayload;
   }
+  let body: any = {};
+  const sample = String(node.data?.samplePayload || '').trim();
+  if (sample) {
+    try {
+      body = JSON.parse(sample);
+    } catch {
+      throw new Error('Webhook: el payload de prueba no es un JSON válido');
+    }
+  }
   return {
-    msg: 'Webhook trigger inicializado',
-    webhookId: node.data?.webhookId || node.id,
-    timestamp: new Date().toISOString()
+    body,
+    headers: {},
+    query: {},
+    timestamp: new Date().toISOString(),
+    manual: true,
   };
 }
 
-// OAuth2 Connector Handler
-async function executeOAuth2ConnectorNode(node: any, context: Record<string, any>): Promise<any> {
-  const grantType = node.data?.grantType || 'client_credentials';
-  const tokenUrl = resolveTemplate(context, node.data?.tokenUrl || '');
-  const clientId = resolveTemplate(context, node.data?.clientId || '');
-  const clientSecret = resolveTemplate(context, node.data?.clientSecret || '');
-  const scope = resolveTemplate(context, node.data?.scope || '');
+// ── Shared helpers for outbound calls ──
 
-  if (!tokenUrl) {
-    throw new Error('OAuth2: Debe proporcionar la URL del token');
-  }
-
-  const bodyParams = new URLSearchParams();
-  bodyParams.append('grant_type', grantType);
-  if (clientId) bodyParams.append('client_id', clientId);
-  if (clientSecret) bodyParams.append('client_secret', clientSecret);
-  if (scope) bodyParams.append('scope', scope);
-
-  const res = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': 'application/json'
-    },
-    body: bodyParams.toString()
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`OAuth2 error (${res.status}): ${errText}`);
-  }
-
-  const tokenData = (await res.json()) as any;
-  return {
-    ...tokenData,
-    access_token: tokenData.access_token || tokenData.token,
-    token_type: tokenData.token_type || 'Bearer',
-    expires_in: tokenData.expires_in,
-    acquired_at: new Date().toISOString()
-  };
+function resolveSecret(context: Record<string, any>, raw: unknown): string {
+  const value = String(resolveTemplate(context, String(raw ?? '')) ?? '').trim();
+  const envMatch = value.match(/^env:([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (!envMatch) return value;
+  const envValue = process.env[envMatch[1]];
+  if (!envValue) throw new Error(`La variable de entorno ${envMatch[1]} no está definida en el servidor`);
+  return envValue;
 }
 
-// AI Chat Completion Handler
-async function executeAiChatCompletionNode(node: any, context: Record<string, any>, signal?: AbortSignal): Promise<any> {
-  const endpoint = resolveTemplate(context, node.data?.endpoint || 'https://api.openai.com/v1/chat/completions');
-  const apiKey = resolveTemplate(context, node.data?.apiKey || '');
-  const model = resolveTemplate(context, node.data?.model || 'gpt-4o-mini');
-  const systemPrompt = resolveTemplate(context, node.data?.systemPrompt || '');
-  const userPrompt = resolveTemplate(context, node.data?.userPrompt || '');
-  const temperature = Number(node.data?.temperature ?? 0.7);
-  const responseFormat = node.data?.responseFormat || 'text';
+function maskSecret(value: unknown): string {
+  const s = String(value ?? '');
+  if (!s) return '';
+  if (s.startsWith('env:')) return s;
+  return '••••••••';
+}
 
-  if (!endpoint) {
-    throw new Error('AI Chat: URL de endpoint requerida');
-  }
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
 
-  const messages: any[] = [];
-  if (systemPrompt) {
-    messages.push({ role: 'system', content: systemPrompt });
+async function fetchWithTimeout(url: string, init: RequestInit, signal: AbortSignal | undefined, timeoutMs: number, label: string) {
+  try {
+    return await fetch(url, { ...init, signal: withTimeout(signal, timeoutMs) });
+  } catch (e: any) {
+    if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
+    if (e?.name === 'TimeoutError') throw new Error(`${label}: sin respuesta tras ${Math.round(timeoutMs / 1000)}s`);
+    throw new Error(`${label}: no se pudo conectar (${e?.cause?.code || e?.message || e})`);
   }
-  messages.push({ role: 'user', content: userPrompt });
+}
+
+async function readErrorBody(res: Response): Promise<string> {
+  const text = await res.text().catch(() => '');
+  try {
+    const json = JSON.parse(text);
+    return json.error_description || json.error?.message || json.message || (typeof json.error === 'string' ? json.error : text);
+  } catch {
+    return text.slice(0, 500);
+  }
+}
+
+// ── OAuth2 connector ──
+
+const oauthTokenCache = new Map<string, { token: any; expiresAt: number }>();
+
+function buildOAuth2Request(node: any, context: Record<string, any>, revealSecrets: boolean) {
+  const data = node.data || {};
+  const grantType = data.grantType || 'client_credentials';
+  const tokenUrl = String(resolveTemplate(context, data.tokenUrl || '') || '').trim();
+  const clientId = String(resolveTemplate(context, data.clientId || '') || '').trim();
+  const scope = String(resolveTemplate(context, data.scope || '') || '').trim();
+  const authMethod = data.authMethod === 'basic' ? 'basic' : 'body';
+  const secret = (raw: unknown) => (revealSecrets ? resolveSecret(context, raw) : maskSecret(raw));
+  const clientSecret = secret(data.clientSecret);
+
+  const params: Record<string, string> = { grant_type: grantType };
+  if (authMethod === 'body') {
+    if (clientId) params.client_id = clientId;
+    if (clientSecret) params.client_secret = clientSecret;
+  }
+  if (scope) params.scope = scope;
+  if (grantType === 'password') {
+    params.username = String(resolveTemplate(context, data.username || '') || '');
+    params.password = secret(data.password);
+  }
+  if (grantType === 'refresh_token') {
+    params.refresh_token = secret(data.refreshToken);
+  }
 
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json'
+    'Content-Type': 'application/x-www-form-urlencoded',
+    Accept: 'application/json',
   };
-  if (apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
+  if (authMethod === 'basic') {
+    headers.Authorization = revealSecrets
+      ? `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`
+      : 'Basic ••••••••';
   }
 
-  const requestBody: Record<string, any> = {
-    model,
-    messages,
-    temperature
-  };
+  return { grantType, tokenUrl, clientId, scope, params, headers };
+}
 
-  if (responseFormat === 'json_object') {
-    requestBody.response_format = { type: 'json_object' };
+async function executeOAuth2ConnectorNode(node: any, context: Record<string, any>, signal?: AbortSignal): Promise<any> {
+  const req = buildOAuth2Request(node, context, true);
+  if (!req.tokenUrl) throw new Error('OAuth2: debe indicar la URL del endpoint de token');
+  if (req.grantType === 'refresh_token' && !req.params.refresh_token) throw new Error('OAuth2: falta el refresh token');
+  if (req.grantType === 'password' && !req.params.username) throw new Error('OAuth2: falta el usuario');
+
+  const useCache = node.data?.cacheToken !== false;
+  const cacheKey = JSON.stringify([req.tokenUrl, req.clientId, req.grantType, req.scope, req.params.username || '']);
+  const cached = useCache ? oauthTokenCache.get(cacheKey) : undefined;
+  if (cached && cached.expiresAt > Date.now()) {
+    return { ...cached.token, from_cache: true };
   }
 
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(requestBody),
-    signal
-  });
+  const timeoutMs = getSystemSettingsFromDb().http_timeout_seconds * 1000;
+  const res = await fetchWithTimeout(
+    req.tokenUrl,
+    { method: 'POST', headers: req.headers, body: new URLSearchParams(req.params).toString() },
+    signal,
+    timeoutMs,
+    'OAuth2'
+  );
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`AI Completion error (${res.status}): ${errText}`);
+    throw new Error(`OAuth2: el servidor respondió ${res.status} - ${await readErrorBody(res)}`);
   }
 
-  const json = (await res.json()) as any;
-  const choice = json.choices?.[0];
-  const messageContent = choice?.message?.content || '';
+  const tokenData = (await res.json().catch(() => null)) as any;
+  const accessToken = tokenData?.access_token || tokenData?.token;
+  if (!accessToken) throw new Error('OAuth2: la respuesta no contiene access_token');
 
-  let parsedJson: any = null;
-  if (responseFormat === 'json_object') {
-    try {
-      parsedJson = JSON.parse(messageContent);
-    } catch {}
+  const tokenType = String(tokenData.token_type || 'Bearer');
+  const expiresIn = Number(tokenData.expires_in) || 3600;
+  const token = {
+    ...tokenData,
+    access_token: accessToken,
+    token_type: tokenType,
+    expires_in: expiresIn,
+    authorization_header: `${tokenType.charAt(0).toUpperCase()}${tokenType.slice(1)} ${accessToken}`,
+    acquired_at: new Date().toISOString(),
+  };
+
+  if (useCache) {
+    oauthTokenCache.set(cacheKey, { token, expiresAt: Date.now() + Math.max(0, expiresIn - 60) * 1000 });
+  }
+  return { ...token, from_cache: false };
+}
+
+// ── AI chat completion ──
+
+function buildAiRequest(node: any, context: Record<string, any>) {
+  const data = node.data || {};
+  const endpoint = String(resolveTemplate(context, data.endpoint || 'https://api.openai.com/v1/chat/completions') || '').trim();
+  const model = String(resolveTemplate(context, data.model || 'gpt-4o-mini') || '').trim();
+  const systemPrompt = toText(resolveTemplate(context, data.systemPrompt || ''));
+  const userPrompt = toText(resolveTemplate(context, data.userPrompt || ''));
+  const temperature = Number(data.temperature ?? 0.7);
+  const maxTokens = Number(data.maxTokens) || undefined;
+  const responseFormat = data.responseFormat === 'json_object' ? 'json_object' : 'text';
+
+  const messages: Array<{ role: string; content: string }> = [];
+  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  messages.push({ role: 'user', content: userPrompt });
+
+  const body: Record<string, any> = { model, messages, temperature };
+  if (maxTokens) body.max_tokens = maxTokens;
+  if (responseFormat === 'json_object') body.response_format = { type: 'json_object' };
+
+  return { endpoint, model, userPrompt, responseFormat, body };
+}
+
+function parseJsonContent(content: string): any {
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fenced ? fenced[1] : content).trim();
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+}
+
+async function executeAiChatCompletionNode(node: any, context: Record<string, any>, signal?: AbortSignal): Promise<any> {
+  const req = buildAiRequest(node, context);
+  if (!req.endpoint) throw new Error('IA: debe indicar la URL del endpoint');
+  if (!req.model) throw new Error('IA: debe indicar el modelo');
+  if (!req.userPrompt.trim()) throw new Error('IA: el prompt del usuario está vacío (revisa las variables usadas)');
+
+  const apiKey = resolveSecret(context, node.data?.apiKey);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+  const timeoutMs = Math.max(5, Number(node.data?.timeoutSeconds) || 120) * 1000;
+  const startedAt = Date.now();
+  const res = await fetchWithTimeout(req.endpoint, { method: 'POST', headers, body: JSON.stringify(req.body) }, signal, timeoutMs, 'IA');
+
+  if (!res.ok) {
+    throw new Error(`IA: el proveedor respondió ${res.status} - ${await readErrorBody(res)}`);
+  }
+
+  const json = (await res.json().catch(() => null)) as any;
+  const choice = json?.choices?.[0];
+  if (!choice) throw new Error('IA: la respuesta no tiene el formato OpenAI esperado (choices vacío)');
+  const content: string = choice.message?.content ?? '';
+
+  const parsed = req.responseFormat === 'json_object' || /^\s*(```|\{|\[)/.test(content) ? parseJsonContent(content) : null;
+  if (req.responseFormat === 'json_object' && parsed === null) {
+    throw new Error('IA: se solicitó JSON pero el modelo devolvió texto no válido');
   }
 
   return {
-    content: messageContent,
-    parsed: parsedJson,
+    content,
+    parsed,
+    model: json.model || req.model,
+    finish_reason: choice.finish_reason,
     usage: json.usage,
-    model: json.model
+    duration_ms: Date.now() - startedAt,
   };
+}
+
+// ── Debug previews (computed before the node runs, never with side effects) ──
+
+function truncateForPreview(value: any): any {
+  const text = JSON.stringify(value ?? null);
+  if (text && text.length > 4000) return `${text.slice(0, 4000)}…`;
+  return value ?? null;
+}
+
+function summarizeData(value: any) {
+  const rows = extractRowSet(value);
+  if (rows) {
+    return { type: 'lista', count: rows.length, sample: truncateForPreview(rows.slice(0, 3)) };
+  }
+  const empty = value === null || value === undefined;
+  return { type: empty ? 'vacío' : typeof value, count: empty ? 0 : 1, sample: truncateForPreview(value) };
+}
+
+function buildDebugPreview(
+  node: any,
+  context: Record<string, any>,
+  edges: any[],
+  nodes: any[],
+  iteration?: { current: number; total: number }
+): Record<string, any> {
+  try {
+    switch (node.type) {
+      case 'conditionalBranch':
+        return { nodePreview: { kind: 'condition', ...executeConditionalBranchNode(node, context) } };
+      case 'jsonTransform':
+        return { nodePreview: { kind: 'transform', input: summarizeData(resolveTransformInput(node, context, edges, nodes)) } };
+      case 'aiChatCompletion': {
+        const req = buildAiRequest(node, context);
+        return {
+          requestPreview: {
+            method: 'POST',
+            endpoint: req.endpoint,
+            headers: {
+              'Content-Type': 'application/json',
+              ...(node.data?.apiKey ? { Authorization: `Bearer ${maskSecret(node.data.apiKey)}` } : {}),
+            },
+            body: req.body,
+            iteration,
+          },
+        };
+      }
+      case 'oauth2Connector': {
+        const req = buildOAuth2Request(node, context, false);
+        return {
+          requestPreview: { method: 'POST', endpoint: req.tokenUrl, headers: req.headers, body: req.params, iteration },
+        };
+      }
+      default:
+        return {};
+    }
+  } catch (e: any) {
+    return { nodePreview: { kind: 'error', error: e?.message || String(e) } };
+  }
 }

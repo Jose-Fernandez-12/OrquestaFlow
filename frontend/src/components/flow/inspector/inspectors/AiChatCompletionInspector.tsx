@@ -1,18 +1,22 @@
 import React from 'react';
 import { Input } from '../../../ui/input';
-import type { Node } from '@xyflow/react';
+import type { Node, Edge } from '@xyflow/react';
+import { VariableField } from '../editors/VariableField';
+import { JsonTreeViewer } from '../../JsonTreeViewer';
 
 interface AiChatCompletionInspectorProps {
   node: Node;
+  nodes: Node[];
+  edges: Edge[];
   updateNodeData: (key: string, value: any) => void;
-  upstreamNodes: Node[];
   nodeResult?: any;
 }
 
 export function AiChatCompletionInspector({
   node,
+  nodes,
+  edges,
   updateNodeData,
-  upstreamNodes,
   nodeResult,
 }: AiChatCompletionInspectorProps) {
   const endpoint = (node.data?.endpoint as string) || 'https://api.openai.com/v1/chat/completions';
@@ -100,53 +104,45 @@ export function AiChatCompletionInspector({
             type="password"
             value={apiKey}
             onChange={(e) => updateNodeData('apiKey', e.target.value)}
-            placeholder="sk-..."
+            placeholder="sk-... o env:OPENAI_API_KEY"
             className="font-mono text-xs"
           />
+          <p className="text-[10px] text-muted">
+            Recomendado: <code>env:NOMBRE_VARIABLE</code> para leer la clave del servidor. Las claves escritas aquí no se exportan con el flujo.
+          </p>
         </div>
       </div>
 
-      {/* System Prompt */}
       <div className="space-y-1.5">
-        <label className="text-xs font-medium">Prompt de Sistema (System Prompt)</label>
-        <textarea
-          className="flex w-full min-h-[60px] rounded-sm border border-border bg-bg px-2.5 py-2 text-xs font-mono text-fg focus-visible:outline-none focus-visible:border-accent"
+        <label className="text-xs font-medium">Prompt de sistema</label>
+        <VariableField
+          node={node}
+          nodes={nodes}
+          edges={edges}
+          multiline
+          rows={3}
           value={systemPrompt}
-          onChange={(e) => updateNodeData('systemPrompt', e.target.value)}
-          placeholder="Eres un analista de datos especializado en flotas y logística..."
+          onChange={v => updateNodeData('systemPrompt', v)}
+          placeholder="Eres un analista de datos especializado en logística…"
+          className="bg-bg"
         />
       </div>
 
-      {/* User Prompt */}
       <div className="space-y-1.5">
-        <label className="text-xs font-medium flex items-center justify-between">
-          <span>Prompt del Usuario (User Prompt)</span>
-          {upstreamNodes.length > 0 && (
-            <span className="text-[10px] text-muted">Insertar variables:</span>
-          )}
-        </label>
-        {upstreamNodes.length > 0 && (
-          <div className="flex flex-wrap gap-1 mb-1">
-            {upstreamNodes.map(up => (
-              <button
-                key={up.id}
-                type="button"
-                onClick={() => updateNodeData('userPrompt', (userPrompt ? userPrompt + '\n' : '') + `{{${up.id}}}`)}
-                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-accent hover:border-accent transition-colors"
-              >
-                + {String(up.data?.label || up.id)}
-              </button>
-            ))}
-          </div>
-        )}
-        <textarea
-          className="flex w-full min-h-[100px] rounded-sm border border-border bg-bg px-2.5 py-2 text-xs font-mono text-fg focus-visible:outline-none focus-visible:border-accent"
+        <label className="text-xs font-medium">Prompt del usuario</label>
+        <VariableField
+          node={node}
+          nodes={nodes}
+          edges={edges}
+          multiline
+          rows={6}
           value={userPrompt}
-          onChange={(e) => updateNodeData('userPrompt', e.target.value)}
-          placeholder={'Analiza los siguientes registros y resume hallazgos clave:\n{{nodo_anterior}}'}
+          onChange={v => updateNodeData('userPrompt', v)}
+          placeholder={'Resume los hallazgos clave de estos registros:\n{{nodo_anterior}}'}
+          className="bg-bg"
         />
         <p className="text-[10px] text-muted">
-          Soporta interpolación dinámica con <code>{`{{variable}}`}</code> y <code>{`{{_item.campo}}`}</code> dentro de bucles.
+          Usa el botón <code>{'{ }'}</code> para insertar campos. Listas y objetos se envían como JSON; dentro de un bucle usa <code>{'{{_item.campo}}'}</code>.
         </p>
       </div>
 
@@ -179,7 +175,37 @@ export function AiChatCompletionInspector({
             <option value="json_object">JSON Mode (Estructurado)</option>
           </select>
         </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Máx. tokens de respuesta</label>
+          <Input
+            type="number"
+            min={1}
+            value={node.data?.maxTokens ? String(node.data.maxTokens) : ''}
+            onChange={(e) => updateNodeData('maxTokens', e.target.value ? Number(e.target.value) : undefined)}
+            placeholder="Sin límite"
+            className="text-xs font-mono"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Tiempo de espera (s)</label>
+          <Input
+            type="number"
+            min={5}
+            value={node.data?.timeoutSeconds ? String(node.data.timeoutSeconds) : ''}
+            onChange={(e) => updateNodeData('timeoutSeconds', e.target.value ? Number(e.target.value) : undefined)}
+            placeholder="120"
+            className="text-xs font-mono"
+          />
+        </div>
       </div>
+
+      {responseFormat === 'json_object' && (
+        <p className="text-[10px] text-muted">
+          En modo JSON el prompt debe pedir explícitamente una respuesta JSON. El objeto queda disponible en <code>{`{{${node.id}.parsed.campo}}`}</code>.
+        </p>
+      )}
 
       {/* Response Preview */}
       {nodeResult && (
@@ -192,11 +218,15 @@ export function AiChatCompletionInspector({
               </span>
             )}
           </label>
-          <div className="max-h-48 overflow-auto border border-border rounded p-2.5 bg-bg text-xs whitespace-pre-wrap font-mono">
-            {typeof nodeResult?.content === 'object'
-              ? JSON.stringify(nodeResult.content, null, 2)
-              : String(nodeResult?.content || JSON.stringify(nodeResult, null, 2))}
-          </div>
+          {nodeResult?.parsed ? (
+            <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
+              <JsonTreeViewer data={nodeResult.parsed} />
+            </div>
+          ) : (
+            <div className="max-h-48 overflow-auto border border-border rounded p-2.5 bg-bg text-xs whitespace-pre-wrap font-mono">
+              {String(nodeResult?.content ?? nodeResult?.error ?? JSON.stringify(nodeResult, null, 2))}
+            </div>
+          )}
         </div>
       )}
     </div>

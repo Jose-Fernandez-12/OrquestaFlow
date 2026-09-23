@@ -12,7 +12,6 @@ export const isDataProducerNode = (type?: string) => {
     type === 'dataList' ||
     type === 'forEach' ||
     type === 'forEachEnd' ||
-    type === 'conditionalBranch' ||
     type === 'jsonTransform' ||
     type === 'webhookTrigger' ||
     type === 'oauth2Connector' ||
