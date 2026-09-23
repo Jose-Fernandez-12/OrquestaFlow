@@ -44,7 +44,8 @@ import {
   Loader2,
   Pause,
   Eye,
-  Upload
+  Upload,
+  FileCode2
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -630,6 +631,36 @@ function FlowCanvas() {
     setShowOptionsMenu(false);
   };
 
+  const handleExportPython = async () => {
+    if (!currentFlow) return;
+    setShowOptionsMenu(false);
+    try {
+      const res = await fetch(`${getApiUrl(`/flows/${currentFlow.id}/export-python`)}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Error desconocido' }));
+        dispatch(showToast(err.error || 'Error al exportar el paquete'));
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const slug = currentFlow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+      a.download = `${slug}_bundle.zip`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      }, 1000);
+      dispatch(showToast('Paquete ZIP exportado correctamente'));
+    } catch (e) {
+      dispatch(showToast('Error al exportar el paquete ZIP'));
+    }
+  };
+
   const handleDeleteCurrentFlowConfirm = async () => {
     if (!currentFlow) return;
     setIsDeleting(true);
@@ -947,6 +978,17 @@ function FlowCanvas() {
                   >
                     <Upload size={14} className="text-muted" />
                     <span>Importar JSON</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleExportPython();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <FileCode2 size={14} className="text-muted" />
+                    <span>Exportar a Python (ZIP)</span>
                   </button>
 
                   <div className="h-px bg-border my-1"></div>
