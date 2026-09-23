@@ -146,6 +146,33 @@ export const duplicateFlow = createAsyncThunk('flows/duplicate', async (flow: Fl
   return data.data as Flow;
 });
 
+export interface ImportSummary {
+  createdConnections: Array<{ id: string; name: string; host: string; database_name: string }>;
+  reusedConnections: Array<{ id: string; name: string; host: string; database_name: string }>;
+  createdQueries: Array<{ id: string; name: string }>;
+  reusedQueries: Array<{ id: string; name: string }>;
+  requiresCredentials: boolean;
+}
+
+export interface ImportFlowResponse {
+  data: Flow;
+  summary: ImportSummary;
+}
+
+export const importFlowBundle = createAsyncThunk('flows/importBundle', async (payload: any) => {
+  const res = await fetch(`${API_URL}/flows/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ error: 'Error al importar el flujo' }));
+    throw new Error(errorData.error || 'Error al importar el flujo');
+  }
+  const data = await res.json();
+  return data as ImportFlowResponse;
+});
+
 export const executeFlow = createAsyncThunk('flows/execute', async ({ id, mode = 'normal' }: { id: string; mode?: 'normal' | 'debug' }) => {
   const res = await fetch(`${API_URL}/flows/${id}/execute`, {
     method: 'POST',
@@ -379,6 +406,10 @@ const flowSlice = createSlice({
       })
       .addCase(duplicateFlow.fulfilled, (state, action) => {
         state.flows.unshift(action.payload);
+      })
+      .addCase(importFlowBundle.fulfilled, (state, action) => {
+        state.flows.unshift(action.payload.data);
+        state.currentFlow = action.payload.data;
       });
   },
 });
