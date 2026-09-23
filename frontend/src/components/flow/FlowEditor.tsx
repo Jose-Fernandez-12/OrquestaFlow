@@ -45,13 +45,16 @@ import {
   Pause,
   Eye,
   Upload,
-  FileCode2
+  FileCode2,
+  GitCommitVertical
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
+import { FlowVersionsModal } from './FlowVersionsModal';
 import { ImportFlowModal } from './ImportFlowModal';
+import { getBranchOutputs, isBranchHandle } from './nodeDefinitions';
 import { 
   fetchFlows, 
   fetchFlow,
@@ -89,6 +92,20 @@ import { DataSourcePreviewModal } from './DataSourcePreviewModal';
 import { cn } from '../../lib/utils';
 import { downloadAsXMLSpreadsheet, downloadAsCSV, resolveExportData, triggerBrowserDownload } from '../../lib/exportUtils';
 
+// Drops edges whose nodes no longer exist or whose conditional output (deleted switch case,
+// changed mode) is gone, since those would never be followed.
+function pruneEdges(nodes: Node[], edges: Edge[]): Edge[] {
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  return edges.filter(edge => {
+    const source = byId.get(edge.source);
+    if (!source || !byId.has(edge.target)) return false;
+    if (source.type === 'conditionalBranch' && isBranchHandle(edge.sourceHandle)) {
+      return getBranchOutputs(source.data).some(o => o.handle === edge.sourceHandle);
+    }
+    return true;
+  });
+}
+
 function FlowCanvas() {
   const dispatch = useAppDispatch();
   const flows = useAppSelector(state => state.flows.flows);
@@ -99,6 +116,7 @@ function FlowCanvas() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
   const completedNodeIds = useAppSelector(state => state.flows.completedNodeIds);
   const errorNodeIds = useAppSelector(state => state.flows.errorNodeIds);
+  const skippedNodeIds = useAppSelector(state => state.flows.skippedNodeIds);
   const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
   const executionMode = useAppSelector(state => state.flows.executionMode);
   const nodeResults = useAppSelector(state => state.flows.nodeResults);
@@ -212,7 +230,15 @@ function FlowCanvas() {
       setIsPausing(false);
     }
   }, [pausedNodeIds.length, isLiveExecuting]);
+
+  const debugSessionLostAt = useAppSelector(state => state.flows.debugSessionLostAt);
+  useEffect(() => {
+    if (!debugSessionLostAt) return;
+    setIsLiveExecuting(false);
+    dispatch(showToast('La depuración ya no está activa en el servidor. Vuelve a ejecutar el flujo.'));
+  }, [debugSessionLostAt, dispatch]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [showVersionsModal, setShowVersionsModal] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const downloadedUrlsRef = useRef(new Set<string>());
 
@@ -339,6 +365,7 @@ function FlowCanvas() {
             context: data.context || data.result?.context,
             requestPreview: data.result?.requestPreview,
             responsePreview: data.result?.responsePreview,
+            nodePreview: data.result?.nodePreview,
             debugType: data.result?.debugType
           }));
           dispatch(selectNode(data.nodeId));
@@ -413,18 +440,22 @@ function FlowCanvas() {
       let changed = false;
       const newEds = eds.map(edge => {
         let expectedStroke = '#3b82f6'; // default blue
-        if (errorNodeIds.includes(edge.source)) {
+        const isSkipped = skippedNodeIds.includes(edge.target);
+        if (isSkipped) {
+          expectedStroke = '#94a3b8'; // slate: branch not taken
+        } else if (errorNodeIds.includes(edge.source)) {
           expectedStroke = '#ef4444'; // red
         } else if (completedNodeIds.includes(edge.source)) {
           expectedStroke = '#22c55e'; // green
         }
-        
-        if (!edge.style || edge.style.stroke !== expectedStroke || !edge.markerEnd) {
+        const expectedDash = isSkipped ? '6 4' : undefined;
+
+        if (!edge.style || edge.style.stroke !== expectedStroke || edge.style.strokeDasharray !== expectedDash || !edge.markerEnd) {
           changed = true;
           return {
             ...edge,
             markerEnd: { type: MarkerType.ArrowClosed, color: expectedStroke },
-            style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2 },
+            style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2, strokeDasharray: expectedDash },
             interactionWidth: 20
           };
         }
@@ -432,7 +463,7 @@ function FlowCanvas() {
       });
       return changed ? newEds : eds;
     });
-  }, [completedNodeIds, errorNodeIds, setEdges]);
+  }, [completedNodeIds, errorNodeIds, skippedNodeIds, setEdges]);
 
 
 
@@ -586,13 +617,7 @@ function FlowCanvas() {
   const handleSave = () => {
     if (!currentFlow || isLocked) return;
     
-    // Purge zombie edges that point to non-existent nodes
-    const validEdges = edges.filter(edge => 
-      nodes.some(n => n.id === edge.source) && 
-      nodes.some(n => n.id === edge.target)
-    );
-    
-    const definition = JSON.stringify({ nodes, edges: validEdges });
+    const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
     dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
     
     setShowSaveNotification(true);
@@ -712,7 +737,7 @@ function FlowCanvas() {
 
   const performExecution = async (nodesToExecute: Node[], mode: 'normal' | 'debug' = 'normal') => {
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
-    const definition = JSON.stringify({ nodes: nodesToExecute, edges });
+    const definition = JSON.stringify({ nodes: nodesToExecute, edges: pruneEdges(nodesToExecute, edges) });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
     
     try {
@@ -948,6 +973,18 @@ function FlowCanvas() {
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowOptionsMenu(false);
+                      setShowVersionsModal(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <GitCommitVertical size={14} className="text-muted" />
+                    <span>Versiones del flujo</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
                       handleDuplicateCurrentFlow();
                     }}
                     className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
@@ -1018,7 +1055,7 @@ function FlowCanvas() {
           
           <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
             {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-2 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
                 <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-1">
                   <Bug size={16} className={isLiveExecuting && pausedNodeIds.length === 0 ? "animate-spin" : "animate-pulse"} />
                   <span>Debugging</span>
@@ -1029,7 +1066,7 @@ function FlowCanvas() {
                       variant="outline"
                       size="sm"
                       onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
-                      className="h-7 text-xs border-amber-200 hover:bg-amber-50"
+                      className="h-7 min-h-0 shrink-0 text-xs border-amber-200 hover:bg-amber-50"
                       title="Ejecutar el paso actual e ir al siguiente (paso a paso)"
                     >
                       <StepForward size={14} className="mr-1" /> Paso a paso
@@ -1038,7 +1075,7 @@ function FlowCanvas() {
                       variant="primary"
                       size="sm"
                       onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
-                      className="h-7 text-xs bg-amber-600 hover:bg-amber-700"
+                      className="h-7 min-h-0 shrink-0 text-xs bg-amber-600 hover:bg-amber-700"
                       title="Continuar ejecución sin pausas"
                     >
                       <PlayCircle size={14} className="mr-1" /> Continuar Todo
@@ -1047,7 +1084,7 @@ function FlowCanvas() {
                       variant="outline"
                       size="sm"
                       onClick={() => dispatch(setDebugModalOpen(true))}
-                      className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                      className="h-7 min-h-0 shrink-0 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
                       title="Abrir ventana modal de inspección de depuración"
                     >
                       <Eye size={13} className="mr-1" /> Inspeccionar
@@ -1067,7 +1104,7 @@ function FlowCanvas() {
                         setIsPausing(true);
                         await dispatch(pauseDebugExecution(currentFlow!.id));
                       }}
-                      className="h-7 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
+                      className="h-7 min-h-0 shrink-0 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
                       title="Pausar en el siguiente paso para retomar el control paso a paso"
                     >
                       {isPausing ? (
@@ -1086,7 +1123,7 @@ function FlowCanvas() {
                   variant="default"
                   size="sm"
                   onClick={handleStopExecution}
-                  className="h-7 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
+                  className="h-7 min-h-0 shrink-0 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
                   title="Detener ejecución del flujo"
                 >
                   <Square size={11} className="mr-1 fill-white" /> Detener
@@ -1383,6 +1420,26 @@ function FlowCanvas() {
         isOpen={showHistoryModal}
         onClose={() => setShowHistoryModal(false)}
       />
+
+      {currentFlow && (
+        <FlowVersionsModal
+          flow={currentFlow}
+          isOpen={showVersionsModal}
+          isLocked={isLocked}
+          currentDefinition={showVersionsModal ? JSON.stringify({ nodes, edges }) : ''}
+          onClose={() => setShowVersionsModal(false)}
+          saveCurrent={async () => {
+            if (isLocked) return;
+            const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
+            await dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName })).unwrap();
+          }}
+          onRestored={(restored) => {
+            dispatch(resetNodeStates());
+            dispatch(setCurrentFlow(restored));
+            dispatch(showToast('Versión restaurada'));
+          }}
+        />
+      )}
 
       {/* Import Flow Modal */}
       <ImportFlowModal

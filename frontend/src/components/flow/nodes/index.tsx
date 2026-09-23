@@ -11,6 +11,11 @@ export const DataSourceNode = React.memo((props: any) => <BaseNode {...props} ty
 export const DataListNode = React.memo((props: any) => <BaseNode {...props} type="dataList" />);
 export const ForEachNode = React.memo((props: any) => <BaseNode {...props} type="forEach" />);
 export const ForEachEndNode = React.memo((props: any) => <BaseNode {...props} type="forEachEnd" />);
+export const ConditionalBranchNode = React.memo((props: any) => <BaseNode {...props} type="conditionalBranch" />);
+export const JsonTransformNode = React.memo((props: any) => <BaseNode {...props} type="jsonTransform" />);
+export const WebhookTriggerNode = React.memo((props: any) => <BaseNode {...props} type="webhookTrigger" />);
+export const OAuth2ConnectorNode = React.memo((props: any) => <BaseNode {...props} type="oauth2Connector" />);
+export const AiChatCompletionNode = React.memo((props: any) => <BaseNode {...props} type="aiChatCompletion" />);
 
 export const nodeTypes = {
   start: StartNode,
@@ -27,4 +32,9 @@ export const nodeTypes = {
   dataList: DataListNode,
   forEach: ForEachNode,
   forEachEnd: ForEachEndNode,
+  conditionalBranch: ConditionalBranchNode,
+  jsonTransform: JsonTransformNode,
+  webhookTrigger: WebhookTriggerNode,
+  oauth2Connector: OAuth2ConnectorNode,
+  aiChatCompletion: AiChatCompletionNode,
 };

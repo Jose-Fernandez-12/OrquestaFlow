@@ -37,6 +37,7 @@ export interface IterationDebugRecord {
 export interface NodeDebugPreview {
   requestPreview?: any | null;
   responsePreview?: any | null;
+  nodePreview?: any | null;
   history?: IterationDebugRecord[];
 }
 
@@ -48,6 +49,7 @@ interface FlowState {
   completedNodeIds: string[];
   errorNodeIds: string[];
   pausedNodeIds: string[];
+  skippedNodeIds: string[];
   executionMode: 'normal' | 'debug';
   intermediateContext: Record<string, any>;
   debugRequestPreview: any | null;
@@ -59,6 +61,7 @@ interface FlowState {
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
   isDebugModalOpen: boolean;
+  debugSessionLostAt: number | null;
   loading: boolean;
   error: string | null;
 }
@@ -71,6 +74,7 @@ const initialState: FlowState = {
   completedNodeIds: [],
   errorNodeIds: [],
   pausedNodeIds: [],
+  skippedNodeIds: [],
   executionMode: 'normal',
   intermediateContext: {},
   debugRequestPreview: null,
@@ -82,6 +86,7 @@ const initialState: FlowState = {
   canvasExpanded: false,
   nodeLibraryExpanded: true,
   isDebugModalOpen: false,
+  debugSessionLostAt: null,
   loading: false,
   error: null,
 };
@@ -183,13 +188,18 @@ export const executeFlow = createAsyncThunk('flows/execute', async ({ id, mode =
   return data.data;
 });
 
-export const resumeDebugNode = createAsyncThunk('flows/resumeDebug', async ({ id, nodeId, action }: { id: string, nodeId?: string, action: 'step_over' | 'continue' | 'continue_node' | 'step_request' }) => {
+export const resumeDebugNode = createAsyncThunk('flows/resumeDebug', async ({ id, nodeId, action }: { id: string, nodeId?: string, action: 'step_over' | 'continue' | 'continue_node' | 'step_request' }, { rejectWithValue }) => {
   const res = await fetch(`${API_URL}/flows/${id}/debug/resume`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ nodeId, action })
   });
   const data = await res.json();
+  if (!res.ok) {
+    // The backend no longer tracks this run (finished, stopped or server restarted): leave the paused UI
+    const state = await fetch(`${API_URL}/flows/${id}/execution-state`).then(r => r.json()).catch(() => null);
+    if (!state?.data?.isRunning) return rejectWithValue('not_running');
+  }
   return data.data;
 });
 
@@ -228,6 +238,7 @@ const flowSlice = createSlice({
         state.executingNodeIds.push(action.payload);
       }
       state.pausedNodeIds = state.pausedNodeIds.filter(id => id !== action.payload);
+      state.skippedNodeIds = state.skippedNodeIds.filter(id => id !== action.payload);
       if (state.debugPreviewsByNode?.[action.payload]) {
         state.debugRequestPreview = state.debugPreviewsByNode[action.payload].requestPreview || null;
         state.debugResponsePreview = state.debugPreviewsByNode[action.payload].responsePreview || null;
@@ -240,12 +251,14 @@ const flowSlice = createSlice({
       context?: any; 
       requestPreview?: any; 
       responsePreview?: any;
+      nodePreview?: any;
       debugType?: string;
     }>) {
-      const { nodeId, context, requestPreview, responsePreview, debugType } = action.payload;
+      const { nodeId, context, requestPreview, responsePreview, nodePreview, debugType } = action.payload;
       if (!state.pausedNodeIds.includes(nodeId)) {
         state.pausedNodeIds.push(nodeId);
       }
+      state.skippedNodeIds = state.skippedNodeIds.filter(id => id !== nodeId);
       if (context) {
         state.intermediateContext = context;
       }
@@ -258,6 +271,7 @@ const flowSlice = createSlice({
 
       const nodeEntry = state.debugPreviewsByNode[nodeId];
       if (!nodeEntry.history) nodeEntry.history = [];
+      if (nodePreview !== undefined) nodeEntry.nodePreview = nodePreview;
 
       const currentIterIndex = requestPreview?.iteration?.current ?? responsePreview?.iteration?.current ?? 1;
       let record = nodeEntry.history.find(h => h.iterationIndex === currentIterIndex);
@@ -310,6 +324,12 @@ const flowSlice = createSlice({
       if (!state.completedNodeIds.includes(nodeId)) {
         state.completedNodeIds.push(nodeId);
       }
+      const wasSkipped = Boolean(result && typeof result === 'object' && (result as any).skipped === true);
+      if (wasSkipped && !state.skippedNodeIds.includes(nodeId)) {
+        state.skippedNodeIds.push(nodeId);
+      } else if (!wasSkipped) {
+        state.skippedNodeIds = state.skippedNodeIds.filter(id => id !== nodeId);
+      }
       if (result !== undefined) {
         state.nodeResults[nodeId] = result;
       }
@@ -343,6 +363,7 @@ const flowSlice = createSlice({
       state.completedNodeIds = [];
       state.errorNodeIds = [];
       state.pausedNodeIds = [];
+      state.skippedNodeIds = [];
       state.intermediateContext = {};
       state.debugRequestPreview = null;
       state.debugResponsePreview = null;
@@ -391,6 +412,15 @@ const flowSlice = createSlice({
       .addCase(executeFlow.fulfilled, (state) => {
         state.executingNodeIds = [];
         state.pausedNodeIds = [];
+      })
+      .addCase(resumeDebugNode.rejected, (state, action) => {
+        if (action.payload === 'not_running') {
+          state.executingNodeIds = [];
+          state.pausedNodeIds = [];
+          state.nodeTimers = {};
+          state.isDebugModalOpen = false;
+          state.debugSessionLostAt = Date.now();
+        }
       })
       .addCase(stopFlow.fulfilled, (state) => {
         state.executingNodeIds = [];

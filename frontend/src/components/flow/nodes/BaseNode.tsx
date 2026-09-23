@@ -1,5 +1,5 @@
 import React from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { Handle, Position, useUpdateNodeInternals } from '@xyflow/react';
 import {
   Check,
   Loader2,
@@ -15,10 +15,17 @@ import {
   Database,
   List,
   Repeat,
-  Square
+  Square,
+  GitFork,
+  Braces,
+  Radio,
+  KeyRound,
+  Bot,
+  SkipForward
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
+import { describeRule, getBranchOutputs, getConditionRules, isExperimentalNode, shortExpression } from '../nodeDefinitions';
 
 interface BaseNodeProps {
   id: string;
@@ -52,6 +59,11 @@ const typeIcons: Record<string, React.ElementType> = {
   dataList: List,
   forEach: Repeat,
   forEachEnd: Square,
+  conditionalBranch: GitFork,
+  jsonTransform: Braces,
+  webhookTrigger: Radio,
+  oauth2Connector: KeyRound,
+  aiChatCompletion: Bot,
 };
 
 function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
@@ -59,6 +71,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
   const completed = useAppSelector(state => state.flows.completedNodeIds.includes(id));
   const hasError = useAppSelector(state => state.flows.errorNodeIds.includes(id));
   const paused = useAppSelector(state => state.flows.pausedNodeIds.includes(id));
+  const skipped = useAppSelector(state => state.flows.skippedNodeIds.includes(id));
   const nodeResult = useAppSelector(state => state.flows.nodeResults[id]);
   const progress = useAppSelector(state => state.flows.nodeProgress[id]);
   const timerState = useAppSelector(state => state.flows.nodeTimers[id]);
@@ -80,6 +93,11 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     dataList: 'text-violet-600',
     forEach: 'text-sky-600',
     forEachEnd: 'text-sky-600',
+    conditionalBranch: 'text-amber-500',
+    jsonTransform: 'text-teal-600',
+    webhookTrigger: 'text-pink-600',
+    oauth2Connector: 'text-indigo-600',
+    aiChatCompletion: 'text-fuchsia-600',
   };
 
   const typeLabels: Record<string, string> = {
@@ -97,6 +115,11 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     dataList: 'Lista de datos',
     forEach: 'Inicio de bucle',
     forEachEnd: 'Fin de bucle',
+    conditionalBranch: 'Bifurcación',
+    jsonTransform: 'Transformar JSON',
+    webhookTrigger: 'Disparador Webhook',
+    oauth2Connector: 'Conector OAuth2',
+    aiChatCompletion: 'Inteligencia Artificial',
   };
 
   const formatTimerDuration = (seconds: number) => {
@@ -179,10 +202,19 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           : executing && !paused && (type === 'forEach' || type === 'forEachEnd')
             ? 'border-sky-500 ring-2 ring-sky-500/30'
             : executing && !paused && 'border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10',
-        completed && !hasError && 'border-success',
+        completed && !hasError && !skipped && 'border-success',
+        skipped && !executing && 'border-dashed opacity-55',
         hasError && !executing && 'border-red-500 ring-2 ring-red-500/30 bg-red-50'
       )}
     >
+      {skipped && !executing && !paused && (
+        <div
+          className="absolute -top-3 -right-3 w-6 h-6 bg-surface border border-border text-muted rounded-full flex items-center justify-center shadow-sm z-20"
+          title="Omitido: la rama condicional no fue seleccionada"
+        >
+          <SkipForward size={12} />
+        </div>
+      )}
       {/* Node Status Badge */}
       {paused && (
         <div className="absolute -top-3 -right-3 w-6 h-6 bg-amber-100 border border-amber-400 text-amber-600 rounded-full flex items-center justify-center shadow-sm z-20 animate-pulse">
@@ -197,7 +229,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           <Loader2 size={12} className="animate-spin" />
         </div>
       )}
-      {completed && !executing && !hasError && (
+      {completed && !executing && !hasError && !skipped && (
         <div className="absolute -top-3 -right-3 w-6 h-6 bg-success text-white rounded-full flex items-center justify-center shadow-sm z-20">
           <Check size={12} strokeWidth={3} />
         </div>
@@ -208,43 +240,68 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
         </div>
       )}
 
-      {/* 4 Universal Connection Points: Left, Right, Top, Bottom */}
-      <Handle
-        type="source"
-        position={Position.Left}
-        id="left"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="right"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
-      <Handle
-        type="source"
-        position={Position.Top}
-        id="top"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="bottom"
-        isConnectable={true}
-        isConnectableStart={true}
-        isConnectableEnd={true}
-        className={handleClass}
-      />
+      {/* Connection Handles: specialized for conditionalBranch, universal for others */}
+      {type === 'conditionalBranch' ? (
+        <>
+          <Handle
+            type="source"
+            position={Position.Left}
+            id="left"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          <Handle
+            type="source"
+            position={Position.Top}
+            id="top"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+        </>
+      ) : (
+        <>
+          <Handle
+            type="source"
+            position={Position.Left}
+            id="left"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="right"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          <Handle
+            type="source"
+            position={Position.Top}
+            id="top"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+          <Handle
+            type="source"
+            position={Position.Bottom}
+            id="bottom"
+            isConnectable={true}
+            isConnectableStart={true}
+            isConnectableEnd={true}
+            className={handleClass}
+          />
+        </>
+      )}
 
       {/* Content */}
       <div className="p-3 flex items-center gap-3">
@@ -270,8 +327,13 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
               </div>
             )
           ) : (
-            <div className="text-xs text-muted truncate">
-              {typeLabels[type] || type}
+            <div className="text-xs text-muted truncate flex items-center gap-1.5">
+              <span className="truncate">{skipped ? 'Omitido · rama no tomada' : typeLabels[type] || type}</span>
+              {isExperimentalNode(type) && (
+                <span className="shrink-0 text-[8px] font-bold tracking-wide px-1 py-px rounded bg-fuchsia-500/10 text-fuchsia-600 border border-fuchsia-500/25">
+                  BETA
+                </span>
+              )}
             </div>
           )}
 
@@ -413,8 +475,55 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
               <span>Doble clic para previsualizar</span>
             </div>
           )}
+
+          {type === 'jsonTransform' && (
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                {data.transformType === 'map' || data.transformType === 'pick'
+                  ? `Mapeo · ${Array.isArray(data.mappings) ? data.mappings.filter((m: any) => m?.from).length : String(data.pickFields || '').split(',').filter((s: string) => s.trim()).length} campos`
+                  : 'JavaScript'}
+              </span>
+              {completed && !skipped && Array.isArray(nodeResult) && (
+                <span className="text-teal-600 font-medium">{nodeResult.length} registros</span>
+              )}
+            </div>
+          )}
+
+          {type === 'webhookTrigger' && (
+            <div className="mt-1 text-[10px] text-muted truncate">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                POST /{String(data.webhookId || id)}
+              </span>
+            </div>
+          )}
+
+          {type === 'oauth2Connector' && (
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                {data.grantType === 'password' ? 'Password' : data.grantType === 'refresh_token' ? 'Refresh token' : 'Client credentials'}
+              </span>
+              {completed && nodeResult?.access_token && (
+                <span className="text-emerald-600 font-medium">{nodeResult.from_cache ? 'Token (caché)' : 'Token OK'}</span>
+              )}
+            </div>
+          )}
+
+          {type === 'aiChatCompletion' && (
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted min-w-0">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border truncate">
+                {String(data.model || 'gpt-4o-mini')}
+              </span>
+              {completed && nodeResult?.usage?.total_tokens && (
+                <span className="text-fuchsia-600 font-medium shrink-0">{nodeResult.usage.total_tokens} tokens</span>
+              )}
+            </div>
+          )}
         </div>
       </div>
+
+      {type === 'conditionalBranch' && (
+        <ConditionalOutputs nodeId={id} data={data} nodeResult={nodeResult} evaluated={completed && !skipped && !hasError} />
+      )}
 
       {/* Sleek bottom progress bar for timer node while executing */}
       {executing && (type === 'timer' || type === 'delay') && timerState && (
@@ -435,6 +544,81 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+const BRANCH_TONES = {
+  true: { dot: '!bg-emerald-500', text: 'text-emerald-600', active: 'bg-emerald-500/10' },
+  false: { dot: '!bg-rose-500', text: 'text-rose-600', active: 'bg-rose-500/10' },
+  case: { dot: '!bg-amber-500', text: 'text-amber-600', active: 'bg-amber-500/10' },
+  default: { dot: '!bg-slate-400', text: 'text-muted', active: 'bg-slate-500/10' },
+};
+
+function ConditionalOutputs({ nodeId, data, nodeResult, evaluated }: { nodeId: string; data: BaseNodeProps['data']; nodeResult: any; evaluated: boolean }) {
+  const isSwitch = data?.mode === 'switch';
+  const rules = isSwitch ? [] : getConditionRules(data);
+  const outputs = getBranchOutputs(data);
+  const selectedHandle =
+    evaluated && outputs.some(o => o.handle === nodeResult?.selectedHandle) ? nodeResult.selectedHandle : undefined;
+  const updateNodeInternals = useUpdateNodeInternals();
+  const handleKey = outputs.map(o => o.handle).join('|');
+
+  React.useEffect(() => {
+    updateNodeInternals(nodeId);
+  }, [handleKey, nodeId, updateNodeInternals]);
+
+  return (
+    <div className="border-t border-border">
+      <div className="px-3 py-1.5 text-[10px] font-mono text-muted space-y-0.5 max-w-[240px]">
+        {isSwitch ? (
+          <div className="truncate" title={String(data.switchField || '')}>
+            Según <span className="text-fg">{shortExpression(String(data.switchField || '')) || '(sin campo)'}</span>
+          </div>
+        ) : (
+          rules.slice(0, 3).map((rule, idx) => (
+            <div key={rule.id} className="truncate" title={describeRule(rule)}>
+              {idx > 0 && (
+                <span className="text-amber-600 font-semibold mr-1">{data.combinator === 'or' ? 'O' : 'Y'}</span>
+              )}
+              <span className="text-fg">{describeRule(rule)}</span>
+            </div>
+          ))
+        )}
+        {!isSwitch && rules.length > 3 && <div className="italic">+{rules.length - 3} condiciones más</div>}
+      </div>
+
+      <div className="pb-1">
+        {outputs.map(out => {
+          const tone = BRANCH_TONES[out.tone];
+          const isSelected = selectedHandle === out.handle;
+          const isDimmed = selectedHandle !== undefined && !isSelected;
+          return (
+            <div
+              key={out.handle}
+              className={cn(
+                'relative flex items-center justify-end gap-1.5 pr-4 pl-3 py-1 text-[11px] font-medium transition-colors',
+                isSelected && tone.active,
+                isDimmed && 'opacity-40'
+              )}
+            >
+              {isSelected && <Check size={11} className={tone.text} strokeWidth={3} />}
+              <span className={cn('truncate max-w-[170px]', tone.text)}>{out.label}</span>
+              <Handle
+                type="source"
+                position={Position.Right}
+                id={out.handle}
+                isConnectable={true}
+                className={cn(
+                  '!w-3 !h-3 !rounded-full !border-2 !border-surface z-20 cursor-crosshair hover:ring-2 hover:ring-accent/40',
+                  tone.dot
+                )}
+                title={`Salida: ${out.label}`}
+              />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -59,6 +59,11 @@ export const TYPE_LABELS: Record<string, string> = {
   dataList: 'Lista de datos',
   forEach: 'Inicio de bucle',
   forEachEnd: 'Fin de bucle',
+  conditionalBranch: 'Bifurcación condicional',
+  jsonTransform: 'Transformación JSON',
+  webhookTrigger: 'Disparador Webhook',
+  oauth2Connector: 'Conector OAuth2',
+  aiChatCompletion: 'IA / Chat LLM',
 };
 
 export const TYPE_COLORS: Record<string, string> = {
@@ -76,6 +81,11 @@ export const TYPE_COLORS: Record<string, string> = {
   dataList: 'text-violet-600',
   forEach: 'text-sky-600',
   forEachEnd: 'text-sky-600',
+  conditionalBranch: 'text-amber-500',
+  jsonTransform: 'text-teal-600',
+  webhookTrigger: 'text-pink-600',
+  oauth2Connector: 'text-indigo-600',
+  aiChatCompletion: 'text-fuchsia-600',
 };
 
 export const TYPE_BG_COLORS: Record<string, string> = {
@@ -93,4 +103,9 @@ export const TYPE_BG_COLORS: Record<string, string> = {
   dataList: 'bg-violet-500/10',
   forEach: 'bg-sky-500/10',
   forEachEnd: 'bg-sky-500/10',
+  conditionalBranch: 'bg-amber-500/10',
+  jsonTransform: 'bg-teal-500/10',
+  webhookTrigger: 'bg-pink-500/10',
+  oauth2Connector: 'bg-indigo-500/10',
+  aiChatCompletion: 'bg-fuchsia-500/10',
 };

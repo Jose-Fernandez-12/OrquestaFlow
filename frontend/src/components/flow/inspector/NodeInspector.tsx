@@ -18,6 +18,11 @@ import { DataSourceInspector } from './inspectors/DataSourceInspector';
 import { DataListInspector } from './inspectors/DataListInspector';
 import { ForEachInspector } from './inspectors/ForEachInspector';
 import { ForEachEndInspector } from './inspectors/ForEachEndInspector';
+import { ConditionalBranchInspector } from './inspectors/ConditionalBranchInspector';
+import { JsonTransformInspector } from './inspectors/JsonTransformInspector';
+import { WebhookTriggerInspector } from './inspectors/WebhookTriggerInspector';
+import { OAuth2ConnectorInspector } from './inspectors/OAuth2ConnectorInspector';
+import { AiChatCompletionInspector } from './inspectors/AiChatCompletionInspector';
 import { findParentForEachNode, getForEachItems } from './utils';
 
 export interface NodeInspectorProps {
@@ -356,6 +361,54 @@ export function NodeInspector({
 
         {type === 'forEachEnd' && <ForEachEndInspector node={node} />}
 
+        {type === 'conditionalBranch' && (
+          <ConditionalBranchInspector
+            node={node}
+            nodes={nodes}
+            edges={edges}
+            updateNodeData={updateNodeData}
+            nodeResult={nodeResults[node.id]}
+            debugPreview={isPaused ? nodeDebugPreview?.nodePreview : undefined}
+          />
+        )}
+
+        {type === 'jsonTransform' && (
+          <JsonTransformInspector
+            node={node}
+            nodes={nodes}
+            edges={edges}
+            updateNodeData={updateNodeData}
+            nodeResult={nodeResults[node.id]}
+            debugPreview={isPaused ? nodeDebugPreview?.nodePreview : undefined}
+          />
+        )}
+
+        {type === 'webhookTrigger' && (
+          <WebhookTriggerInspector
+            node={node}
+            updateNodeData={updateNodeData}
+            nodeResult={nodeResults[node.id]}
+          />
+        )}
+
+        {type === 'oauth2Connector' && (
+          <OAuth2ConnectorInspector
+            node={node}
+            updateNodeData={updateNodeData}
+            nodeResult={nodeResults[node.id]}
+          />
+        )}
+
+        {type === 'aiChatCompletion' && (
+          <AiChatCompletionInspector
+            node={node}
+            nodes={nodes}
+            edges={edges}
+            updateNodeData={updateNodeData}
+            nodeResult={nodeResults[node.id]}
+          />
+        )}
+
         {/* Fallback for unrecognized node types */}
         {![
           'start',
@@ -372,6 +425,11 @@ export function NodeInspector({
           'dataList',
           'forEach',
           'forEachEnd',
+          'conditionalBranch',
+          'jsonTransform',
+          'webhookTrigger',
+          'oauth2Connector',
+          'aiChatCompletion',
         ].includes(type) && (
           <div className="p-4 bg-bg border border-border rounded text-xs text-muted text-center space-y-2">
             <p className="font-medium text-fg">Tipo de nodo: {type}</p>
