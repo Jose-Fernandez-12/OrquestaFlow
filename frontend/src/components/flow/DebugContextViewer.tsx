@@ -13,17 +13,25 @@ import {
   Code2,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
+  AlertCircle,
+  CheckCircle2,
   X,
   FastForward,
   Globe,
   CornerDownRight,
   Clock,
-  Send
+  Send,
+  Loader2,
+  Repeat,
+  ArrowLeft,
+  ArrowRight,
+  History
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { useAppDispatch } from '../../store/hooks';
-import { resumeDebugNode } from '../../store/flowSlice';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { resumeDebugNode, setDebugModalOpen, type IterationDebugRecord, type NodeDebugPreview } from '../../store/flowSlice';
 import { cn } from '../../lib/utils';
 
 export interface HttpRequestPreview {
@@ -60,6 +68,10 @@ interface DebugContextViewerProps {
   context: Record<string, any>;
   requestPreview?: HttpRequestPreview | null;
   responsePreview?: HttpResponsePreview | null;
+  iterationHistory?: IterationDebugRecord[];
+  allNodePreviews?: Record<string, NodeDebugPreview>;
+  modalOnly?: boolean;
+  bannerOnly?: boolean;
 }
 
 type ModalTab = 'request' | 'response' | 'input';
@@ -71,21 +83,78 @@ export function DebugContextViewer({
   flowId,
   context,
   requestPreview,
-  responsePreview
+  responsePreview,
+  iterationHistory = [],
+  allNodePreviews = {},
+  modalOnly = false,
+  bannerOnly = false,
 }: DebugContextViewerProps) {
   const dispatch = useAppDispatch();
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
+  const isModalOpen = isDebugModalOpen;
   const [activeTab, setActiveTab] = useState<ModalTab>('request');
   const [copied, setCopied] = useState(false);
   const [copiedPayload, setCopiedPayload] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [collapsedPaths, setCollapsedPaths] = useState<Record<string, boolean>>({});
+  const [isDetailsCollapsed, setIsDetailsCollapsed] = useState(false);
+  const [isSending, setIsSending] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 50;
+
+  // Track active iteration and total iterations
+  const activeIterationNumber = useMemo(() => {
+    if (requestPreview?.iteration?.current) return requestPreview.iteration.current;
+    if (responsePreview?.iteration?.current) return responsePreview.iteration.current;
+    if (iterationHistory.length > 0) {
+      return Math.max(...iterationHistory.map(h => h.iterationIndex));
+    }
+    return 1;
+  }, [requestPreview?.iteration?.current, responsePreview?.iteration?.current, iterationHistory]);
+
+  const totalIterations = useMemo(() => {
+    if (requestPreview?.iteration?.total) return requestPreview.iteration.total;
+    if (responsePreview?.iteration?.total) return responsePreview.iteration.total;
+    if (iterationHistory.length > 0) {
+      const maxInHist = Math.max(...iterationHistory.map(h => h.iterationIndex));
+      const totalFromHist = iterationHistory[0]?.requestPreview?.iteration?.total || iterationHistory[0]?.responsePreview?.iteration?.total;
+      return totalFromHist || maxInHist;
+    }
+    return 1;
+  }, [requestPreview?.iteration?.total, responsePreview?.iteration?.total, iterationHistory]);
+
+  // Selected iteration index to view in modal
+  const [selectedIterNum, setSelectedIterNum] = useState<number | null>(null);
+
+  // Sync selected iteration to current active when active updates
+  useEffect(() => {
+    setSelectedIterNum(activeIterationNumber);
+  }, [activeIterationNumber]);
+
+  const viewingIterNum = selectedIterNum ?? activeIterationNumber;
+  const isViewingActiveIter = viewingIterNum === activeIterationNumber;
+
+  const currentHistRecord = useMemo(() => {
+    return iterationHistory.find(h => h.iterationIndex === viewingIterNum) || null;
+  }, [iterationHistory, viewingIterNum]);
+
+  // Effective request and response to display
+  const effectiveRequest: HttpRequestPreview | null = useMemo(() => {
+    if (isViewingActiveIter && requestPreview) return requestPreview;
+    if (currentHistRecord?.requestPreview) return currentHistRecord.requestPreview;
+    return requestPreview || null;
+  }, [isViewingActiveIter, requestPreview, currentHistRecord]);
+
+  const effectiveResponse: HttpResponsePreview | null = useMemo(() => {
+    if (isViewingActiveIter && responsePreview) return responsePreview;
+    if (currentHistRecord?.responsePreview) return currentHistRecord.responsePreview;
+    return responsePreview || null;
+  }, [isViewingActiveIter, responsePreview, currentHistRecord]);
 
   // Sync default modal tab when preview updates
   useEffect(() => {
     if (responsePreview) {
+      setIsSending(false);
       setActiveTab('response');
     } else if (requestPreview) {
       setActiveTab('request');
@@ -143,10 +212,10 @@ export function DebugContextViewer({
 
   // Data to display in the current active tab
   const currentTabData = useMemo(() => {
-    if (activeTab === 'response') return responsePreview?.data;
-    if (activeTab === 'request') return requestPreview?.body;
+    if (activeTab === 'response') return effectiveResponse?.data;
+    if (activeTab === 'request') return effectiveRequest?.body;
     return activeInputData;
-  }, [activeTab, responsePreview, requestPreview, activeInputData]);
+  }, [activeTab, effectiveResponse?.data, effectiveRequest?.body, activeInputData]);
 
   // Detect if active data is tabular (array of objects)
   const isCurrentDataTabular = useMemo(() => {
@@ -210,33 +279,51 @@ export function DebugContextViewer({
     setCollapsedPaths(prev => ({ ...prev, [path]: !prev[path] }));
   };
 
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        dispatch(setDebugModalOpen(false));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isModalOpen, dispatch]);
+
   const openModalWithTab = (tab: ModalTab) => {
     setActiveTab(tab);
-    setIsModalOpen(true);
+    dispatch(setDebugModalOpen(true));
   };
 
   const activeSourceInfo = upstreamAncestorNodes.find(n => n.id === activeSourceId);
 
   // Formatted string representation of request body/payload
   const formattedRequestBody = useMemo(() => {
-    if (!requestPreview?.body) return null;
-    if (typeof requestPreview.body === 'string') {
+    if (!effectiveRequest?.body) return null;
+    if (typeof effectiveRequest.body === 'string') {
       try {
-        const parsed = JSON.parse(requestPreview.body);
+        const parsed = JSON.parse(effectiveRequest.body);
         return JSON.stringify(parsed, null, 2);
       } catch {
-        return requestPreview.body;
+        return effectiveRequest.body;
       }
     }
-    return JSON.stringify(requestPreview.body, null, 2);
-  }, [requestPreview?.body]);
+    return JSON.stringify(effectiveRequest.body, null, 2);
+  }, [effectiveRequest?.body]);
 
   // Formatted string representation of response data
   const formattedResponseBody = useMemo(() => {
-    if (!responsePreview?.data) return null;
-    if (typeof responsePreview.data === 'string') return responsePreview.data;
-    return JSON.stringify(responsePreview.data, null, 2);
-  }, [responsePreview?.data]);
+    if (!effectiveResponse?.data) return null;
+    if (typeof effectiveResponse.data === 'string') {
+      try {
+        const parsed = JSON.parse(effectiveResponse.data);
+        return JSON.stringify(parsed, null, 2);
+      } catch {
+        return effectiveResponse.data;
+      }
+    }
+    return JSON.stringify(effectiveResponse.data, null, 2);
+  }, [effectiveResponse?.data]);
 
   // Clean, native theme structured data renderer
   const renderStructuredData = (val: any, path: string = 'root', depth: number = 0): React.ReactNode => {
@@ -314,315 +401,282 @@ export function DebugContextViewer({
     );
   };
 
-  const currentIteration = responsePreview?.iteration || requestPreview?.iteration;
+  const currentIteration = responsePreview?.iteration || requestPreview?.iteration || (totalIterations > 1 ? { current: activeIterationNumber, total: totalIterations } : undefined);
 
-  return (
-    <>
-      {/* Sleek, Integrated Sidebar Card */}
-      <div className="rounded-md border border-border bg-surface p-3 space-y-3 shadow-xs">
-        {/* Header */}
+  const renderBanner = () => (
+    <div className={cn(
+      "rounded-md border p-3 space-y-2.5 transition-all text-xs shadow-xs",
+      responsePreview && !responsePreview.ok
+        ? "border-rose-500/30 bg-rose-500/5"
+        : responsePreview && responsePreview.ok
+          ? "border-emerald-500/30 bg-emerald-500/5"
+          : requestPreview
+            ? "border-blue-500/30 bg-blue-500/5"
+            : "border-amber-500/30 bg-amber-500/5"
+    )}>
+        {/* Header with status pill and action icons */}
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-amber-500/10 text-amber-600 flex items-center justify-center shrink-0 border border-amber-500/20">
-              <Pause size={12} className="fill-amber-600" />
+          <div className="flex items-center gap-2 min-w-0">
+            <div className={cn(
+              "w-6 h-6 rounded-full flex items-center justify-center shrink-0 border",
+              responsePreview && !responsePreview.ok
+                ? "bg-rose-500/10 text-rose-600 border-rose-500/20"
+                : responsePreview && responsePreview.ok
+                  ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+                  : "bg-amber-500/10 text-amber-600 border-amber-500/20"
+            )}>
+              {responsePreview && !responsePreview.ok ? (
+                <AlertCircle size={13} />
+              ) : responsePreview && responsePreview.ok ? (
+                <CheckCircle2 size={13} />
+              ) : (
+                <Pause size={11} className="fill-amber-600" />
+              )}
             </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-semibold text-fg">Modo Debug</span>
-                <span className="text-[10px] bg-amber-500/10 text-amber-700 font-medium px-1.5 py-0.2 rounded border border-amber-500/20">
-                  {responsePreview ? 'Respuesta recibida' : 'Pausado'}
-                </span>
-              </div>
-            </div>
-          </div>
-          {currentIteration && (
-            <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-bg text-accent border border-border">
-              {currentIteration.total > 1
-                ? `${currentIteration.current} de ${currentIteration.total}`
-                : 'Petición 1/1'}
-            </span>
-          )}
-        </div>
 
-        {/* Server Response Card (if node is paused on an HTTP response) */}
-        {responsePreview && (
-          <div className="p-2.5 rounded bg-bg border border-border space-y-2 text-xs">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+              <span className="font-semibold text-xs text-fg">
+                {isSending
+                  ? 'Enviando petición...'
+                  : responsePreview
+                    ? responsePreview.ok
+                      ? 'Respuesta OK'
+                      : 'Error HTTP'
+                    : requestPreview
+                      ? 'Petición lista'
+                      : 'Pausado'}
+              </span>
+
+              {responsePreview && (
                 <span className={cn(
-                  "px-1.5 py-0.5 rounded text-[10px] font-bold font-mono",
+                  "px-1.5 py-0.2 rounded text-[10px] font-bold font-mono",
                   responsePreview.ok
-                    ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/20"
-                    : "bg-rose-500/10 text-rose-600 border border-rose-500/20"
+                    ? "bg-emerald-500/15 text-emerald-600 border border-emerald-500/25"
+                    : "bg-rose-500/15 text-rose-600 border border-rose-500/25"
                 )}>
                   {responsePreview.status} {responsePreview.statusText || (responsePreview.ok ? 'OK' : 'Error')}
                 </span>
-                <span className="text-[10px] font-mono text-muted flex items-center gap-1">
-                  <Clock size={10} />
-                  {responsePreview.durationMs} ms
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  if (formattedResponseBody) handleCopy(formattedResponseBody);
-                }}
-                className="text-[10px] text-muted hover:text-fg px-1.5 py-0.5 rounded border border-border hover:bg-surface transition-colors cursor-pointer"
-              >
-                {copied ? 'Copiado' : 'Copiar respuesta'}
-              </button>
-            </div>
+              )}
 
-            {/* Response preview snippet */}
-            <div className="p-2 bg-surface rounded border border-border font-mono text-[11px] text-fg select-text leading-relaxed max-h-28 overflow-y-auto whitespace-pre-wrap break-all">
-              {formattedResponseBody || 'Sin contenido de respuesta'}
-            </div>
-
-            <Button
-              type="button"
-              variant="default"
-              size="sm"
-              onClick={() => openModalWithTab('response')}
-              className="w-full gap-1.5 text-xs h-7 bg-surface border-border hover:bg-bg text-fg font-medium"
-            >
-              <Eye size={13} className="text-accent" />
-              <span>Ver respuesta completa del servidor</span>
-            </Button>
-          </div>
-        )}
-
-        {/* HTTP Request Details if paused on an HTTP request */}
-        {requestPreview && !responsePreview && (
-          <div className="p-2.5 rounded bg-bg border border-border space-y-2 text-xs">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <span className={cn(
-                  "px-1.5 py-0.5 rounded text-[10px] font-bold font-mono uppercase",
-                  requestPreview.method === 'GET' ? "bg-blue-500/10 text-blue-600 border border-blue-500/20" :
-                  requestPreview.method === 'POST' ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/20" :
-                  requestPreview.method === 'PUT' || requestPreview.method === 'PATCH' ? "bg-amber-500/10 text-amber-600 border border-amber-500/20" :
-                  "bg-rose-500/10 text-rose-600 border border-rose-500/20"
-                )}>
+              {requestPreview && !responsePreview && (
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-bold font-mono uppercase bg-blue-500/15 text-blue-600 border border-blue-500/25">
                   {requestPreview.method}
                 </span>
-                <span className="text-[11px] font-medium text-muted">
-                  Petición preparada
+              )}
+
+              {responsePreview && (
+                <span className="text-[10px] font-mono text-muted flex items-center gap-0.5">
+                  <Clock size={10} />
+                  {responsePreview.durationMs}ms
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            {currentIteration && (
+              <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-surface text-accent border border-border">
+                {currentIteration.total > 1
+                  ? `${currentIteration.current}/${currentIteration.total}`
+                  : '1/1'}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => openModalWithTab(responsePreview ? 'response' : requestPreview ? 'request' : 'input')}
+              className="p-1 rounded text-muted hover:text-accent hover:bg-surface border border-transparent hover:border-border transition-colors cursor-pointer"
+              title="Abrir inspección completa en ventana modal"
+            >
+              <Eye size={13} />
+            </button>
+          </div>
+        </div>
+
+        {/* Quick Action Toolbar */}
+        <div className="flex items-center gap-1.5 pt-1">
+          {responsePreview ? (
+            <>
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }))}
+                className="flex-1 text-xs h-7 gap-1 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
+                title="Continuar al paso siguiente"
+              >
+                <StepForward size={12} className="text-accent" />
+                <span>Paso siguiente</span>
+              </Button>
+
+              {responsePreview.iteration && responsePreview.iteration.total > responsePreview.iteration.current && (
+                <Button
+                  type="button"
+                  variant="default"
+                  size="sm"
+                  onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }))}
+                  className="text-xs h-7 px-2 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
+                  title="Enviar todas las peticiones restantes de este bucle sin pausar"
+                >
+                  <FastForward size={12} className="text-accent" />
+                  <span>Restantes ({responsePreview.iteration.total - responsePreview.iteration.current})</span>
+                </Button>
+              )}
+
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
+                className="text-xs h-7 px-3 gap-1 font-medium bg-accent text-white hover:bg-accent-hover shadow-2xs"
+                title="Continuar ejecución completa del flujo"
+              >
+                <PlayCircle size={12} />
+                <span>Continuar</span>
+              </Button>
+            </>
+          ) : requestPreview ? (
+            <>
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                disabled={isSending}
+                onClick={() => {
+                  setIsSending(true);
+                  dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }));
+                }}
+                className="flex-1 text-xs h-7 gap-1 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
+                title="Enviar esta petición y pausar al recibir respuesta"
+              >
+                {isSending ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin text-accent" />
+                    <span>Enviando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Send size={12} className="text-accent" />
+                    <span>Enviar petición</span>
+                  </>
+                )}
+              </Button>
+
+              {requestPreview.iteration && requestPreview.iteration.total > requestPreview.iteration.current && (
+                <Button
+                  type="button"
+                  variant="default"
+                  size="sm"
+                  onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }))}
+                  className="text-xs h-7 px-2 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
+                  title="Enviar todas las peticiones restantes sin pausar"
+                >
+                  <FastForward size={12} className="text-accent" />
+                  <span>Restantes ({requestPreview.iteration.total - requestPreview.iteration.current + 1})</span>
+                </Button>
+              )}
+
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
+                className="text-xs h-7 px-3 gap-1 font-medium bg-accent text-white hover:bg-accent-hover shadow-2xs"
+                title="Continuar ejecución completa"
+              >
+                <PlayCircle size={12} />
+                <span>Continuar</span>
+              </Button>
+            </>
+          ) : (
+            <div className="flex items-center gap-1.5 w-full">
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }))}
+                className="flex-1 text-xs h-7 gap-1.5 font-medium border-border hover:bg-bg text-fg"
+                title="Ejecutar solo este nodo"
+              >
+                <StepForward size={12} className="text-accent" />
+                <span>Paso siguiente</span>
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
+                className="flex-1 text-xs h-7 gap-1.5 font-medium bg-accent text-white hover:bg-accent-hover"
+                title="Continuar ejecución completa del flujo"
+              >
+                <PlayCircle size={12} />
+                <span>Continuar</span>
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {/* Compact Diagnostic Strip (No large JSON cluttering the sidebar) */}
+        <div className="pt-2 border-t border-border/30 flex flex-col gap-1.5 text-[11px]">
+          {requestPreview && !responsePreview && (
+            <div className="flex items-center justify-between gap-2 text-muted">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-surface border border-border text-fg shrink-0 uppercase font-semibold">
+                  {requestPreview.method}
+                </span>
+                <span className="truncate font-mono text-[10px] text-fg/80" title={requestPreview.endpoint}>
+                  {requestPreview.endpoint}
                 </span>
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  navigator.clipboard.writeText(requestPreview.endpoint);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1500);
-                }}
-                className="text-[10px] text-muted hover:text-fg px-1.5 py-0.5 rounded border border-border hover:bg-surface transition-colors cursor-pointer"
+                onClick={() => openModalWithTab('request')}
+                className="text-accent hover:underline text-[10px] shrink-0 font-medium cursor-pointer flex items-center gap-1"
+                title="Ver payload y encabezados completos"
               >
-                {copied ? 'Copiado' : 'Copiar URL'}
+                <Eye size={11} />
+                <span>Ver petición</span>
               </button>
             </div>
+          )}
 
-            <div className="p-2 bg-surface rounded border border-border break-all font-mono text-[11px] text-fg select-text leading-relaxed">
-              {requestPreview.endpoint}
+          {responsePreview && (
+            <div className="flex items-center justify-between gap-2 text-muted">
+              <span className="truncate text-fg/80">
+                {responsePreview.ok ? 'Respuesta completada con éxito' : 'Respuesta con error del servidor'}
+              </span>
+              <button
+                type="button"
+                onClick={() => openModalWithTab('response')}
+                className="text-accent hover:underline text-[10px] shrink-0 font-medium cursor-pointer flex items-center gap-1"
+                title="Ver respuesta JSON completa"
+              >
+                <Eye size={11} />
+                <span>Ver respuesta</span>
+              </button>
             </div>
+          )}
 
-            {/* Request Body / Payload preview for POST, PUT, PATCH */}
-            {formattedRequestBody && (
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] text-muted">
-                  <span className="font-medium text-fg">Cuerpo / Payload:</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(formattedRequestBody);
-                      setCopiedPayload(true);
-                      setTimeout(() => setCopiedPayload(false), 1500);
-                    }}
-                    className="text-[10px] text-muted hover:text-fg px-1.5 py-0.2 rounded border border-border hover:bg-surface transition-colors cursor-pointer"
-                  >
-                    {copiedPayload ? 'Copiado' : 'Copiar Payload'}
-                  </button>
-                </div>
-                <div className="p-2 bg-surface rounded border border-border font-mono text-[11px] text-fg select-text leading-relaxed max-h-32 overflow-y-auto whitespace-pre-wrap break-all">
-                  {formattedRequestBody}
-                </div>
-              </div>
-            )}
-
-            {requestPreview.item && (
-              <div className="text-[11px] text-muted bg-surface/60 p-2 rounded border border-border space-y-0.5">
-                <div className="font-medium text-fg flex items-center justify-between">
-                  <span>Dato origen actual:</span>
-                  {requestPreview.item.CityCapitalId !== undefined && (
-                    <span className="font-mono text-accent">ID: {requestPreview.item.CityCapitalId}</span>
-                  )}
-                  {requestPreview.item.id !== undefined && (
-                    <span className="font-mono text-accent">ID: {requestPreview.item.id}</span>
-                  )}
-                </div>
-                <div className="truncate text-fg/80 font-mono text-[10px]">
-                  {requestPreview.item.Name || requestPreview.item.nombre || requestPreview.item.name || JSON.stringify(requestPreview.item)}
-                </div>
-              </div>
-            )}
-
-            <Button
-              type="button"
-              variant="default"
-              size="sm"
-              onClick={() => openModalWithTab('request')}
-              className="w-full gap-1.5 text-xs h-7 bg-surface border-border hover:bg-bg text-fg font-medium"
-            >
-              <Eye size={13} className="text-accent" />
-              <span>Inspeccionar petición completa</span>
-            </Button>
-          </div>
-        )}
-
-        {/* Upstream branch info */}
-        <div className="text-xs text-muted">
-          {upstreamAncestorNodes.length === 0 ? (
-            <p className="italic text-[11px]">No hay nodos previos ejecutados en esta rama.</p>
-          ) : (
-            <div className="flex items-center justify-between bg-bg rounded px-2.5 py-1.5 border border-border">
-              <span className="text-fg font-medium truncate max-w-[180px]">
-                Origen: {activeSourceInfo?.label || upstreamAncestorNodes[0].label}
+          {upstreamAncestorNodes.length > 0 && (
+            <div className="flex items-center justify-between text-muted border-t border-border/20 pt-1">
+              <span className="truncate max-w-[180px]">
+                Origen: <strong className="text-fg font-medium">{activeSourceInfo?.label || upstreamAncestorNodes[0].label}</strong>
               </span>
               <button
                 type="button"
                 onClick={() => openModalWithTab('input')}
-                className="text-[11px] font-mono text-accent hover:underline cursor-pointer"
+                className="text-accent hover:underline font-mono text-[10px] cursor-pointer"
               >
                 Ver datos ({upstreamAncestorNodes.length})
               </button>
             </div>
           )}
         </div>
-
-        {/* Execution control buttons */}
-        {responsePreview ? (
-          <div className="space-y-1.5 pt-1 border-t border-border">
-            <Button
-              type="button"
-              variant="default"
-              size="sm"
-              onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }))}
-              className="w-full text-xs h-8 gap-1.5 font-medium border-border hover:bg-bg text-fg"
-              title="Continuar a la siguiente petición o siguiente nodo"
-            >
-              <StepForward size={13} className="text-accent" />
-              <span>
-                {responsePreview.iteration && responsePreview.iteration.total > 1
-                  ? `Siguiente petición (${responsePreview.iteration.current}/${responsePreview.iteration.total})`
-                  : 'Paso siguiente'}
-              </span>
-            </Button>
-
-            <div className="flex items-center gap-2">
-              {responsePreview.iteration && responsePreview.iteration.total > 1 && (
-                <Button
-                  type="button"
-                  variant="default"
-                  size="sm"
-                  onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }))}
-                  className="flex-1 text-xs h-8 gap-1 font-medium border-border hover:bg-bg text-fg"
-                  title="Enviar todas las peticiones restantes de este nodo sin pausar"
-                >
-                  <FastForward size={13} className="text-accent" />
-                  <span>Enviar restantes ({responsePreview.iteration.total - responsePreview.iteration.current})</span>
-                </Button>
-              )}
-
-              <Button
-                type="button"
-                variant="primary"
-                size="sm"
-                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className={cn("text-xs h-8 gap-1 font-medium", responsePreview.iteration && responsePreview.iteration.total > 1 ? "flex-1" : "w-full")}
-                title="Continuar ejecución completa del flujo"
-              >
-                <PlayCircle size={13} />
-                <span>Continuar todo</span>
-              </Button>
-            </div>
-          </div>
-        ) : requestPreview ? (
-          <div className="space-y-1.5 pt-1 border-t border-border">
-            <Button
-              type="button"
-              variant="default"
-              size="sm"
-              onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }))}
-              className="w-full text-xs h-8 gap-1.5 font-medium border-border hover:bg-bg text-fg"
-              title="Enviar esta petición y pausar al recibir respuesta"
-            >
-              <Send size={13} className="text-accent" />
-              <span>
-                {requestPreview.iteration && requestPreview.iteration.total > 1
-                  ? `Enviar petición (${requestPreview.iteration.current}/${requestPreview.iteration.total})`
-                  : 'Enviar petición'}
-              </span>
-            </Button>
-
-            <div className="flex items-center gap-2">
-              {requestPreview.iteration && requestPreview.iteration.total > 1 && (
-                <Button
-                  type="button"
-                  variant="default"
-                  size="sm"
-                  onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }))}
-                  className="flex-1 text-xs h-8 gap-1 font-medium border-border hover:bg-bg text-fg"
-                  title="Enviar todas las peticiones restantes de este nodo sin pausar"
-                >
-                  <FastForward size={13} className="text-accent" />
-                  <span>Enviar todas ({requestPreview.iteration.total - requestPreview.iteration.current + 1})</span>
-                </Button>
-              )}
-
-              <Button
-                type="button"
-                variant="primary"
-                size="sm"
-                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className={cn("text-xs h-8 gap-1 font-medium", requestPreview.iteration && requestPreview.iteration.total > 1 ? "flex-1" : "w-full")}
-                title="Continuar ejecución completa del flujo"
-              >
-                <PlayCircle size={13} />
-                <span>Continuar todo</span>
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 pt-1 border-t border-border">
-            <Button
-              type="button"
-              variant="default"
-              size="sm"
-              onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }))}
-              className="flex-1 text-xs h-8 gap-1.5 font-medium border-border hover:bg-bg text-fg"
-              title="Ejecutar solo este nodo"
-            >
-              <StepForward size={13} className="text-accent" />
-              <span>Paso siguiente</span>
-            </Button>
-
-            <Button
-              type="button"
-              variant="primary"
-              size="sm"
-              onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-              className="flex-1 text-xs h-8 gap-1.5 font-medium"
-              title="Continuar ejecución completa del flujo"
-            >
-              <PlayCircle size={13} />
-              <span>Continuar</span>
-            </Button>
-          </div>
-        )}
       </div>
+    );
 
-      {/* Spacious, Multi-Tab Inspection Modal */}
-      {isModalOpen && createPortal(
+    const renderModal = () => {
+      if (!isModalOpen) return null;
+      return createPortal(
         <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
           <div className="bg-surface rounded-lg shadow-raised border border-border w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
@@ -639,15 +693,25 @@ export function DebugContextViewer({
                     <span className="text-xs font-mono bg-surface text-muted px-2 py-0.5 rounded border border-border">
                       {(node.data?.label as string) || node.type}
                     </span>
-                    {responsePreview && (
-                      <span className="text-[10px] bg-emerald-500/10 text-emerald-600 font-semibold px-2 py-0.5 rounded border border-emerald-500/20">
-                        Respuesta {responsePreview.status}
+                    {effectiveResponse && (
+                      <span className={cn(
+                        "text-[10px] font-semibold px-2 py-0.5 rounded border font-mono",
+                        effectiveResponse.ok
+                          ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+                          : "bg-rose-500/10 text-rose-600 border-rose-500/20"
+                      )}>
+                        Respuesta {effectiveResponse.status}
+                      </span>
+                    )}
+                    {totalIterations > 1 && (
+                      <span className="text-[10px] bg-accent/10 text-accent font-semibold px-2 py-0.5 rounded border border-accent/20 font-mono">
+                        Iteración {viewingIterNum} de {totalIterations}
                       </span>
                     )}
                   </div>
                   <p className="text-xs text-muted mt-0.5">
-                    {responsePreview
-                      ? 'Inspecciona la petición saliente, la respuesta del servicio y los datos de entrada'
+                    {effectiveResponse
+                      ? 'Inspecciona la petición enviada, la respuesta del servicio y los datos de entrada'
                       : 'Inspecciona la petición configurada y los datos recibidos de los nodos anteriores'}
                   </p>
                 </div>
@@ -659,7 +723,7 @@ export function DebugContextViewer({
                   size="sm"
                   onClick={() => {
                     const dataToCopy =
-                      activeTab === 'request' ? (formattedRequestBody || requestPreview?.endpoint) :
+                      activeTab === 'request' ? (formattedRequestBody || effectiveRequest?.endpoint) :
                       activeTab === 'response' ? formattedResponseBody :
                       JSON.stringify(activeInputData, null, 2);
                     if (dataToCopy) handleCopy(dataToCopy);
@@ -671,17 +735,136 @@ export function DebugContextViewer({
                 </Button>
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => dispatch(setDebugModalOpen(false))}
                   className="p-1.5 hover:bg-muted rounded-md text-muted hover:text-fg transition-colors cursor-pointer"
+                  title="Cerrar modal de inspección"
                 >
                   <X size={18} />
                 </button>
               </div>
             </div>
 
+            {/* Iteration Stepper & History Ribbon */}
+            {totalIterations > 1 && (
+              <div className="px-4 py-2 bg-surface/80 border-b border-border flex items-center justify-between gap-2 overflow-x-auto">
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-1 text-xs font-semibold text-fg">
+                    <Repeat size={13} className="text-accent" />
+                    <span>Peticiones ({totalIterations}):</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {Array.from({ length: totalIterations }, (_, i) => i + 1).map(iterNum => {
+                      const hist = iterationHistory.find(h => h.iterationIndex === iterNum);
+                      const isCurrentActive = iterNum === activeIterationNumber;
+                      const isSelected = iterNum === viewingIterNum;
+                      const resp = hist?.responsePreview || (isCurrentActive ? responsePreview : null);
+                      const hasResp = !!resp;
+                      const isRespOk = resp?.ok;
+                      const isPending = isCurrentActive && !hasResp;
+
+                      return (
+                        <button
+                          key={iterNum}
+                          type="button"
+                          onClick={() => {
+                            setSelectedIterNum(iterNum);
+                            if (hasResp) {
+                              setActiveTab('response');
+                            } else {
+                              setActiveTab('request');
+                            }
+                          }}
+                          className={cn(
+                            "px-2.5 py-1 rounded text-xs font-mono flex items-center gap-1.5 transition-all cursor-pointer border",
+                            isSelected
+                              ? "bg-accent/15 border-accent text-accent font-bold shadow-xs"
+                              : "bg-bg hover:bg-surface border-border text-muted hover:text-fg",
+                            isCurrentActive && !isSelected && "ring-1 ring-accent/40"
+                          )}
+                          title={`Ver petición y respuesta de la iteración #${iterNum}`}
+                        >
+                          {hasResp ? (
+                            isRespOk ? (
+                              <CheckCircle2 size={12} className="text-emerald-500" />
+                            ) : (
+                              <AlertCircle size={12} className="text-rose-500" />
+                            )
+                          ) : isPending ? (
+                            <Pause size={10} className="fill-amber-500 text-amber-500" />
+                          ) : (
+                            <span className="w-2 h-2 rounded-full bg-border inline-block" />
+                          )}
+                          <span>#{iterNum}</span>
+                          {hasResp && resp && (
+                            <span className={cn(
+                              "text-[10px] font-bold px-1 rounded",
+                              isRespOk ? "bg-emerald-500/10 text-emerald-600" : "bg-rose-500/10 text-rose-600"
+                            )}>
+                              {resp.status}
+                            </span>
+                          )}
+                          {isPending && (
+                            <span className="text-[10px] text-amber-600 bg-amber-500/10 px-1 rounded font-sans">
+                              Pendiente
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-xs text-muted shrink-0">
+                  <button
+                    type="button"
+                    disabled={viewingIterNum <= 1}
+                    onClick={() => {
+                      const prev = Math.max(1, viewingIterNum - 1);
+                      setSelectedIterNum(prev);
+                      const hist = iterationHistory.find(h => h.iterationIndex === prev);
+                      if (hist?.responsePreview) setActiveTab('response');
+                      else setActiveTab('request');
+                    }}
+                    className="p-1 rounded hover:bg-bg border border-border disabled:opacity-40 disabled:cursor-not-allowed text-fg"
+                    title="Iteración anterior"
+                  >
+                    <ArrowLeft size={13} />
+                  </button>
+                  <span className="font-mono text-xs">
+                    {viewingIterNum} / {totalIterations}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={viewingIterNum >= totalIterations}
+                    onClick={() => {
+                      const next = Math.min(totalIterations, viewingIterNum + 1);
+                      setSelectedIterNum(next);
+                      const hist = iterationHistory.find(h => h.iterationIndex === next);
+                      if (hist?.responsePreview) setActiveTab('response');
+                      else setActiveTab('request');
+                    }}
+                    className="p-1 rounded hover:bg-bg border border-border disabled:opacity-40 disabled:cursor-not-allowed text-fg"
+                    title="Siguiente iteración"
+                  >
+                    <ArrowRight size={13} />
+                  </button>
+
+                  {!isViewingActiveIter && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIterNum(activeIterationNumber)}
+                      className="ml-2 text-xs font-sans text-accent hover:underline flex items-center gap-1 cursor-pointer font-medium"
+                    >
+                      <span>Ir a la activa (#{activeIterationNumber})</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Main Tabs Navigation */}
             <div className="px-4 bg-bg border-b border-border flex items-center gap-2">
-              {requestPreview && (
+              {effectiveRequest && (
                 <button
                   type="button"
                   onClick={() => setActiveTab('request')}
@@ -696,16 +879,16 @@ export function DebugContextViewer({
                   <span>Petición HTTP</span>
                   <span className={cn(
                     "text-[10px] font-mono px-1.5 py-0.2 rounded font-bold uppercase",
-                    requestPreview.method === 'GET' ? "bg-blue-500/10 text-blue-600" :
-                    requestPreview.method === 'POST' ? "bg-emerald-500/10 text-emerald-600" :
+                    effectiveRequest.method === 'GET' ? "bg-blue-500/10 text-blue-600" :
+                    effectiveRequest.method === 'POST' ? "bg-emerald-500/10 text-emerald-600" :
                     "bg-amber-500/10 text-amber-600"
                   )}>
-                    {requestPreview.method}
+                    {effectiveRequest.method}
                   </span>
                 </button>
               )}
 
-              {responsePreview && (
+              {(effectiveResponse || (isSending && isViewingActiveIter)) && (
                 <button
                   type="button"
                   onClick={() => setActiveTab('response')}
@@ -716,14 +899,24 @@ export function DebugContextViewer({
                       : "border-transparent text-muted hover:text-fg"
                   )}
                 >
-                  <CornerDownRight size={14} />
+                  {isSending && isViewingActiveIter && !effectiveResponse ? (
+                    <Loader2 size={14} className="animate-spin text-accent" />
+                  ) : (
+                    <CornerDownRight size={14} />
+                  )}
                   <span>Respuesta del Servidor</span>
-                  <span className={cn(
-                    "text-[10px] font-mono px-1.5 py-0.2 rounded font-bold",
-                    responsePreview.ok ? "bg-emerald-500/10 text-emerald-600" : "bg-rose-500/10 text-rose-600"
-                  )}>
-                    {responsePreview.status}
-                  </span>
+                  {effectiveResponse ? (
+                    <span className={cn(
+                      "text-[10px] font-mono px-1.5 py-0.2 rounded font-bold",
+                      effectiveResponse.ok ? "bg-emerald-500/10 text-emerald-600" : "bg-rose-500/10 text-rose-600"
+                    )}>
+                      {effectiveResponse.status}
+                    </span>
+                  ) : isSending ? (
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded font-medium bg-accent/10 text-accent">
+                      Enviando...
+                    </span>
+                  ) : null}
                 </button>
               )}
 
@@ -748,7 +941,7 @@ export function DebugContextViewer({
             </div>
 
             {/* TAB 1: HTTP REQUEST (URL, Headers, Query Params, Full Payload) */}
-            {activeTab === 'request' && requestPreview && (
+            {activeTab === 'request' && effectiveRequest && (
               <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-bg/20">
                 {/* Endpoint & Method Bar */}
                 <div className="p-3 bg-surface rounded-md border border-border space-y-2">
@@ -756,7 +949,7 @@ export function DebugContextViewer({
                     <span className="text-xs font-semibold text-fg">Destino de la Petición</span>
                     <button
                       type="button"
-                      onClick={() => handleCopy(requestPreview.endpoint)}
+                      onClick={() => handleCopy(effectiveRequest.endpoint)}
                       className="text-xs text-muted hover:text-fg px-2 py-0.5 rounded border border-border hover:bg-bg transition-colors flex items-center gap-1 cursor-pointer"
                     >
                       <Copy size={12} />
@@ -766,14 +959,14 @@ export function DebugContextViewer({
                   <div className="flex items-center gap-2">
                     <span className={cn(
                       "px-2 py-1 rounded text-xs font-bold font-mono uppercase shrink-0",
-                      requestPreview.method === 'GET' ? "bg-blue-500/10 text-blue-600 border border-blue-500/20" :
-                      requestPreview.method === 'POST' ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/20" :
+                      effectiveRequest.method === 'GET' ? "bg-blue-500/10 text-blue-600 border border-blue-500/20" :
+                      effectiveRequest.method === 'POST' ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/20" :
                       "bg-amber-500/10 text-amber-600 border border-amber-500/20"
                     )}>
-                      {requestPreview.method}
+                      {effectiveRequest.method}
                     </span>
                     <div className="p-2 bg-bg rounded border border-border font-mono text-xs text-fg select-text break-all flex-1">
-                      {requestPreview.endpoint}
+                      {effectiveRequest.endpoint}
                     </div>
                   </div>
                 </div>
@@ -784,17 +977,17 @@ export function DebugContextViewer({
                   <div className="p-3 bg-surface rounded-md border border-border space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold text-fg">Encabezados (Headers)</span>
-                      {requestPreview.headers && (
+                      {effectiveRequest.headers && (
                         <span className="text-[10px] font-mono text-muted">
-                          {Object.keys(requestPreview.headers).length} encabezados
+                          {Object.keys(effectiveRequest.headers).length} encabezados
                         </span>
                       )}
                     </div>
-                    {requestPreview.headers && Object.keys(requestPreview.headers).length > 0 ? (
+                    {effectiveRequest.headers && Object.keys(effectiveRequest.headers).length > 0 ? (
                       <div className="bg-bg rounded border border-border overflow-hidden">
                         <table className="w-full text-left text-xs font-mono">
                           <tbody>
-                            {Object.entries(requestPreview.headers).map(([k, v]) => (
+                            {Object.entries(effectiveRequest.headers).map(([k, v]) => (
                               <tr key={k} className="border-b border-border last:border-b-0 hover:bg-surface/50">
                                 <td className="p-2 text-muted border-r border-border font-medium w-1/3 truncate">{k}</td>
                                 <td className="p-2 text-fg break-all">{v}</td>
@@ -814,21 +1007,21 @@ export function DebugContextViewer({
                   <div className="p-3 bg-surface rounded-md border border-border space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold text-fg">
-                        {requestPreview.params ? 'Parámetros Query' : 'Contexto de Origen'}
+                        {effectiveRequest.params ? 'Parámetros Query' : 'Contexto de Origen'}
                       </span>
-                      {requestPreview.iteration && (
+                      {effectiveRequest.iteration && (
                         <span className="text-[10px] font-mono text-accent">
-                          Iteración {requestPreview.iteration.current} de {requestPreview.iteration.total}
+                          Iteración {effectiveRequest.iteration.current} de {effectiveRequest.iteration.total}
                         </span>
                       )}
                     </div>
-                    {requestPreview.params ? (
+                    {effectiveRequest.params ? (
                       <div className="p-2 bg-bg rounded border border-border font-mono text-xs text-fg select-text leading-relaxed">
-                        {typeof requestPreview.params === 'string' ? requestPreview.params : JSON.stringify(requestPreview.params, null, 2)}
+                        {typeof effectiveRequest.params === 'string' ? effectiveRequest.params : JSON.stringify(effectiveRequest.params, null, 2)}
                       </div>
-                    ) : requestPreview.item ? (
+                    ) : effectiveRequest.item ? (
                       <div className="p-2 bg-bg rounded border border-border font-mono text-xs text-fg select-text leading-relaxed max-h-36 overflow-y-auto">
-                        <pre className="text-xs">{JSON.stringify(requestPreview.item, null, 2)}</pre>
+                        <pre className="text-xs">{JSON.stringify(effectiveRequest.item, null, 2)}</pre>
                       </div>
                     ) : (
                       <p className="text-xs text-muted italic p-2 bg-bg rounded border border-border">
@@ -878,23 +1071,37 @@ export function DebugContextViewer({
               </div>
             )}
 
-            {/* TAB 2: SERVER RESPONSE (Status, Headers, Body) */}
-            {activeTab === 'response' && responsePreview && (
+            {/* TAB 2: SERVER RESPONSE (Status, Headers, Body or Loading State) */}
+            {activeTab === 'response' && isSending && isViewingActiveIter && !effectiveResponse && (
+              <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-bg/20 space-y-3">
+                <div className="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center border border-accent/20">
+                  <Loader2 size={24} className="animate-spin text-accent" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-fg">Enviando petición HTTP...</h3>
+                  <p className="text-xs text-muted mt-1 max-w-md">
+                    Esperando respuesta del servidor en <span className="font-mono text-accent">{effectiveRequest?.endpoint}</span>
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'response' && effectiveResponse && (
               <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-bg/20">
                 {/* Status Bar */}
                 <div className="p-3 bg-surface rounded-md border border-border flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span className={cn(
                       "px-2.5 py-1 rounded text-xs font-bold font-mono",
-                      responsePreview.ok
+                      effectiveResponse.ok
                         ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/20"
                         : "bg-rose-500/10 text-rose-600 border border-rose-500/20"
                     )}>
-                      {responsePreview.status} {responsePreview.statusText || (responsePreview.ok ? 'OK' : 'Error')}
+                      {effectiveResponse.status} {effectiveResponse.statusText || (effectiveResponse.ok ? 'OK' : 'Error')}
                     </span>
                     <div className="flex items-center gap-1.5 text-xs text-muted font-mono">
                       <Clock size={13} />
-                      <span>Tiempo de respuesta: <strong>{responsePreview.durationMs} ms</strong></span>
+                      <span>Tiempo de respuesta: <strong>{effectiveResponse.durationMs} ms</strong></span>
                     </div>
                   </div>
 
@@ -914,13 +1121,13 @@ export function DebugContextViewer({
                 </div>
 
                 {/* Response Headers */}
-                {responsePreview.headers && Object.keys(responsePreview.headers).length > 0 && (
+                {effectiveResponse.headers && Object.keys(effectiveResponse.headers).length > 0 && (
                   <div className="p-3 bg-surface rounded-md border border-border space-y-2">
                     <span className="text-xs font-semibold text-fg">Encabezados de Respuesta</span>
                     <div className="bg-bg rounded border border-border overflow-hidden max-h-40 overflow-y-auto">
                       <table className="w-full text-left text-xs font-mono">
                         <tbody>
-                          {Object.entries(responsePreview.headers).map(([k, v]) => (
+                          {Object.entries(effectiveResponse.headers).map(([k, v]) => (
                             <tr key={k} className="border-b border-border last:border-b-0 hover:bg-surface/50">
                               <td className="p-1.5 text-muted border-r border-border font-medium w-1/3 truncate">{k}</td>
                               <td className="p-1.5 text-fg break-all">{v}</td>
@@ -1057,7 +1264,7 @@ export function DebugContextViewer({
                     </div>
                   ) : (
                     <div className="p-3 bg-bg rounded-md border border-border max-h-96 overflow-auto">
-                      {renderStructuredData(responsePreview.data, 'response')}
+                      {renderStructuredData(effectiveResponse.data, 'response')}
                     </div>
                   )}
                 </div>
@@ -1250,71 +1457,143 @@ export function DebugContextViewer({
 
             {/* Modal Step Actions Footer */}
             <div className="p-3 bg-surface border-t border-border flex items-center justify-between shrink-0">
-              <div className="text-xs text-muted">
-                Nodo actual: <strong className="text-fg">{(node.data?.label as string) || node.type}</strong> • Estado:{' '}
-                <strong className={responsePreview ? "text-emerald-600" : "text-amber-600"}>
-                  {responsePreview ? 'Respuesta recibida' : 'Pausado'}
-                </strong>
-                {currentIteration && (
-                  <span className="ml-2 font-mono text-accent">
-                    (Petición {currentIteration.current}/{currentIteration.total})
+              <div className="text-xs text-muted flex items-center gap-2">
+                <span>
+                  Nodo actual: <strong className="text-fg">{(node.data?.label as string) || node.type}</strong>
+                </span>
+                <span>•</span>
+                <span>
+                  Estado:{' '}
+                  <strong className={effectiveResponse ? "text-emerald-600" : "text-amber-600"}>
+                    {effectiveResponse ? 'Respuesta recibida' : 'Pausado para inspección'}
+                  </strong>
+                </span>
+                {totalIterations > 1 && (
+                  <span className="font-mono text-accent bg-bg px-2 py-0.5 rounded border border-border">
+                    {isViewingActiveIter
+                      ? `Petición activa: #${activeIterationNumber}/${totalIterations}`
+                      : `Revisando histórico: #${viewingIterNum}/${totalIterations}`}
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={() => {
-                    dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }));
-                    setIsModalOpen(false);
-                  }}
-                  className="gap-2"
-                >
-                  <StepForward size={14} className="text-accent" />
-                  <span>
-                    {responsePreview
-                      ? (currentIteration && currentIteration.total > 1 ? `Siguiente (${currentIteration.current}/${currentIteration.total})` : 'Paso siguiente')
-                      : requestPreview
-                        ? 'Enviar esta petición'
-                        : 'Paso siguiente'}
-                  </span>
-                </Button>
 
-                {currentIteration && currentIteration.total > 1 && (
+              <div className="flex items-center gap-2">
+                {!isViewingActiveIter ? (
                   <Button
-                    variant="default"
+                    variant="primary"
                     size="sm"
                     onClick={() => {
-                      dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }));
-                      setIsModalOpen(false);
+                      setSelectedIterNum(activeIterationNumber);
+                      if (responsePreview) setActiveTab('response');
+                      else setActiveTab('request');
                     }}
-                    className="gap-2 text-fg"
-                    title="Enviar todas las peticiones restantes sin pausar"
+                    className="gap-1.5 text-xs h-8"
                   >
-                    <FastForward size={14} className="text-accent" />
-                    <span>Enviar todas ({currentIteration.total - currentIteration.current + 1})</span>
+                    <span>Volver a la petición activa (#{activeIterationNumber})</span>
+                    <ArrowRight size={13} />
                   </Button>
-                )}
+                ) : (
+                  <>
+                    <Button
+                      variant={effectiveRequest && !effectiveResponse ? "primary" : "default"}
+                      size="sm"
+                      disabled={isSending}
+                      onClick={() => {
+                        if (effectiveRequest && !effectiveResponse) {
+                          // Send request and STAY in modal to inspect response
+                          setIsSending(true);
+                          setActiveTab('response');
+                          dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }));
+                        } else {
+                          // If response already received, advance to next iteration or finish
+                          if (totalIterations > 1 && activeIterationNumber < totalIterations) {
+                            dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }));
+                            setActiveTab('request');
+                          } else {
+                            dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }));
+                          }
+                        }
+                      }}
+                      className="gap-2"
+                    >
+                      {isSending ? (
+                        <>
+                          <Loader2 size={14} className="animate-spin" />
+                          <span>Enviando petición...</span>
+                        </>
+                      ) : (
+                        <>
+                          {effectiveResponse ? (
+                            <StepForward size={14} className="text-accent" />
+                          ) : (
+                            <Send size={14} />
+                          )}
+                          <span>
+                            {effectiveResponse
+                              ? (totalIterations > 1 && activeIterationNumber < totalIterations
+                                  ? `Siguiente petición (#${activeIterationNumber + 1}/${totalIterations})`
+                                  : 'Paso siguiente')
+                              : effectiveRequest
+                                ? (totalIterations > 1 ? `Enviar petición #${activeIterationNumber}` : 'Enviar esta petición')
+                                : 'Paso siguiente'}
+                          </span>
+                        </>
+                      )}
+                    </Button>
 
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => {
-                    dispatch(resumeDebugNode({ id: flowId, action: 'continue' }));
-                    setIsModalOpen(false);
-                  }}
-                  className="gap-2"
-                >
-                  <PlayCircle size={14} />
-                  <span>Continuar todo</span>
-                </Button>
+                    {totalIterations > 1 && activeIterationNumber < totalIterations && (
+                      <Button
+                        variant="default"
+                        size="sm"
+                        onClick={() => {
+                          dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }));
+                        }}
+                        className="gap-2 text-fg"
+                        title="Enviar todas las peticiones restantes sin pausar"
+                      >
+                        <FastForward size={14} className="text-accent" />
+                        <span>Enviar restantes ({totalIterations - activeIterationNumber})</span>
+                      </Button>
+                    )}
+
+                    <Button
+                      variant="default"
+                      size="sm"
+                      onClick={() => {
+                        dispatch(resumeDebugNode({ id: flowId, action: 'continue' }));
+                      }}
+                      className="gap-2 text-fg"
+                    >
+                      <PlayCircle size={14} />
+                      <span>Continuar todo</span>
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => dispatch(setDebugModalOpen(false))}
+                      className="gap-1.5 text-xs text-muted hover:text-fg ml-2 cursor-pointer"
+                      title="Cerrar ventana de inspección"
+                    >
+                      <X size={13} />
+                      <span>Cerrar</span>
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           </div>
         </div>,
         document.body
-      )}
-    </>
-  );
-}
+      );
+    };
+
+    if (modalOnly) return <>{renderModal()}</>;
+    if (bannerOnly) return <>{renderBanner()}</>;
+    return (
+      <>
+        {renderBanner()}
+        {renderModal()}
+      </>
+    );
+  }

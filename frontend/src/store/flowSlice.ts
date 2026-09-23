@@ -28,6 +28,18 @@ export interface Flow {
   updated_at: string;
 }
 
+export interface IterationDebugRecord {
+  iterationIndex: number;
+  requestPreview?: any | null;
+  responsePreview?: any | null;
+}
+
+export interface NodeDebugPreview {
+  requestPreview?: any | null;
+  responsePreview?: any | null;
+  history?: IterationDebugRecord[];
+}
+
 interface FlowState {
   flows: Flow[];
   currentFlow: Flow | null;
@@ -40,11 +52,13 @@ interface FlowState {
   intermediateContext: Record<string, any>;
   debugRequestPreview: any | null;
   debugResponsePreview: any | null;
+  debugPreviewsByNode: Record<string, NodeDebugPreview>;
   nodeResults: Record<string, any>;
   nodeProgress: Record<string, { current: number; total: number }>;
   nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
+  isDebugModalOpen: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -61,11 +75,13 @@ const initialState: FlowState = {
   intermediateContext: {},
   debugRequestPreview: null,
   debugResponsePreview: null,
+  debugPreviewsByNode: {},
   nodeResults: {},
   nodeProgress: {},
   nodeTimers: {},
   canvasExpanded: false,
   nodeLibraryExpanded: true,
+  isDebugModalOpen: false,
   loading: false,
   error: null,
 };
@@ -130,6 +146,33 @@ export const duplicateFlow = createAsyncThunk('flows/duplicate', async (flow: Fl
   return data.data as Flow;
 });
 
+export interface ImportSummary {
+  createdConnections: Array<{ id: string; name: string; host: string; database_name: string }>;
+  reusedConnections: Array<{ id: string; name: string; host: string; database_name: string }>;
+  createdQueries: Array<{ id: string; name: string }>;
+  reusedQueries: Array<{ id: string; name: string }>;
+  requiresCredentials: boolean;
+}
+
+export interface ImportFlowResponse {
+  data: Flow;
+  summary: ImportSummary;
+}
+
+export const importFlowBundle = createAsyncThunk('flows/importBundle', async (payload: any) => {
+  const res = await fetch(`${API_URL}/flows/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ error: 'Error al importar el flujo' }));
+    throw new Error(errorData.error || 'Error al importar el flujo');
+  }
+  const data = await res.json();
+  return data as ImportFlowResponse;
+});
+
 export const executeFlow = createAsyncThunk('flows/execute', async ({ id, mode = 'normal' }: { id: string; mode?: 'normal' | 'debug' }) => {
   const res = await fetch(`${API_URL}/flows/${id}/execute`, {
     method: 'POST',
@@ -185,20 +228,76 @@ const flowSlice = createSlice({
         state.executingNodeIds.push(action.payload);
       }
       state.pausedNodeIds = state.pausedNodeIds.filter(id => id !== action.payload);
+      if (state.debugPreviewsByNode?.[action.payload]) {
+        state.debugRequestPreview = state.debugPreviewsByNode[action.payload].requestPreview || null;
+        state.debugResponsePreview = state.debugPreviewsByNode[action.payload].responsePreview || null;
+      } else {
+        state.debugResponsePreview = null;
+      }
     },
-    setNodePaused(state, action: PayloadAction<{ nodeId: string; context?: any; requestPreview?: any; responsePreview?: any }>) {
-      const { nodeId, context, requestPreview, responsePreview } = action.payload;
+    setNodePaused(state, action: PayloadAction<{ 
+      nodeId: string; 
+      context?: any; 
+      requestPreview?: any; 
+      responsePreview?: any;
+      debugType?: string;
+    }>) {
+      const { nodeId, context, requestPreview, responsePreview, debugType } = action.payload;
       if (!state.pausedNodeIds.includes(nodeId)) {
         state.pausedNodeIds.push(nodeId);
       }
       if (context) {
         state.intermediateContext = context;
       }
-      if (requestPreview !== undefined) {
-        state.debugRequestPreview = requestPreview;
+      if (!state.debugPreviewsByNode) {
+        state.debugPreviewsByNode = {};
       }
-      if (responsePreview !== undefined) {
+      if (!state.debugPreviewsByNode[nodeId]) {
+        state.debugPreviewsByNode[nodeId] = { requestPreview: null, responsePreview: null, history: [] };
+      }
+
+      const nodeEntry = state.debugPreviewsByNode[nodeId];
+      if (!nodeEntry.history) nodeEntry.history = [];
+
+      const currentIterIndex = requestPreview?.iteration?.current ?? responsePreview?.iteration?.current ?? 1;
+      let record = nodeEntry.history.find(h => h.iterationIndex === currentIterIndex);
+      if (!record) {
+        record = {
+          iterationIndex: currentIterIndex,
+          requestPreview: null,
+          responsePreview: null
+        };
+        nodeEntry.history.push(record);
+        nodeEntry.history.sort((a, b) => a.iterationIndex - b.iterationIndex);
+      }
+
+      if (debugType === 'http_request' || (requestPreview && !responsePreview)) {
+        nodeEntry.requestPreview = requestPreview;
+        nodeEntry.responsePreview = null;
+        record.requestPreview = requestPreview;
+        record.responsePreview = null;
+        state.debugRequestPreview = requestPreview;
+        state.debugResponsePreview = null;
+      } else if (debugType === 'http_response' || responsePreview) {
+        nodeEntry.responsePreview = responsePreview;
+        record.responsePreview = responsePreview;
         state.debugResponsePreview = responsePreview;
+        if (requestPreview) {
+          nodeEntry.requestPreview = requestPreview;
+          record.requestPreview = requestPreview;
+          state.debugRequestPreview = requestPreview;
+        }
+      } else {
+        if (requestPreview !== undefined) {
+          nodeEntry.requestPreview = requestPreview;
+          record.requestPreview = requestPreview;
+          state.debugRequestPreview = requestPreview;
+        }
+        if (responsePreview !== undefined) {
+          nodeEntry.responsePreview = responsePreview;
+          record.responsePreview = responsePreview;
+          state.debugResponsePreview = responsePreview;
+        }
       }
     },
     setExecutionMode(state, action: PayloadAction<'normal' | 'debug'>) {
@@ -215,6 +314,10 @@ const flowSlice = createSlice({
         state.nodeResults[nodeId] = result;
       }
       delete state.nodeTimers[nodeId];
+      if (state.selectedNodeId === nodeId) {
+        state.debugRequestPreview = null;
+        state.debugResponsePreview = null;
+      }
     },
     setNodeError(state, action: PayloadAction<{ nodeId: string; error?: any }>) {
       const { nodeId, error } = action.payload;
@@ -243,15 +346,20 @@ const flowSlice = createSlice({
       state.intermediateContext = {};
       state.debugRequestPreview = null;
       state.debugResponsePreview = null;
+      state.debugPreviewsByNode = {};
       state.nodeResults = {};
       state.nodeProgress = {};
       state.nodeTimers = {};
+      state.isDebugModalOpen = false;
     },
     toggleCanvasExpanded(state) {
       state.canvasExpanded = !state.canvasExpanded;
     },
     toggleNodeLibraryExpanded(state) {
       state.nodeLibraryExpanded = !state.nodeLibraryExpanded;
+    },
+    setDebugModalOpen(state, action: PayloadAction<boolean>) {
+      state.isDebugModalOpen = action.payload;
     },
   },
   extraReducers: (builder) => {
@@ -288,6 +396,7 @@ const flowSlice = createSlice({
         state.executingNodeIds = [];
         state.pausedNodeIds = [];
         state.nodeTimers = {};
+        state.isDebugModalOpen = false;
       })
       .addCase(deleteFlow.fulfilled, (state, action) => {
         state.flows = state.flows.filter(f => f.id !== action.payload);
@@ -297,6 +406,10 @@ const flowSlice = createSlice({
       })
       .addCase(duplicateFlow.fulfilled, (state, action) => {
         state.flows.unshift(action.payload);
+      })
+      .addCase(importFlowBundle.fulfilled, (state, action) => {
+        state.flows.unshift(action.payload.data);
+        state.currentFlow = action.payload.data;
       });
   },
 });
@@ -314,6 +427,7 @@ export const {
   resetNodeStates,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,
+  setDebugModalOpen,
 } = flowSlice.actions;
 
 export default flowSlice.reducer;

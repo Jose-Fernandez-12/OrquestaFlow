@@ -4,7 +4,7 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { config } from 'dotenv';
 import { join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { getDb, closeDb } from './db/database.js';
 import { closeAllMssqlPools } from './engine/mssql.js';
 import { stopAllSchedulerJobs } from './engine/scheduler.js';
@@ -15,6 +15,8 @@ import { scriptRoutes } from './routes/scripts.js';
 import { scheduleRoutes } from './routes/schedules.js';
 import { exportRoutes } from './routes/export.js';
 import { fileManagerRoutes } from './routes/files.js';
+import { settingsRoutes } from './routes/settings.js';
+import { pythonExportRoutes } from './routes/pythonExport.js';
 
 config();
 
@@ -75,9 +77,22 @@ async function start(): Promise<void> {
   await app.register(scheduleRoutes, { prefix: '/api/schedules' });
   await app.register(exportRoutes, { prefix: '/api/export' });
   await app.register(fileManagerRoutes, { prefix: '/api/file-manager' });
+  await app.register(settingsRoutes, { prefix: '/api/settings' });
+  await app.register(pythonExportRoutes, { prefix: '/api/flows' });
 
   // Health check
-  app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+  app.get('/api/health', async () => {
+    let version = '1.3.0';
+    try {
+      const pkgPath = join(process.cwd(), 'package.json');
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+        if (pkg.version) version = pkg.version;
+      }
+    } catch {}
+
+    return { status: 'ok', version, timestamp: new Date().toISOString() };
+  });
 
   // Graceful shutdown
   const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];

@@ -24,7 +24,8 @@ import {
   Activity,
   Layers,
   History,
-  Download
+  Download,
+  Upload
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Card } from '../ui/card';
@@ -34,6 +35,7 @@ import { format } from 'date-fns';
 import { io } from 'socket.io-client';
 import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
+import { ImportFlowModal } from './ImportFlowModal';
 
 export function FlowListView() {
   const dispatch = useAppDispatch();
@@ -60,6 +62,9 @@ export function FlowListView() {
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
   const [newFlowName, setNewFlowName] = useState('');
   const [newFlowDesc, setNewFlowDesc] = useState('');
+
+  // Import flow modal state
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   // Delete modal state
   const [flowToDelete, setFlowToDelete] = useState<Flow | null>(null);
@@ -152,6 +157,20 @@ export function FlowListView() {
     await dispatch(duplicateFlow(flow));
   };
 
+  const handleExportFlowJson = (flow: Flow, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const url = `${SOCKET_URL}/api/flows/${flow.id}/export-json`;
+    const a = document.createElement('a');
+    a.href = url;
+    const slug = (flow.name || 'flujo').toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+    a.download = `${slug}_flow.json`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+    }, 1000);
+  };
+
   const handleDeleteConfirm = async () => {
     if (!flowToDelete) return;
     setIsDeleting(true);
@@ -242,19 +261,30 @@ export function FlowListView() {
           <h1 className="text-2xl font-semibold tracking-tight">Flujos de trabajo</h1>
           <p className="text-sm text-muted mt-1">Diseña, automatiza y monitorea pipelines visuales de integración de datos.</p>
         </div>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={() => {
-            setNewFlowName('');
-            setNewFlowDesc('');
-            setIsNewModalOpen(true);
-          }}
-          className="gap-2 shrink-0"
-        >
-          <Plus size={16} />
-          Nuevo Flujo
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setIsImportModalOpen(true)}
+            className="gap-2"
+          >
+            <Upload size={16} />
+            Importar JSON
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => {
+              setNewFlowName('');
+              setNewFlowDesc('');
+              setIsNewModalOpen(true);
+            }}
+            className="gap-2"
+          >
+            <Plus size={16} />
+            Nuevo Flujo
+          </Button>
+        </div>
       </div>
 
       {/* Metrics Bar */}
@@ -554,6 +584,15 @@ export function FlowListView() {
                         <Copy size={14} />
                       </button>
 
+                      {/* Export JSON */}
+                      <button
+                        onClick={(e) => handleExportFlowJson(flow, e)}
+                        className="p-1.5 rounded text-muted hover:text-accent hover:bg-accent-light transition-colors"
+                        title="Exportar flujo como JSON"
+                      >
+                        <Download size={14} />
+                      </button>
+
                       {/* Delete */}
                       <button
                         onClick={(e) => {
@@ -668,6 +707,16 @@ export function FlowListView() {
         flow={historyModalFlow}
         isOpen={!!historyModalFlow}
         onClose={() => setHistoryModalFlow(null)}
+      />
+
+      {/* Import Flow Modal */}
+      <ImportFlowModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onSuccess={(importedFlow) => {
+          dispatch(fetchFlows());
+          navigate(`/flujos/${importedFlow.id}`);
+        }}
       />
 
       {/* Floating Export Alerts - Stacking upwards above global toast with flex-col-reverse and bottom-[115px] */}

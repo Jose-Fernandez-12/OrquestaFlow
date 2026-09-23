@@ -12,7 +12,7 @@ import {
   LogOut
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { toggleSidebar } from '../../store/uiSlice';
+import { toggleSidebar, openSettingsModal, openHelpModal } from '../../store/uiSlice';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 
@@ -34,6 +34,16 @@ export function Sidebar() {
     }
     return location.pathname.startsWith(item.path);
   };
+
+  const settings = useAppSelector((state) => state.settings?.settings);
+  const userName = settings?.user_display_name || 'Jose Fernandez';
+  const userRole = settings?.user_role_label || 'Administrador';
+  const userInitials = userName
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w: string) => w[0]?.toUpperCase())
+    .join('') || 'JF';
 
   return (
     <aside
@@ -91,11 +101,23 @@ export function Sidebar() {
       {/* Footer / User */}
       <div className="p-4 border-t border-border flex flex-col gap-2">
         <div className="flex flex-col gap-1">
-          <Button variant="icon" size="sm" className="w-full justify-start gap-3">
+          <Button
+            variant="icon"
+            size="sm"
+            onClick={() => dispatch(openSettingsModal())}
+            className="w-full justify-start gap-3"
+            title="Configuración de tiempos de espera y sistema"
+          >
             <Settings size={18} />
             {!collapsed && "Configuración"}
           </Button>
-          <Button variant="icon" size="sm" className="w-full justify-start gap-3">
+          <Button
+            variant="icon"
+            size="sm"
+            onClick={() => dispatch(openHelpModal())}
+            className="w-full justify-start gap-3"
+            title="Guía rápida, variables y diagnóstico"
+          >
             <HelpCircle size={18} />
             {!collapsed && "Ayuda"}
           </Button>
@@ -103,12 +125,12 @@ export function Sidebar() {
 
         <div className="mt-2 pt-2 border-t border-border flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-bg border border-border flex items-center justify-center font-medium text-sm shrink-0">
-            JF
+            {userInitials}
           </div>
           {!collapsed && (
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium truncate">Jose Fernandez</div>
-              <div className="text-xs text-muted truncate">Adminisitrador</div>
+              <div className="text-sm font-medium truncate">{userName}</div>
+              <div className="text-xs text-muted truncate">{userRole}</div>
             </div>
           )}
         </div>

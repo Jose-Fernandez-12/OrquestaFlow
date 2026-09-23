@@ -9,6 +9,8 @@ interface UiState {
   queryModalOpen: boolean;
   queryModalMode: 'create' | 'edit';
   queryModalName: string;
+  settingsModalOpen: boolean;
+  helpModalOpen: boolean;
 }
 
 const initialState: UiState = {
@@ -20,6 +22,8 @@ const initialState: UiState = {
   queryModalOpen: false,
   queryModalMode: 'edit',
   queryModalName: '',
+  settingsModalOpen: false,
+  helpModalOpen: false,
 };
 
 const uiSlice = createSlice({
@@ -58,6 +62,18 @@ const uiSlice = createSlice({
     closeQueryModal(state) {
       state.queryModalOpen = false;
     },
+    openSettingsModal(state) {
+      state.settingsModalOpen = true;
+    },
+    closeSettingsModal(state) {
+      state.settingsModalOpen = false;
+    },
+    openHelpModal(state) {
+      state.helpModalOpen = true;
+    },
+    closeHelpModal(state) {
+      state.helpModalOpen = false;
+    },
   },
 });
 
@@ -71,6 +87,10 @@ export const {
   closeScheduleModal,
   openQueryModal,
   closeQueryModal,
+  openSettingsModal,
+  closeSettingsModal,
+  openHelpModal,
+  closeHelpModal,
 } = uiSlice.actions;
 
 export default uiSlice.reducer;

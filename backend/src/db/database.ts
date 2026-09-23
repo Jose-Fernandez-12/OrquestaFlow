@@ -100,10 +100,63 @@ export async function initDb(): Promise<void> {
   // Migrate schedule_id if needed
   }
   try {
-    wrappedDb.exec('ALTER TABLE execution_logs ADD COLUMN schedule_id TEXT;');
-    console.log('[DB] Migrated: added schedule_id to execution_logs');
+    wrappedDb.exec('ALTER TABLE queries ADD COLUMN group_name TEXT;');
+    console.log('[DB] Migrated: added group_name to queries');
   } catch (e: any) {
-    // Ignore if column already exists (sql.js throws error on duplicate column)
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec('ALTER TABLE queries ADD COLUMN region TEXT;');
+    console.log('[DB] Migrated: added region to queries');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec('ALTER TABLE connections ADD COLUMN group_name TEXT;');
+    console.log('[DB] Migrated: added group_name to connections');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec("ALTER TABLE queries ADD COLUMN display_columns TEXT DEFAULT '[]';");
+    console.log('[DB] Migrated: added display_columns to queries');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+
+  try {
+    wrappedDb.exec(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+  } catch (e: any) {
+    // Ignore if exists
+  }
+
+  // Seed default settings if table is empty
+  try {
+    const settingsCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM system_settings').get() as { count: number };
+    if (settingsCount.count === 0) {
+      const defaultSettings = [
+        ['http_timeout_seconds', '30'],
+        ['mssql_connection_timeout_seconds', '30'],
+        ['mssql_request_timeout_seconds', '300'],
+        ['script_timeout_seconds', '60'],
+        ['http_max_retries', '1'],
+        ['table_preview_row_limit', '500'],
+        ['user_display_name', 'Jose Fernandez'],
+        ['user_role_label', 'Administrador']
+      ];
+      for (const [key, val] of defaultSettings) {
+        wrappedDb.prepare(`INSERT INTO system_settings (key, value) VALUES (?, ?)`).run(key, val);
+      }
+      console.log('[DB] Seeded default system_settings');
+    }
+  } catch (e: any) {
+    console.error('[DB] Error initializing system_settings:', e);
   }
 
   // Seed demo data if tables are empty

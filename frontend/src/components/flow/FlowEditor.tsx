@@ -24,7 +24,6 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
-  Clock,
   PanelLeft,
   Plus,
   CheckCircle2,
@@ -43,12 +42,16 @@ import {
   StepForward,
   PlayCircle,
   Loader2,
-  Pause
+  Pause,
+  Eye,
+  Upload,
+  FileCode2
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
+import { ImportFlowModal } from './ImportFlowModal';
 import { 
   fetchFlows, 
   fetchFlow,
@@ -71,7 +74,8 @@ import {
   setNodePaused,
   setExecutionMode,
   resumeDebugNode,
-  pauseDebugExecution
+  pauseDebugExecution,
+  setDebugModalOpen
 } from '../../store/flowSlice';
 import { fetchSchedules } from '../../store/scheduleSlice';
 import { fetchQueries } from '../../store/querySlice';
@@ -79,6 +83,7 @@ import { Button } from '../ui/button';
 import { nodeTypes } from './nodes';
 import { NodeLibrary } from './NodeLibrary';
 import { NodeInspector } from './NodeInspector';
+import { DebugContextViewer } from './DebugContextViewer';
 import { ExportPreviewModal } from './ExportPreviewModal';
 import { DataSourcePreviewModal } from './DataSourcePreviewModal';
 import { cn } from '../../lib/utils';
@@ -99,10 +104,6 @@ function FlowCanvas() {
   const nodeResults = useAppSelector(state => state.flows.nodeResults);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
   const queries = useAppSelector(state => (state as any).queries.queries || []);
-
-  const flowSchedules = currentFlow 
-    ? schedules.filter(s => s.target_type === 'flow' && s.target_id === currentFlow.id && s.is_active === 1)
-    : [];
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   
   const { id: routeFlowId } = useParams<{ id: string }>();
@@ -111,6 +112,44 @@ function FlowCanvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+
+  const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
+  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode || {});
+  const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
+  const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
+
+  // Active node for debugging inspection (persisted so modal doesn't flicker/unmount while stepping)
+  const activeDebugNodeId = pausedNodeIds.length > 0 ? pausedNodeIds[pausedNodeIds.length - 1] : selectedNodeId;
+  const [persistedDebugNodeId, setPersistedDebugNodeId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeDebugNodeId) {
+      setPersistedDebugNodeId(activeDebugNodeId);
+    }
+  }, [activeDebugNodeId]);
+
+  const debugTargetNodeId = activeDebugNodeId || persistedDebugNodeId;
+  const debugTargetNode = debugTargetNodeId ? nodes.find(n => n.id === debugTargetNodeId) : null;
+  const nodeDebugPreview = debugTargetNodeId ? allNodePreviews[debugTargetNodeId] : undefined;
+  const debugRequestPreview = nodeDebugPreview !== undefined ? nodeDebugPreview.requestPreview : globalRequestPreview;
+  const debugResponsePreview = nodeDebugPreview !== undefined ? nodeDebugPreview.responsePreview : globalResponsePreview;
+  const iterationHistory = nodeDebugPreview?.history || [];
+
+  // Keep React Flow nodes.selected in sync with Redux selectedNodeId
+  useEffect(() => {
+    setNodes(nds => {
+      let hasChanges = false;
+      const updated = nds.map(n => {
+        const shouldBeSelected = selectedNodeId !== null && n.id === selectedNodeId;
+        if (!!n.selected !== shouldBeSelected) {
+          hasChanges = true;
+          return { ...n, selected: shouldBeSelected };
+        }
+        return n;
+      });
+      return hasChanges ? updated : nds;
+    });
+  }, [selectedNodeId, setNodes]);
   const [editingName, setEditingName] = useState(currentFlow?.name || '');
   const [showOptionsMenu, setShowOptionsMenu] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
@@ -174,6 +213,7 @@ function FlowCanvas() {
     }
   }, [pausedNodeIds.length, isLiveExecuting]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const downloadedUrlsRef = useRef(new Set<string>());
 
   const autoDownloadFile = (downloadUrl: string, fileName: string) => {
@@ -298,7 +338,8 @@ function FlowCanvas() {
             nodeId: data.nodeId, 
             context: data.context || data.result?.context,
             requestPreview: data.result?.requestPreview,
-            responsePreview: data.result?.responsePreview
+            responsePreview: data.result?.responsePreview,
+            debugType: data.result?.debugType
           }));
           dispatch(selectNode(data.nodeId));
         } else if (data.status === 'completed') {
@@ -490,12 +531,14 @@ function FlowCanvas() {
     [reactFlowInstance, setNodes]
   );
 
-  const onSelectionChange = useCallback(({ nodes }: { nodes: Node[] }) => {
-    if (nodes.length === 1) {
-      dispatch(selectNode(nodes[0].id));
-    } else {
-      dispatch(selectNode(null));
+  const onSelectionChange = useCallback(({ nodes: selNodes }: { nodes: Node[] }) => {
+    if (selNodes.length === 1) {
+      dispatch(selectNode(selNodes[0].id));
     }
+  }, [dispatch]);
+
+  const handlePaneClick = useCallback(() => {
+    dispatch(selectNode(null));
   }, [dispatch]);
 
   const handleNodeDoubleClick = useCallback((event: React.MouseEvent, node: Node) => {
@@ -577,18 +620,45 @@ function FlowCanvas() {
 
   const handleExportJSON = () => {
     if (!currentFlow) return;
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({
-      name: currentFlow.name,
-      description: currentFlow.description,
-      definition: currentFlow.definition
-    }, null, 2));
+    const url = getApiUrl(`/flows/${currentFlow.id}/export-json`);
     const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `${currentFlow.name.toLowerCase().replace(/\s+/g, '_')}_flow.json`);
+    downloadAnchor.setAttribute("href", url);
+    const slug = (currentFlow.name || 'flujo').toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+    downloadAnchor.setAttribute("download", `${slug}_flow.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
     setShowOptionsMenu(false);
+  };
+
+  const handleExportPython = async () => {
+    if (!currentFlow) return;
+    setShowOptionsMenu(false);
+    try {
+      const res = await fetch(`${getApiUrl(`/flows/${currentFlow.id}/export-python`)}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Error desconocido' }));
+        dispatch(showToast(err.error || 'Error al exportar el paquete'));
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const slug = currentFlow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+      a.download = `${slug}_bundle.zip`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      }, 1000);
+      dispatch(showToast('Paquete ZIP exportado correctamente'));
+    } catch (e) {
+      dispatch(showToast('Error al exportar el paquete ZIP'));
+    }
   };
 
   const handleDeleteCurrentFlowConfirm = async () => {
@@ -615,7 +685,7 @@ function FlowCanvas() {
         const query = queries.find((q: any) => q.id === node.data!.queryId);
         if (query) {
           const sqlText = (query.sql_text as string) || '';
-          const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%]):([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
+          const paramMatches = [...sqlText.matchAll(/(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
           const uniqueParams = [...new Set(paramMatches.map(m => m[1]))];
           
           let queryParams: Record<string, string> = {};
@@ -898,6 +968,29 @@ function FlowCanvas() {
                     <span>Exportar JSON</span>
                   </button>
 
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
+                      setIsImportModalOpen(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <Upload size={14} className="text-muted" />
+                    <span>Importar JSON</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleExportPython();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <FileCode2 size={14} className="text-muted" />
+                    <span>Exportar a Python (ZIP)</span>
+                  </button>
+
                   <div className="h-px bg-border my-1"></div>
 
                   <button
@@ -949,6 +1042,15 @@ function FlowCanvas() {
                       title="Continuar ejecución sin pausas"
                     >
                       <PlayCircle size={14} className="mr-1" /> Continuar Todo
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => dispatch(setDebugModalOpen(true))}
+                      className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                      title="Abrir ventana modal de inspección de depuración"
+                    >
+                      <Eye size={13} className="mr-1" /> Inspeccionar
                     </Button>
                   </>
                 ) : (
@@ -1003,6 +1105,7 @@ function FlowCanvas() {
               onDrop={isLocked ? undefined : onDrop}
               onDragOver={isLocked ? undefined : onDragOver}
               onSelectionChange={onSelectionChange}
+              onPaneClick={handlePaneClick}
               onNodeDoubleClick={handleNodeDoubleClick}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               nodeTypes={nodeTypes}
@@ -1030,6 +1133,22 @@ function FlowCanvas() {
               setNodes={setNodes}
               edges={edges}
               selectedNodeId={selectedNodeId} 
+            />
+          )}
+
+          {/* Top-Level Debug Inspection Modal (persists across stepping and continue) */}
+          {isDebugModalOpen && debugTargetNode && (
+            <DebugContextViewer
+              node={debugTargetNode}
+              nodes={nodes}
+              edges={edges}
+              flowId={currentFlow?.id || ''}
+              context={intermediateContext || {}}
+              requestPreview={debugRequestPreview}
+              responsePreview={debugResponsePreview}
+              iterationHistory={iterationHistory}
+              allNodePreviews={allNodePreviews}
+              modalOnly={true}
             />
           )}
         </div>
@@ -1072,57 +1191,6 @@ function FlowCanvas() {
             </div>
           ))}
         </div>
-
-        {/* FlowSummary bottom cards */}
-        {!canvasExpanded && (
-          <div className="h-[140px] border-t border-border bg-surface grid grid-cols-2 gap-4 p-4 shrink-0 z-10 overflow-y-auto">
-            <div className="border border-border rounded-sm p-3 flex flex-col justify-between">
-              <div>
-                <h3 className="text-xs font-semibold">Programaciones activas</h3>
-                <p className="text-[10px] text-muted">Próximas ejecuciones automáticas de este flujo.</p>
-              </div>
-              {flowSchedules.length > 0 ? (
-                flowSchedules.map(s => (
-                  <div key={s.id} className="flex items-center gap-2 pt-2 border-t border-border mt-2">
-                    <div className="w-6 h-6 rounded-full bg-accent-light text-accent flex items-center justify-center shrink-0">
-                      <Clock size={12} />
-                    </div>
-                    <div className="text-[11px] truncate">
-                      <strong>{s.name || 'Programación Activa'}</strong>
-                      <span className="block text-[10px] text-muted">Cron: {s.cron_expression}</span>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2 text-[11px] text-muted">
-                  Sin programaciones activas
-                </div>
-              )}
-            </div>
-
-            <div className="border border-border rounded-sm p-3 flex flex-col justify-between">
-              <div>
-                <h3 className="text-xs font-semibold">Último resultado de ejecución</h3>
-                <p className="text-[10px] text-muted">Historial del último disparo manual o automático.</p>
-              </div>
-              {currentFlow.last_run_at ? (
-                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2">
-                  <div className="w-2 h-2 rounded-full bg-success shrink-0"></div>
-                  <div className="text-[11px]">
-                    <strong>Ejecución Exitosa</strong>
-                    <span className="block text-[10px] text-muted">
-                      Duración: {currentFlow.last_run_duration_ms}ms • Registros: {currentFlow.last_run_record_count}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 pt-2 border-t border-border mt-2 text-[11px] text-muted">
-                  Ninguna ejecución previa
-                </div>
-              )}
-            </div>
-          </div>
-        )}
       </div>
       {/* Missing Params Modal */}
       {missingParamsContext && (
@@ -1144,7 +1212,7 @@ function FlowCanvas() {
                   <div className="space-y-2">
                     {item.missing.map(param => (
                       <div key={param} className="flex flex-col gap-1">
-                        <label className="text-[11px] font-mono text-accent">:{param}</label>
+                        <label className="text-[11px] font-mono text-accent">#param_{param}</label>
                         <input
                           type="text"
                           className="flex h-8 w-full rounded-md border border-border bg-surface px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
@@ -1314,6 +1382,16 @@ function FlowCanvas() {
         flow={currentFlow}
         isOpen={showHistoryModal}
         onClose={() => setShowHistoryModal(false)}
+      />
+
+      {/* Import Flow Modal */}
+      <ImportFlowModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onSuccess={(importedFlow) => {
+          dispatch(fetchFlows());
+          navigate(`/flujos/${importedFlow.id}`);
+        }}
       />
 
     </div>
