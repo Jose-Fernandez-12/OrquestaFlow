@@ -177,29 +177,29 @@ export function NodeInspector({
       />
 
       {/* Action bar (Variable Panel trigger + Helpers) */}
-      <div className="px-4 py-2 border-b border-border bg-bg/40 flex items-center justify-between shrink-0">
+      <div className="px-5 py-3 border-b border-border bg-bg/40 flex items-center justify-between shrink-0">
         <button
           type="button"
           onClick={() => setIsVariableDrawerOpen(prev => !prev)}
           className={cn(
-            'flex items-center gap-1.5 text-xs font-medium transition-colors px-2.5 py-1 rounded border',
+            'flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg border transition-all',
             isVariableDrawerOpen
-              ? 'bg-accent/15 text-accent border-accent/40 shadow-xs'
-              : 'text-accent hover:text-accent-hover bg-accent/5 border-accent/20 hover:bg-accent/10'
+              ? 'bg-accent/10 text-accent border-accent/40 shadow-md ring-2 ring-accent/20'
+              : 'bg-accent/5 text-accent border-accent/20 hover:bg-accent/15 hover:border-accent/30 hover:shadow-sm'
           )}
           title="Alternar panel de variables dinámicas disponibles"
         >
-          <Braces size={13} />
+          <Braces size={14} strokeWidth={2.5} />
           <span>Variables disponibles</span>
           <ChevronDown
-            size={12}
+            size={13}
             className={cn('transition-transform duration-200', isVariableDrawerOpen && 'rotate-180')}
           />
         </button>
 
         {parentForEachNode && (
-          <span className="text-[10px] text-sky-600 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded font-medium flex items-center gap-1">
-            <Repeat size={10} />
+          <span className="text-[10px] font-semibold text-loop-accent bg-loop-accent-bg border border-loop-accent/30 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm">
+            <Repeat size={11} strokeWidth={2.5} />
             <span>En bucle</span>
           </span>
         )}
@@ -235,35 +235,35 @@ export function NodeInspector({
       )}
 
       {/* Main Content Area */}
-      <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-4">
+      <div className="p-5 flex-1 overflow-y-auto flex flex-col gap-5">
 
         {/* Compact Loop Quick-Access Bar (if inside forEach) */}
         {parentForEachNode && (
-          <div className="p-2.5 bg-sky-500/5 border border-sky-500/20 rounded-md text-xs space-y-1.5">
+          <div className="p-3 bg-loop-accent-bg/50 border border-loop-accent/20 rounded-lg shadow-sm space-y-2">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 font-semibold text-sky-600 text-[11px]">
-                <Repeat size={12} />
+              <div className="flex items-center gap-2 font-semibold text-loop-accent text-xs">
+                <Repeat size={13} strokeWidth={2.5} />
                 <span>Dentro de: {String(parentForEachNode.data?.label || parentForEachNode.id)}</span>
               </div>
-              <span className="text-[10px] font-mono text-muted">
+              <span className="text-[10px] font-mono text-muted-light">
                 {parentLoopItems.length > 0 ? `${parentLoopItems.length} items` : 'Iterando'}
               </span>
             </div>
             {parentLoopKeys.length > 0 ? (
-              <div className="flex flex-wrap gap-1 pt-1">
+              <div className="flex flex-wrap gap-1.5 pt-1">
                 {parentLoopKeys.slice(0, 6).map(k => (
                   <button
                     key={k}
                     type="button"
                     onClick={() => copyVariable(`{{_item.${k}}}`)}
-                    className="flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface border border-border text-fg hover:border-sky-500 hover:text-sky-600 transition-colors"
+                    className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-md bg-surface border border-border text-fg hover:border-loop-accent hover:text-loop-accent transition-all shadow-sm"
                     title={`Copiar {{_item.${k}}}`}
                   >
                     <span>{k}</span>
                     {copiedKey === `{{_item.${k}}}` ? (
-                      <Check size={9} className="text-emerald-500" />
+                      <Check size={10} strokeWidth={2.5} className="text-emerald-500" />
                     ) : (
-                      <Copy size={9} className="text-muted opacity-70" />
+                      <Copy size={10} className="text-muted-light" />
                     )}
                   </button>
                 ))}
@@ -271,25 +271,25 @@ export function NodeInspector({
                   <button
                     type="button"
                     onClick={() => setIsVariableDrawerOpen(true)}
-                    className="text-[10px] text-accent font-medium px-1 hover:underline"
+                    className="text-[10px] text-accent font-semibold px-2 hover:underline"
                   >
                     +{parentLoopKeys.length - 6} más...
                   </button>
                 )}
               </div>
             ) : (
-              <div className="flex gap-1 text-[10px] font-mono">
+              <div className="flex gap-1.5 text-[10px] font-mono pt-1">
                 <button
                   type="button"
                   onClick={() => copyVariable('{{_item.campo}}')}
-                  className="px-1.5 py-0.5 bg-surface border border-border rounded text-accent hover:border-accent"
+                  className="px-2 py-1 bg-surface border border-border rounded-md text-accent hover:border-accent shadow-sm"
                 >
                   {'{{_item.campo}}'}
                 </button>
                 <button
                   type="button"
                   onClick={() => copyVariable('{{_index}}')}
-                  className="px-1.5 py-0.5 bg-surface border border-border rounded text-muted hover:border-border-hover"
+                  className="px-2 py-1 bg-surface border border-border rounded-md text-muted hover:border-border-hover shadow-sm"
                 >
                   {'{{_index}}'}
                 </button>
@@ -451,13 +451,18 @@ export function NodeInspector({
         )}
 
         {/* Delete Node Button */}
-        <div className="mt-8 pt-4 border-t border-border">
+        <div className="mt-8 pt-5 border-t border-border-light">
           <Button
             variant="default"
-            className="w-full text-danger border-danger/20 hover:bg-danger/10 hover:border-danger/30 flex items-center justify-center gap-1.5 text-xs"
+            className={cn(
+              "w-full flex items-center justify-center gap-2 text-sm font-semibold",
+              "bg-danger/10 text-danger border-2 border-danger/20",
+              "hover:bg-danger/15 hover:border-danger/30 hover:shadow-md",
+              "transition-all duration-150"
+            )}
             onClick={() => setNodes(nds => nds.filter(n => n.id !== selectedNodeId))}
           >
-            <Trash2 size={13} />
+            <Trash2 size={15} strokeWidth={2.5} />
             <span>Eliminar Nodo</span>
           </Button>
         </div>

@@ -11,7 +11,7 @@ interface InspectorTabsProps {
 
 export function InspectorTabs({ tabs, activeTab, onChange }: InspectorTabsProps) {
   return (
-    <div className="flex border-b border-border bg-bg/50 px-1 gap-0.5 overflow-x-auto shrink-0">
+    <div className="flex border-b border-border bg-bg/50 px-1 gap-1 overflow-x-auto shrink-0">
       {tabs.map(tab => {
         const isActive = tab.id === activeTab;
         const Icon = tab.icon;
@@ -21,22 +21,22 @@ export function InspectorTabs({ tabs, activeTab, onChange }: InspectorTabsProps)
             type="button"
             onClick={() => onChange(tab.id)}
             className={cn(
-              'relative flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors whitespace-nowrap rounded-t-md',
+              'relative flex items-center gap-2 px-4 py-3 text-xs font-medium transition-all whitespace-nowrap rounded-t-lg border-b-2',
               isActive
-                ? 'text-accent bg-surface border-b-2 border-accent -mb-px'
-                : 'text-muted hover:text-fg hover:bg-surface/50'
+                ? 'text-accent bg-surface border-accent shadow-sm -mb-px z-10'
+                : 'text-muted hover:text-fg hover:bg-bg/50 border-transparent hover:border-border-hover'
             )}
           >
-            {Icon && <Icon size={13} className={isActive ? 'text-accent' : 'text-muted'} />}
-            <span>{tab.label}</span>
+            {Icon && <Icon size={14} strokeWidth={2.5} className={isActive ? 'text-accent' : 'text-current'} />}
+            <span className="font-medium">{tab.label}</span>
 
             {/* Badge count */}
             {tab.badge !== undefined && tab.badge > 0 && (
               <span className={cn(
-                'ml-0.5 px-1.5 py-0 rounded-full text-[9px] font-mono leading-[16px]',
+                'px-2 py-0.5 rounded-full text-[10px] font-semibold leading-none',
                 isActive
-                  ? 'bg-accent/15 text-accent'
-                  : 'bg-bg text-muted border border-border'
+                  ? 'bg-accent/10 text-accent ring-1 ring-accent/20'
+                  : 'bg-muted/10 text-muted'
               )}>
                 {tab.badge}
               </span>
@@ -44,13 +44,13 @@ export function InspectorTabs({ tabs, activeTab, onChange }: InspectorTabsProps)
 
             {/* Status indicator */}
             {tab.status === 'ok' && (
-              <Check size={10} className="text-emerald-500 ml-0.5" />
+              <Check size={11} strokeWidth={2.5} className="text-emerald-500" />
             )}
             {tab.status === 'warning' && (
-              <AlertTriangle size={10} className="text-amber-500 ml-0.5" />
+              <AlertTriangle size={11} strokeWidth={2.5} className="text-amber-500" />
             )}
             {tab.status === 'error' && (
-              <AlertCircle size={10} className="text-red-500 ml-0.5" />
+              <AlertCircle size={11} strokeWidth={2.5} className="text-red-500" />
             )}
           </button>
         );

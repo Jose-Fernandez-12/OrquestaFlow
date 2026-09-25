@@ -132,17 +132,22 @@ export function HttpInspector({
   ];
 
   return (
-    <div className="flex flex-col -m-4">
+    <div className="flex flex-col -m-5">
       <InspectorTabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
 
-      <div className="p-4 space-y-4">
+      <div className="p-5 space-y-5">
         {/* Tab General */}
         {activeTab === 'general' && (
           <div className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium">Método HTTP</label>
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-fg-secondary block">Método HTTP</label>
               <select
-                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm font-semibold focus-visible:outline-none focus-visible:border-accent"
+                className={cn(
+                  "w-full rounded-md border border-border bg-surface px-3 py-2.5 text-sm font-semibold",
+                  "transition-colors duration-150 cursor-pointer",
+                  "hover:border-border-hover",
+                  "focus:border-accent focus:ring-2 focus:ring-accent/20 focus-visible:outline-none"
+                )}
                 value={method}
                 onChange={(e) => updateNodeData('method', e.target.value)}
               >
