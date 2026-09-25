@@ -46,7 +46,9 @@ import {
   Eye,
   Upload,
   FileCode2,
-  GitCommitVertical
+  GitCommitVertical,
+  Check,
+  Terminal
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -54,6 +56,7 @@ import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
 import { FlowVersionsModal } from './FlowVersionsModal';
 import { ImportFlowModal } from './ImportFlowModal';
+import { NodeResultModal } from './NodeResultModal';
 import { getBranchOutputs, isBranchHandle } from './nodeDefinitions';
 import { 
   fetchFlows, 
@@ -1298,33 +1301,27 @@ function FlowCanvas() {
       )}
 
       {/* Node Result Modal */}
-      {inspectNodeData && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-2xl max-h-[80vh] flex flex-col">
-            <div className="p-4 border-b border-border flex items-center justify-between">
-              <div>
-                <h2 className="text-lg font-semibold flex items-center gap-2">
-                  Resultados del nodo: <span className="font-mono text-sm bg-muted px-2 py-1 rounded">{inspectNodeData.label}</span>
-                </h2>
-                <div className={cn("text-xs mt-1", inspectNodeData.hasError ? "text-red-500" : "text-success")}>
-                  {inspectNodeData.hasError ? "Error en ejecución" : "Ejecución exitosa"}
-                </div>
-              </div>
-              <button onClick={() => setInspectNodeData(null)} className="p-2 hover:bg-muted rounded-md text-muted-foreground">
-                <X size={20} />
-              </button>
-            </div>
-            <div className="p-4 overflow-auto flex-1 bg-bg/50">
-              <pre className="text-xs font-mono p-4 bg-black/80 text-green-400 rounded-md overflow-auto h-full">
-                {JSON.stringify(inspectNodeData.result, null, 2)}
-              </pre>
-            </div>
-            <div className="p-4 border-t border-border flex justify-end">
-              <Button onClick={() => setInspectNodeData(null)}>Cerrar</Button>
-            </div>
-          </div>
-        </div>
-      )}
+      {inspectNodeData && (() => {
+        const rawResult = inspectNodeData.result;
+        const hasLogs = rawResult && typeof rawResult === 'object' && Array.isArray(rawResult._logs) && rawResult._logs.length > 0;
+        const logs: Array<{ level: string; args: string[]; ts: number }> = hasLogs ? rawResult._logs : [];
+        // Strip _logs and unwrap _data for display
+        const displayResult = hasLogs
+          ? (rawResult._data !== undefined ? rawResult._data : Object.fromEntries(Object.entries(rawResult).filter(([k]) => k !== '_logs')))
+          : rawResult;
+        const jsonStr = JSON.stringify(displayResult, null, 2);
+
+        return (
+          <NodeResultModal
+            inspectNodeData={{ ...inspectNodeData, result: displayResult }}
+            jsonStr={jsonStr}
+            logs={logs}
+            hasLogs={hasLogs}
+            onClose={() => setInspectNodeData(null)}
+          />
+        );
+      })()}
+
 
       {/* Delete Confirmation Modal */}
       {isDeleteModalOpen && currentFlow && (

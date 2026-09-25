@@ -15,7 +15,8 @@ import {
   Radio,
   KeyRound,
   Bot,
-  FlaskConical
+  FlaskConical,
+  SlidersHorizontal
 } from 'lucide-react';
 import { useAppSelector } from '../../store/hooks';
 
@@ -32,6 +33,7 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
     title: 'Entrada y datos',
     nodes: [
       { type: 'start', label: 'Inicio de flujo', icon: Play, desc: 'Punto de entrada' },
+      { type: 'variables', label: 'Variables', icon: SlidersHorizontal, desc: 'Definir variables y parámetros' },
       { type: 'httpRequest', label: 'HTTP Request', icon: Globe, desc: 'Petición HTTP personalizable' },
       { type: 'dataSource', label: 'Obtener datos', icon: FileSpreadsheet, desc: 'Cargar desde Excel o CSV' },
       { type: 'query', label: 'Consulta DB', icon: Database, desc: 'Ejecutar consulta SQL' },

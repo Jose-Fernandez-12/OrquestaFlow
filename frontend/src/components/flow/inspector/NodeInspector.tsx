@@ -16,6 +16,7 @@ import { ExportInspector } from './inspectors/ExportInspector';
 import { TimerInspector } from './inspectors/TimerInspector';
 import { DataSourceInspector } from './inspectors/DataSourceInspector';
 import { DataListInspector } from './inspectors/DataListInspector';
+import { VariablesInspector } from './inspectors/VariablesInspector';
 import { ForEachInspector } from './inspectors/ForEachInspector';
 import { ForEachEndInspector } from './inspectors/ForEachEndInspector';
 import { ConditionalBranchInspector } from './inspectors/ConditionalBranchInspector';
@@ -350,6 +351,15 @@ export function NodeInspector({
           <DataListInspector node={node} updateNodeData={updateNodeData} />
         )}
 
+        {type === 'variables' && (
+          <VariablesInspector
+            node={node}
+            updateNodeData={updateNodeData}
+            nodeResult={nodeResults[node.id]}
+            debugPreview={isPaused ? nodeDebugPreview?.nodePreview : undefined}
+          />
+        )}
+
         {type === 'forEach' && (
           <ForEachInspector
             node={node}
@@ -423,6 +433,7 @@ export function NodeInspector({
           'dataSource',
           'fileSource',
           'dataList',
+          'variables',
           'forEach',
           'forEachEnd',
           'conditionalBranch',

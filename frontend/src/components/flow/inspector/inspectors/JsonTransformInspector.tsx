@@ -1,11 +1,14 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useRef } from 'react';
 import type { Node, Edge } from '@xyflow/react';
-import { ArrowRight, Plus, Trash2, Bug, ListPlus } from 'lucide-react';
+import { ArrowRight, Plus, Trash2, Bug, ListPlus, Maximize2, Terminal, Sparkles, Braces } from 'lucide-react';
+import CodeMirror from '@uiw/react-codemirror';
+import { javascript } from '@codemirror/lang-javascript';
 import { JsonTreeViewer } from '../../JsonTreeViewer';
 import { cn } from '../../../../lib/utils';
 import { useAppSelector } from '../../../../store/hooks';
-import { VariableField } from '../editors/VariableField';
+import { VariableField, VariablePicker } from '../editors/VariableField';
 import { findParentForEachNode, getForEachItems, getUpstreamNodes } from '../utils';
+import { JsonTransformModal } from './JsonTransformModal';
 
 interface JsonTransformInspectorProps {
   node: Node;
@@ -28,6 +31,13 @@ const JS_TEMPLATES: Array<{ label: string; code: string }> = [
   { label: 'Resumen', code: 'return {\n  registros: data.length,\n  procesadoEn: new Date().toISOString()\n};' },
 ];
 
+const LOG_LEVEL_STYLES: Record<string, { color: string; badge: string; badgeBg: string }> = {
+  log:   { color: 'text-emerald-400', badge: 'LOG',   badgeBg: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' },
+  info:  { color: 'text-sky-400',     badge: 'INFO',  badgeBg: 'bg-sky-500/20 text-sky-400 border border-sky-500/30' },
+  warn:  { color: 'text-amber-400',   badge: 'WARN',  badgeBg: 'bg-amber-500/20 text-amber-400 border border-amber-500/30' },
+  error: { color: 'text-rose-400',    badge: 'ERROR', badgeBg: 'bg-rose-500/20 text-rose-400 border border-rose-500/30' },
+};
+
 function getMappings(data: Record<string, any>): FieldMapping[] {
   if (Array.isArray(data.mappings)) return data.mappings.map((m: any) => ({ from: String(m?.from ?? ''), to: String(m?.to ?? '') }));
   return String(data.pickFields ?? '')
@@ -49,10 +59,13 @@ function firstRow(value: any): any {
 
 export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nodeResult, debugPreview }: JsonTransformInspectorProps) {
   const data = (node.data || {}) as Record<string, any>;
-  const mode = data.transformType === 'map' || data.transformType === 'pick' ? 'map' : 'javascript';
   const mappings = getMappings(data);
+  const mode = (data.transformType === 'map' || data.transformType === 'pick') && mappings.length > 0 ? 'map' : 'javascript';
   const nodeResults = useAppSelector(state => state.flows.nodeResults || {});
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
+
+  const [showCodeModal, setShowCodeModal] = useState(false);
+  const editorRef = useRef<any>(null);
 
   // Fields of the incoming rows, used to suggest mapping sources
   const detectedFields = useMemo(() => {
@@ -83,11 +96,34 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
     setMappings([...mappings, ...detectedFields.filter(f => !existing.has(f)).map(f => ({ from: f, to: f }))]);
   };
 
+  const handleInsertVariable = (expr: string) => {
+    const textToInsert = expr;
+    if (editorRef.current?.view) {
+      const view = editorRef.current.view;
+      const { from, to } = view.state.selection.main;
+      view.dispatch({
+        changes: { from, to, insert: textToInsert },
+        selection: { anchor: from + textToInsert.length }
+      });
+      updateNodeData('expression', view.state.doc.toString());
+    } else {
+      updateNodeData('expression', (data.expression || '') + '\n' + textToInsert);
+    }
+  };
+
   const inputPreview = debugPreview?.kind === 'transform' ? debugPreview.input : null;
   const datalistId = `fields-${node.id}`;
 
+  // Check for logs in node result
+  const hasLogs = nodeResult && typeof nodeResult === 'object' && Array.isArray(nodeResult._logs) && nodeResult._logs.length > 0;
+  const logs: Array<{ level: string; args: string[]; ts: number }> = hasLogs ? nodeResult._logs : [];
+  const cleanResult = hasLogs
+    ? (nodeResult._data !== undefined ? nodeResult._data : Object.fromEntries(Object.entries(nodeResult).filter(([k]) => k !== '_logs')))
+    : nodeResult;
+
   return (
     <div className="space-y-4">
+      {/* Mode switcher */}
       <div className="grid grid-cols-2 gap-1 p-0.5 bg-bg rounded border border-border">
         {([
           ['map', 'Mapear campos'],
@@ -107,6 +143,7 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
         ))}
       </div>
 
+      {/* Input data source */}
       <div className="space-y-1">
         <label className="text-xs font-medium flex items-center justify-between">
           <span>Datos de entrada</span>
@@ -204,39 +241,73 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
         </div>
       ) : (
         <div className="space-y-2">
-          <div className="flex flex-wrap gap-1">
-            {JS_TEMPLATES.map(t => (
+          {/* Header with expand modal button */}
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-medium flex items-center gap-1.5">
+              <span>Código JavaScript</span>
+            </label>
+            <div className="flex items-center gap-1.5">
               <button
-                key={t.label}
                 type="button"
-                onClick={() => updateNodeData('expression', t.code)}
-                className="text-[10px] px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-fg hover:border-muted"
+                onClick={() => setShowCodeModal(true)}
+                className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent-hover font-medium px-2 py-0.5 rounded bg-accent/5 hover:bg-accent/10 border border-accent/20 transition-colors"
+                title="Abrir editor completo con resaltado de sintaxis y selector de variables"
               >
-                {t.label}
+                <Maximize2 size={11} />
+                <span>Expandir editor</span>
               </button>
-            ))}
+            </div>
           </div>
 
-          <VariableField
-            node={node}
-            nodes={nodes}
-            edges={edges}
-            multiline
-            rows={9}
-            value={String(data.expression ?? '')}
-            onChange={v => updateNodeData('expression', v)}
-            placeholder={'// data = datos de entrada\nreturn data.map(row => ({ id: row.id, total: row.total }));'}
-            className="bg-bg"
-          />
+          {/* Quick template buttons */}
+          <div className="flex items-center justify-between gap-1 flex-wrap">
+            <div className="flex flex-wrap gap-1">
+              {JS_TEMPLATES.map(t => (
+                <button
+                  key={t.label}
+                  type="button"
+                  onClick={() => updateNodeData('expression', t.code)}
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-fg hover:border-muted transition-colors"
+                  title={t.code}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            <VariablePicker
+              node={node}
+              nodes={nodes}
+              edges={edges}
+              onSelect={handleInsertVariable}
+            />
+          </div>
+
+          {/* CodeMirror Editor with JavaScript syntax highlighting */}
+          <div className="border border-border rounded-sm overflow-hidden bg-bg focus-within:border-accent">
+            <CodeMirror
+              ref={editorRef}
+              value={String(data.expression ?? '')}
+              height="200px"
+              extensions={[javascript()]}
+              theme="light"
+              onChange={val => {
+                updateNodeData('expression', val);
+                if (data.transformType !== 'javascript') updateNodeData('transformType', 'javascript');
+              }}
+              className="text-xs font-mono border-0 [&_.cm-editor]:text-xs [&_.cm-scroller]:font-mono [&_.cm-content]:text-xs [&_.cm-line]:text-xs"
+              placeholder={'// data = datos de entrada\n// Usa console.log(data) para depurar\nreturn data.map(row => ({ id: row.id, total: row.total }));'}
+            />
+          </div>
 
           <ul className="text-[10px] text-muted space-y-0.5 list-disc pl-4">
-            <li><code>data</code>: datos de entrada · <code>context</code>: resultados de todos los nodos · <code>item</code> / <code>index</code>: elemento del bucle</li>
-            <li><code>{'{{nodo.campo}}'}</code> se reemplaza por su valor ya entre comillas (texto) o como número/objeto.</li>
-            <li>Se ejecuta en el servidor, aislado y con un límite de 5 segundos.</li>
+            <li><code>data</code>: datos de entrada · <code>context</code>: resultados de nodos · <code>console.log()</code> para depuración</li>
+            <li><code>{'{{nodo.campo}}'}</code> se sustituye por su valor. Límite de ejecución: 5s.</li>
           </ul>
         </div>
       )}
 
+      {/* Debug Preview */}
       {inputPreview && (
         <div className="p-2.5 border border-amber-400/50 bg-amber-500/5 rounded text-xs space-y-1.5">
           <p className="font-medium text-fg flex items-center gap-1.5">
@@ -249,17 +320,62 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
         </div>
       )}
 
-      {nodeResult !== undefined && !nodeResult?.skipped && !nodeResult?.error && (
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-fg flex items-center justify-between">
-            <span>Resultado</span>
-            {Array.isArray(nodeResult) && <span className="text-[10px] text-muted font-mono">{nodeResult.length} registros</span>}
-          </label>
-          <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
-            <JsonTreeViewer data={Array.isArray(nodeResult) ? nodeResult.slice(0, 20) : nodeResult} />
+      {/* Console output from console.log calls */}
+      {hasLogs && (
+        <div className="bg-gray-950 rounded-md border border-gray-800 overflow-hidden shadow-xs">
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-800 bg-gray-900/80">
+            <Terminal size={12} className="text-emerald-400" />
+            <span className="text-[11px] font-mono text-gray-300 font-medium">Consola de depuración</span>
+            <span className="text-[10px] text-gray-500 ml-auto font-mono">{logs.length} {logs.length === 1 ? 'mensaje' : 'mensajes'}</span>
+          </div>
+          <div className="max-h-48 overflow-auto p-1 font-mono text-xs">
+            {logs.map((log, i) => {
+              const style = LOG_LEVEL_STYLES[log.level] || LOG_LEVEL_STYLES.log;
+              return (
+                <div
+                  key={i}
+                  className="flex items-start gap-2 px-2.5 py-1 text-xs border-b border-gray-800/40 last:border-0 hover:bg-gray-900/50 transition-colors"
+                >
+                  <span className={cn('text-[9px] px-1.5 py-0.2 rounded font-semibold shrink-0 mt-0.5', style.badgeBg)}>
+                    {style.badge}
+                  </span>
+                  <span className={cn('flex-1 break-all whitespace-pre-wrap leading-relaxed', style.color)}>
+                    {log.args.join(' ')}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
+
+      {/* Node execution result */}
+      {cleanResult !== undefined && !cleanResult?.skipped && !cleanResult?.error && (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-fg flex items-center justify-between">
+            <span>Resultado</span>
+            {Array.isArray(cleanResult) && <span className="text-[10px] text-muted font-mono">{cleanResult.length} registros</span>}
+          </label>
+          <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
+            <JsonTreeViewer data={Array.isArray(cleanResult) ? cleanResult.slice(0, 20) : cleanResult} />
+          </div>
+        </div>
+      )}
+
+      {/* Expanded CodeMirror Editor Modal */}
+      <JsonTransformModal
+        isOpen={showCodeModal}
+        onClose={() => setShowCodeModal(false)}
+        code={String(data.expression ?? '')}
+        onChange={newCode => {
+          updateNodeData('expression', newCode);
+          updateNodeData('transformType', 'javascript');
+        }}
+        node={node}
+        nodes={nodes}
+        edges={edges}
+        templates={JS_TEMPLATES}
+      />
     </div>
   );
 }

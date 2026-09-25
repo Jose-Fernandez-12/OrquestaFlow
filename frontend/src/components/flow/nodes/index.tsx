@@ -9,6 +9,7 @@ export const QueryNode = React.memo((props: any) => <BaseNode {...props} type="q
 export const TimerNode = React.memo((props: any) => <BaseNode {...props} type="timer" />);
 export const DataSourceNode = React.memo((props: any) => <BaseNode {...props} type="dataSource" />);
 export const DataListNode = React.memo((props: any) => <BaseNode {...props} type="dataList" />);
+export const VariablesNode = React.memo((props: any) => <BaseNode {...props} type="variables" />);
 export const ForEachNode = React.memo((props: any) => <BaseNode {...props} type="forEach" />);
 export const ForEachEndNode = React.memo((props: any) => <BaseNode {...props} type="forEachEnd" />);
 export const ConditionalBranchNode = React.memo((props: any) => <BaseNode {...props} type="conditionalBranch" />);
@@ -30,6 +31,7 @@ export const nodeTypes = {
   dataSource: DataSourceNode,
   fileSource: DataSourceNode,
   dataList: DataListNode,
+  variables: VariablesNode,
   forEach: ForEachNode,
   forEachEnd: ForEachEndNode,
   conditionalBranch: ConditionalBranchNode,

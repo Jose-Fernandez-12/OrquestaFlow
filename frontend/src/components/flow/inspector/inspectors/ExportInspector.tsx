@@ -83,12 +83,31 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
         {activeTab === 'general' && (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium">Nombre de archivo</label>
+              <div className="flex justify-between items-center gap-2 flex-wrap">
+                <label className="text-xs font-medium">Nombre de archivo</label>
+                <div className="flex gap-1.5 items-center flex-wrap justify-end">
+                  {upstreamDataNodes.map(upNode => (
+                    <JsonSelectorModal
+                      key={upNode.id}
+                      node={upNode}
+                      onSelectValue={(val) => {
+                        const current = (node.data?.fileName as string) || '';
+                        const nextVal = current && current !== 'export' ? `${current}_${val}` : val;
+                        updateNodeData('fileName', nextVal);
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
               <Input
-                value={(node.data?.fileName as string) || 'export'}
+                value={(node.data?.fileName as string) ?? 'export'}
                 onChange={(e) => updateNodeData('fileName', e.target.value)}
-                placeholder="export"
+                placeholder="ej. reporte_{{Variables.fechaInicio}} o export"
+                className="font-mono text-xs"
               />
+              <p className="text-[10px] text-muted leading-relaxed">
+                Puedes escribir un nombre fijo o referenciar variables dinámicas usando <code>{'{{Variables.campo}}'}</code> o los botones de mapeo superiores.
+              </p>
             </div>
 
             <div className="space-y-1.5">

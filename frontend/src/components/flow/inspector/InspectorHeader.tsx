@@ -4,7 +4,7 @@ import { TYPE_LABELS, TYPE_COLORS, TYPE_BG_COLORS } from './types';
 import {
   Play, Globe, Code, FileOutput, Database, Clock,
   FileSpreadsheet, List, Repeat, Square, Check, Loader2, X,
-  Pause, GitFork, Braces, Radio, KeyRound, Bot
+  Pause, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -23,6 +23,7 @@ const TYPE_ICONS: Record<string, React.ElementType> = {
   dataSource: FileSpreadsheet,
   fileSource: FileSpreadsheet,
   dataList: List,
+  variables: SlidersHorizontal,
   forEach: Repeat,
   forEachEnd: Square,
   conditionalBranch: GitFork,

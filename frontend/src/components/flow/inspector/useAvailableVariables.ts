@@ -53,6 +53,24 @@ function inferResultFromConfig(node: Node): any {
       return undefined;
     }
   }
+  if (node.type === 'variables') {
+    const res: Record<string, any> = {};
+    if (Array.isArray(data.variables)) {
+      for (const v of data.variables as any[]) {
+        if (v && v.key && typeof v.key === 'string' && v.key.trim()) {
+          res[v.key.trim()] = v.value ?? '';
+        }
+      }
+    } else if (data.rawJson && typeof data.rawJson === 'string') {
+      try {
+        const parsed = JSON.parse(data.rawJson);
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          Object.assign(res, parsed);
+        }
+      } catch {}
+    }
+    return Object.keys(res).length > 0 ? res : undefined;
+  }
   if ((node.type === 'dataSource' || node.type === 'fileSource') && Array.isArray(data.sampleRows)) {
     return data.sampleRows;
   }

@@ -337,6 +337,9 @@ export async function executeFlowEngine(
                   case 'dataList':
                     output = executeDataListNode(node);
                     break;
+                  case 'variables':
+                    output = executeVariablesNode(node, context);
+                    break;
                   case 'forEach':
                     output = await executeForEachNode(
                       node, context, normalizedEdges, nodes, adjList, notifyProgress,
@@ -371,7 +374,49 @@ export async function executeFlowEngine(
                     output = executeConditionalBranchNode(node, context);
                     break;
                   case 'jsonTransform':
-                    output = await executeJsonTransformNode(node, context, normalizedEdges, nodes);
+                    try {
+                      output = await executeJsonTransformNode(node, context, normalizedEdges, nodes);
+                    } catch (err: any) {
+                      if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id]) {
+                        notifyProgress(node.id, 'paused', {
+                          debugType: 'transform_error',
+                          context: { ...context },
+                          nodePreview: {
+                            kind: 'transform_error',
+                            error: err.message || String(err),
+                            logs: Array.isArray(err._logs) ? err._logs : []
+                          }
+                        });
+                        await new Promise<void>((resolve) => {
+                          if (currentExec.resumeResolvers) {
+                            currentExec.resumeResolvers[node.id] = () => resolve();
+                          }
+                        });
+                      }
+                      throw err;
+                    }
+                    if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id]) {
+                      const unwrapData = output && typeof output === 'object' && output._data !== undefined ? output._data : output;
+                      const logs = output && typeof output === 'object' && Array.isArray(output._logs) ? output._logs : [];
+                      notifyProgress(node.id, 'paused', {
+                        debugType: 'transform_result',
+                        context: { ...context, [node.id]: output },
+                        nodePreview: {
+                          kind: 'transform_result',
+                          output: unwrapData,
+                          logs
+                        }
+                      });
+                      const resumeAction = await new Promise<string>((resolve) => {
+                        if (currentExec.resumeResolvers) {
+                          currentExec.resumeResolvers[node.id] = (act?: string) => resolve(act || 'step');
+                        }
+                      });
+                      if (resumeAction === 'continue_node') {
+                        if (!currentExec.skipHttpPauseForNode) currentExec.skipHttpPauseForNode = {};
+                        currentExec.skipHttpPauseForNode[node.id] = true;
+                      }
+                    }
                     break;
                   case 'webhookTrigger':
                     output = executeWebhookTriggerNode(node, context);
@@ -391,6 +436,9 @@ export async function executeFlowEngine(
                 }
 
                 context[node.id] = output;
+                if (node.data?.label && typeof node.data.label === 'string') {
+                  context[node.data.label] = output;
+                }
                 completedNodes.add(node.id);
                 if (node.type === 'forEach') {
                   const endId = findForEachEndNode(node.id, adjList, nodes);
@@ -1022,6 +1070,7 @@ function flattenRows(data: any): any[] {
   if (!data) return [];
   if (!Array.isArray(data)) {
     if (typeof data === 'object' && data !== null) {
+      if (data._data !== undefined) return flattenRows(data._data);
       if (Array.isArray(data.rows)) return flattenRows(data.rows);
       if (Array.isArray(data.data)) return flattenRows(data.data);
       if (Array.isArray(data.items)) return flattenRows(data.items);
@@ -1220,7 +1269,8 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
 
   const isExcel = format === 'Excel';
   const ext = isExcel ? '.xlsx' : '.csv';
-  const safeFileName = fileName.endsWith(ext) ? fileName : (fileName.replace(/\.(csv|xlsx|json)$/, '') + ext);
+  const cleanedFileName = String(fileName).replace(/[<>:"/\\|?*\r\n\t]/g, '_').trim();
+  const safeFileName = cleanedFileName.endsWith(ext) ? cleanedFileName : (cleanedFileName.replace(/\.(csv|xlsx|json)$/i, '') + ext);
   let filePath = path.join(dataDir, safeFileName);
 
   if (isExcel) {
@@ -1377,6 +1427,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
 
   return {
     filePath,
+    fileName: safeFileName,
     format,
     records: exportData.length,
     success: true,
@@ -1650,6 +1701,94 @@ function executeDataListNode(node: any): any[] {
   }
 
   return parsed;
+}
+
+// Variables Node Handler: evaluates a dictionary of variables (static, typed, dynamic dates or templates)
+function executeVariablesNode(node: any, context: Record<string, any>): Record<string, any> {
+  const vars = node.data?.variables;
+  const result: Record<string, any> = {};
+
+  if (!Array.isArray(vars) || vars.length === 0) {
+    if (node.data?.rawJson && typeof node.data.rawJson === 'string' && node.data.rawJson.trim() !== '') {
+      try {
+        const parsed = JSON.parse(node.data.rawJson);
+        if (typeof parsed === 'object' && parsed !== null) {
+          return resolveTemplate(context, parsed);
+        }
+      } catch (e: any) {
+        throw new Error(`Variables: JSON inválido - ${e.message}`);
+      }
+    }
+    return {};
+  }
+
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const todayYMD = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  const todayISO = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayYMD = `${yesterday.getFullYear()}${pad(yesterday.getMonth() + 1)}${pad(yesterday.getDate())}`;
+  const yesterdayISO = `${yesterday.getFullYear()}-${pad(yesterday.getMonth() + 1)}-${pad(yesterday.getDate())}`;
+
+  const monthStart = `${now.getFullYear()}${pad(now.getMonth() + 1)}01`;
+  const monthStartISO = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
+
+  for (const v of vars) {
+    if (!v || !v.key || typeof v.key !== 'string' || !v.key.trim()) continue;
+    const key = v.key.trim();
+    const type = v.type || 'string';
+    let val: any = v.value;
+
+    if (typeof val === 'string' && val.includes('{{')) {
+      val = resolveTemplate(context, val);
+    }
+
+    if (typeof val === 'string') {
+      const lower = val.trim().toLowerCase();
+      if (lower === '$today' || lower === '$hoy' || lower === '$today_ymd') {
+        val = todayYMD;
+      } else if (lower === '$today_iso' || lower === '$hoy_iso') {
+        val = todayISO;
+      } else if (lower === '$yesterday' || lower === '$ayer' || lower === '$yesterday_ymd') {
+        val = yesterdayYMD;
+      } else if (lower === '$yesterday_iso' || lower === '$ayer_iso') {
+        val = yesterdayISO;
+      } else if (lower === '$month_start' || lower === '$inicio_mes') {
+        val = monthStart;
+      } else if (lower === '$month_start_iso' || lower === '$inicio_mes_iso') {
+        val = monthStartISO;
+      } else if (lower === '$now_timestamp' || lower === '$timestamp') {
+        val = Date.now();
+      } else if (lower === '$now_iso') {
+        val = now.toISOString();
+      }
+    }
+
+    if (type === 'number') {
+      const num = Number(val);
+      result[key] = isNaN(num) ? 0 : num;
+    } else if (type === 'boolean') {
+      result[key] = val === true || val === 'true' || val === 1 || val === '1';
+    } else if (type === 'json') {
+      if (typeof val === 'string') {
+        try {
+          result[key] = JSON.parse(val);
+        } catch {
+          result[key] = val;
+        }
+      } else {
+        result[key] = val;
+      }
+    } else if (type === 'date') {
+      result[key] = val != null ? String(val) : todayISO;
+    } else {
+      result[key] = val != null ? String(val) : '';
+    }
+  }
+
+  return result;
 }
 
 // Locate the paired forEachEnd node for a given forEach node using BFS through adjList
@@ -1941,12 +2080,39 @@ async function executeForEachNode(
                     case 'dataList':
                       output = executeDataListNode(subNode);
                       break;
+                    case 'variables':
+                      output = executeVariablesNode(subNode, localContext);
+                      break;
                     case 'conditionalBranch':
                       output = executeConditionalBranchNode(subNode, localContext);
                       break;
-                    case 'jsonTransform':
+                    case 'jsonTransform': {
                       output = await executeJsonTransformNode(subNode, localContext, edges, nodes);
+                      const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+                      if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[subNode.id]) {
+                        const unwrapData = output && typeof output === 'object' && output._data !== undefined ? output._data : output;
+                        const logs = output && typeof output === 'object' && Array.isArray(output._logs) ? output._logs : [];
+                        onNodeProgress(subNode.id, 'paused', {
+                          debugType: 'transform_result',
+                          context: { ...localContext, [subNode.id]: output },
+                          nodePreview: {
+                            kind: 'transform_result',
+                            output: unwrapData,
+                            logs
+                          }
+                        });
+                        const resumeAction = await new Promise<string>((resolve) => {
+                          if (currentExec.resumeResolvers) {
+                            currentExec.resumeResolvers[subNode.id] = (act?: string) => resolve(act || 'step');
+                          }
+                        });
+                        if (resumeAction === 'continue_node') {
+                          if (!currentExec.skipHttpPauseForNode) currentExec.skipHttpPauseForNode = {};
+                          currentExec.skipHttpPauseForNode[subNode.id] = true;
+                        }
+                      }
                       break;
+                    }
                     case 'oauth2Connector':
                       output = await executeOAuth2ConnectorNode(subNode, localContext, signal);
                       break;
@@ -1958,6 +2124,9 @@ async function executeForEachNode(
                   }
 
                   localContext[subNode.id] = output;
+                  if (subNode.data?.label && typeof subNode.data.label === 'string') {
+                    localContext[subNode.data.label] = output;
+                  }
                   if (subNode.type !== 'conditionalBranch') lastOutput = output;
                   localCompleted.add(subNode.id);
                   onNodeProgress(subNode.id, 'completed', output);
@@ -2306,12 +2475,22 @@ function executeConditionalBranchNode(node: any, context: Record<string, any>) {
 
 function resolveTransformInput(node: any, context: Record<string, any>, edges: any[], nodes: any[]): any {
   const expr = String(node.data?.inputData ?? node.data?.inputDataSource ?? '').trim();
-  if (expr) return resolveTemplate(context, expr);
-
-  for (const upstreamId of getEffectiveDataSources(node.id, edges, nodes)) {
-    if (context[upstreamId] !== undefined) return context[upstreamId];
+  let val: any;
+  if (expr) {
+    val = resolveTemplate(context, expr);
+  } else {
+    for (const upstreamId of getEffectiveDataSources(node.id, edges, nodes)) {
+      if (context[upstreamId] !== undefined) {
+        val = context[upstreamId];
+        break;
+      }
+    }
+    if (val === undefined) val = context._item;
   }
-  return context._item;
+  if (val && typeof val === 'object' && val._data !== undefined && Array.isArray(val._logs)) {
+    return val._data;
+  }
+  return val;
 }
 
 function getTransformMappings(data: any): Array<{ from: string; to: string }> {
@@ -2363,31 +2542,72 @@ function compilesAsExpression(code: string): boolean {
   }
 }
 
-function runTransformScript(code: string, data: any, context: Record<string, any>): any {
+function runTransformScript(code: string, data: any, context: Record<string, any>): { result: any; _logs: Array<{ level: string; args: string[]; ts: number; tableData?: any }> } {
   // {{ruta}} inside the script is replaced by a correctly quoted JSON literal
   const body = code.replace(/\{\{([^}]+)\}\}/g, (_m, pathStr: string) => JSON.stringify(resolvePath(context, pathStr) ?? null));
   const fnBody = /\breturn\b/.test(body) || !compilesAsExpression(body) ? body : `return (${body}\n);`;
+  
+  // Check if user declared a function by name at top-level e.g. function miTransformacion(...)
+  const fnMatch = body.match(/(?:^|\n)\s*function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/);
+  const declaredFnName = fnMatch ? fnMatch[1] : null;
+
   const payload = JSON.stringify({
     data: data ?? null,
-    context,
-    item: context._item ?? null,
-    index: context._index ?? null,
+    context: context || {},
+    item: context?._item ?? null,
+    index: context?._index ?? null,
   });
 
-  // Data is re-created inside the isolated context so the script never touches host objects
+  // Data is re-created inside the isolated context so the script never touches host objects.
+  // A safe console object captures log/info/warn/error/table/debug/checkpoint calls into __logs.
   const script = `
+    const __logs = [];
+    function __fmt(v) { try { return typeof v === 'object' ? JSON.stringify(v) : String(v); } catch { return String(v); } }
+    const console = {
+      log:   function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'log',   args:a, ts:Date.now()}); },
+      info:  function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'info',  args:a, ts:Date.now()}); },
+      warn:  function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'warn',  args:a, ts:Date.now()}); },
+      error: function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'error', args:a, ts:Date.now()}); },
+      debug: function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'debug', args:a, ts:Date.now()}); },
+      dir:   function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'log',   args:a, ts:Date.now()}); },
+      table: function(t) {
+        let s = ''; try { s = typeof t === 'object' ? JSON.stringify(t) : String(t); } catch(e) { s = String(t); }
+        __logs.push({level:'table', args:[s], ts:Date.now(), tableData: t});
+      },
+      checkpoint: function(label, v) {
+        const a = [String(label || 'Punto de control')];
+        if (arguments.length > 1) a.push(__fmt(v));
+        __logs.push({level:'checkpoint', args:a, ts:Date.now()});
+      }
+    };
     const __in = JSON.parse(__payload);
-    const __result = (function (data, context, item, index) {
-      "use strict";
-      ${fnBody}
-    })(__in.data, __in.context, __in.item, __in.index);
-    __result === undefined ? 'null' : JSON.stringify(__result);
+    let __result = undefined;
+    let __error = null;
+    try {
+      __result = (function (data, context, item, index) {
+        "use strict";
+        ${fnBody}
+        ${declaredFnName ? `\ntry { if (typeof ${declaredFnName} === 'function') return ${declaredFnName}(data, context); } catch(e) { return ${declaredFnName}(data); }` : ''}
+      })(__in.data, __in.context, __in.item, __in.index);
+    } catch(err) {
+      __error = err ? (err.message || String(err)) : 'Error en la ejecución';
+    }
+    JSON.stringify({ result: __result === undefined ? null : __result, _logs: __logs, error: __error });
   `;
 
   try {
     const serialized = vm.runInNewContext(script, { __payload: payload }, { timeout: TRANSFORM_TIMEOUT_MS, filename: 'transformacion.js' });
-    return JSON.parse(serialized);
+    const parsed = JSON.parse(serialized);
+    if (parsed.error) {
+      const err = new Error(`Error en la transformación JavaScript: ${parsed.error}`) as any;
+      err._logs = Array.isArray(parsed._logs) ? parsed._logs : [];
+      throw err;
+    }
+    return { result: parsed.result, _logs: Array.isArray(parsed._logs) ? parsed._logs : [] };
   } catch (e: any) {
+    if (e?._logs) {
+      throw e;
+    }
     if (e?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
       throw new Error(`La transformación superó el límite de ${TRANSFORM_TIMEOUT_MS / 1000}s (¿bucle infinito?)`);
     }
@@ -2398,11 +2618,11 @@ function runTransformScript(code: string, data: any, context: Record<string, any
 async function executeJsonTransformNode(node: any, context: Record<string, any>, edges: any[], nodes: any[]): Promise<any> {
   const data = node.data || {};
   const input = resolveTransformInput(node, context, edges, nodes);
-  const mode = data.transformType === 'pick' || data.transformType === 'map' ? 'map' : 'javascript';
+  const mappings = getTransformMappings(data);
+  const hasMappings = mappings.length > 0;
+  const isMapMode = (data.transformType === 'pick' || data.transformType === 'map') && hasMappings;
 
-  if (mode === 'map') {
-    const mappings = getTransformMappings(data);
-    if (mappings.length === 0) return input;
+  if (isMapMode) {
     const keepOthers = Boolean(data.keepOthers);
     const rows = extractRowSet(input);
     if (rows) return rows.map(row => mapRecord(row, mappings, keepOthers, context));
@@ -2410,7 +2630,16 @@ async function executeJsonTransformNode(node: any, context: Record<string, any>,
   }
 
   const code = String(data.expression || '').trim() || 'return data;';
-  return runTransformScript(code, input, context);
+  const { result, _logs } = runTransformScript(code, input, context);
+  // Attach _logs to the output so the frontend can display the console panel
+  if (_logs.length > 0) {
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      return { ...result, _logs };
+    }
+    // For arrays or primitives, wrap in a container
+    return { _data: result, _logs };
+  }
+  return result;
 }
 
 // ── Webhook trigger ──

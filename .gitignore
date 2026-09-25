@@ -54,4 +54,5 @@ test.xls
 test_xml.cjs
 temp_*
 test_*
+scratch_*
 *.xlsx

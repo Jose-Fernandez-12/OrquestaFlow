@@ -517,19 +517,18 @@ export function HttpInspector({
                           >
                             {key}
                           </span>
-                          <div className="flex gap-1 items-center">
+                          <div className="flex gap-1.5 items-center flex-wrap justify-end">
                             {upstreamDataNodes.map(upNode => (
                               <JsonSelectorModal
                                 key={upNode.id}
                                 node={upNode}
-                                customLabel="Mapear"
                                 onSelectValue={(mappedVal) => updateParamValue(key, mappedVal)}
                               />
                             ))}
                             <button
                               type="button"
                               onClick={() => removeParam(key)}
-                              className="text-muted hover:text-danger p-0.5"
+                              className="text-muted hover:text-danger p-0.5 ml-0.5 shrink-0"
                               title="Eliminar parámetro"
                             >
                               <Trash2 size={13} />
