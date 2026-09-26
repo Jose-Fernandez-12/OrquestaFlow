@@ -90,7 +90,7 @@ export async function pythonExportRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      const { script, requirementsTxt, envExample, readmeMd, sqlFiles } = transpileFlowToPython(flow.name, definition, ctx);
+      const { script, requirementsTxt, envExample, readmeMd, sqlFiles, jsFiles } = transpileFlowToPython(flow.name, definition, ctx);
       const slug = flow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
       const scriptFileName = `${slug}_flow.py`;
       const zipFileName = `${slug}_bundle.zip`;
@@ -113,6 +113,13 @@ export async function pythonExportRoutes(app: FastifyInstance): Promise<void> {
       if (sqlFiles && sqlFiles.length > 0) {
         for (const sf of sqlFiles) {
           zip.file(`queries/${sf.fileName}`, sf.sql);
+        }
+      }
+
+      // 5b. JavaScript transform files in transforms/ folder
+      if (jsFiles && jsFiles.length > 0) {
+        for (const jf of jsFiles) {
+          zip.file(`transforms/${jf.fileName}`, jf.content);
         }
       }
 

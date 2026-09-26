@@ -10,6 +10,7 @@ export const isDataProducerNode = (type?: string) => {
     type === 'dataSource' ||
     type === 'fileSource' ||
     type === 'dataList' ||
+    type === 'variables' ||
     type === 'forEach' ||
     type === 'forEachEnd' ||
     type === 'jsonTransform' ||

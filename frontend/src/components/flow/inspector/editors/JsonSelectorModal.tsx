@@ -6,6 +6,7 @@ import { JsonTreeViewer } from '../../JsonTreeViewer';
 import { useAppSelector } from '../../../../store/hooks';
 import { truncateArrays, extractExportableSample } from '../utils';
 import { getApiUrl } from '../../../../lib/api';
+import { cn } from '../../../../lib/utils';
 import type { Node } from '@xyflow/react';
 
 interface JsonSelectorModalProps {
@@ -14,6 +15,7 @@ interface JsonSelectorModalProps {
   updateNodeData?: (key: string, val: any) => void;
   onSelectValue?: (val: string) => void;
   customLabel?: string;
+  className?: string;
 }
 
 export function JsonSelectorModal({
@@ -22,6 +24,7 @@ export function JsonSelectorModal({
   updateNodeData,
   onSelectValue,
   customLabel,
+  className,
 }: JsonSelectorModalProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState('');
@@ -41,9 +44,39 @@ export function JsonSelectorModal({
   const handleOpen = async () => {
     setIsOpen(true);
     setSelectedPaths([]);
+    setError('');
+
+    // If node is variables, always read from its current configuration (or cachedResult if executed)
+    if (node.type === 'variables') {
+      const vars = node.data?.variables;
+      const res: Record<string, any> = {};
+      if (Array.isArray(vars)) {
+        for (const v of vars) {
+          if (v && v.key && typeof v.key === 'string' && v.key.trim()) {
+            res[v.key.trim()] = v.value ?? '';
+          }
+        }
+      }
+      if (node.data?.rawJson && typeof node.data.rawJson === 'string') {
+        try {
+          const parsed = JSON.parse(node.data.rawJson);
+          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+            Object.assign(res, parsed);
+          }
+        } catch {}
+      }
+      if (cachedResult && typeof cachedResult === 'object') {
+        Object.assign(res, cachedResult);
+      }
+      if (Object.keys(res).length > 0) {
+        setJsonData(truncateArrays(res));
+        return;
+      }
+      setError('No hay variables configuradas en este nodo Variables. Abre el nodo para definirlas.');
+      return;
+    }
 
     if (jsonData) return;
-    setError('');
 
     // 1. Use cached Redux result
     if (cachedResult) {
@@ -250,11 +283,29 @@ export function JsonSelectorModal({
     setIsOpen(false);
   };
 
+  const nodeLabel = (node.data?.label as string) || node.id;
+  const buttonText = customLabel && customLabel !== 'Mapear'
+    ? customLabel
+    : `Mapear: ${nodeLabel}`;
+
   return (
     <>
-      <Button variant="textLink" onClick={handleOpen}>
-        {customLabel || 'Visualizar Respuesta (JSON)'}
-      </Button>
+      <button
+        type="button"
+        onClick={handleOpen}
+        className={cn(
+          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors border max-w-[160px]",
+          node.type === 'variables'
+            ? "bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/30 hover:bg-violet-500/20"
+            : node.type === 'query'
+            ? "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/20"
+            : "bg-accent/10 text-accent border-accent/25 hover:bg-accent/20",
+          className
+        )}
+        title={`Mapear campos desde: ${nodeLabel} (${node.type})`}
+      >
+        <span className="truncate">{buttonText}</span>
+      </button>
 
       {isOpen &&
         createPortal(
@@ -265,13 +316,25 @@ export function JsonSelectorModal({
               </button>
 
               <div>
-                <h2 className="text-lg font-semibold">
-                  {isMultiSelect ? 'Seleccionar columnas' : 'Selector de campos JSON'}
-                </h2>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-base font-semibold">
+                    {isMultiSelect ? 'Seleccionar columnas' : 'Selector de variables y campos'}
+                  </h2>
+                  <span className={cn(
+                    "text-xs px-2 py-0.5 rounded-full font-mono font-medium border",
+                    node.type === 'variables'
+                      ? "bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/30"
+                      : node.type === 'query'
+                      ? "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/30"
+                      : "bg-accent/10 text-accent border-accent/25"
+                  )}>
+                    {nodeLabel}
+                  </span>
+                </div>
                 <p className="text-xs text-muted mt-1">
                   {isMultiSelect
-                    ? 'Marca los campos que deseas exportar. Se extraera la llave automaticamente.'
-                    : 'Haz clic en cualquier propiedad para copiar su variable de referencia.'}
+                    ? 'Marca los campos que deseas exportar. Se extraerá la llave automáticamente.'
+                    : `Mostrando datos y variables disponibles del nodo "${nodeLabel}". Haz clic en una propiedad para insertarla.`}
                 </p>
                 {!isMultiSelect && (
                   <div className="flex flex-col gap-2 mt-3 pt-3 border-t border-border">
@@ -324,7 +387,7 @@ export function JsonSelectorModal({
                   data={jsonData}
                   mode={isMultiSelect ? 'select' : 'copy'}
                   onSelectKey={isMultiSelect ? undefined : handleSelectKey}
-                  currentPath={node.id}
+                  currentPath={(node.data?.label as string) || node.id}
                   selectedPaths={selectedPaths}
                   onTogglePath={handleTogglePath}
                 />

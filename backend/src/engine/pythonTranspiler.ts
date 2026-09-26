@@ -33,12 +33,19 @@ export interface TranspilerSqlFile {
   sql: string;
 }
 
+export interface TranspilerJsFile {
+  fileName: string;
+  nodeLabel: string;
+  content: string;
+}
+
 export interface TranspilerOutput {
   script: string;
   requirementsTxt: string;
   envExample: string;
   readmeMd: string;
   sqlFiles: TranspilerSqlFile[];
+  jsFiles: TranspilerJsFile[];
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +208,18 @@ function getUpstreamNodeIds(nodeId: string, edges: any[], nodes: any[]): Set<str
 function isPlaceholderResolvable(placeholder: string, upstreamNodeIds: Set<string>, nodes: any[]): boolean {
   const firstPart = placeholder.split('.')[0].trim();
   if (['_item', '_index', '_total', 'item'].includes(firstPart)) return true;
-  return nodes.some(n => n.id === firstPart && upstreamNodeIds.has(firstPart));
+  return nodes.some(n => {
+    if (!upstreamNodeIds.has(n.id)) return false;
+    if (n.id === firstPart) return true;
+    if (n.data?.label && n.data.label.trim() === firstPart) return true;
+    if (n.type === 'variables') {
+      if (firstPart === 'Variables' || firstPart === 'variables') return true;
+      if (Array.isArray(n.data?.variables) && n.data.variables.some((v: any) => v && v.key === firstPart)) {
+        return true;
+      }
+    }
+    return false;
+  });
 }
 
 function detectInteractiveParams(fields: string[], nodeId: string, edges: any[], nodes: any[]): string[] {
@@ -859,6 +877,131 @@ function generateDataListNode(node: any, stepNum: number, total: number): string
   return lines.join('\n');
 }
 
+function getPythonPresetExpr(val: any): { isDynamic: boolean; pyExpr: string } {
+  if (val === undefined || val === null) {
+    return { isDynamic: false, pyExpr: '""' };
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    const lower = trimmed.toLowerCase();
+    if (lower === '$today' || lower === '$today_ymd' || lower === '$hoy') {
+      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y%m%d")' };
+    }
+    if (lower === '$today_iso' || lower === '$hoy_iso') {
+      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y-%m-%d")' };
+    }
+    if (lower === '$yesterday' || lower === '$yesterday_ymd' || lower === '$ayer') {
+      return { isDynamic: true, pyExpr: '(datetime.now() - timedelta(days=1)).strftime("%Y%m%d")' };
+    }
+    if (lower === '$yesterday_iso' || lower === '$ayer_iso') {
+      return { isDynamic: true, pyExpr: '(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")' };
+    }
+    if (lower === '$month_start' || lower === '$inicio_mes') {
+      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y%m01")' };
+    }
+    if (lower === '$month_start_iso' || lower === '$inicio_mes_iso') {
+      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y-%m-01")' };
+    }
+    if (lower === '$now_timestamp' || lower === '$timestamp') {
+      return { isDynamic: true, pyExpr: 'int(time.time() * 1000)' };
+    }
+    if (lower === '$now_iso') {
+      return { isDynamic: true, pyExpr: 'datetime.now().isoformat()' };
+    }
+    if (trimmed.includes('{{')) {
+      return { isDynamic: true, pyExpr: `resolve_template(context, ${JSON.stringify(trimmed)})` };
+    }
+    return { isDynamic: false, pyExpr: JSON.stringify(trimmed) };
+  }
+  if (typeof val === 'number' || typeof val === 'boolean') {
+    return { isDynamic: false, pyExpr: JSON.stringify(val) };
+  }
+  if (typeof val === 'object') {
+    return { isDynamic: false, pyExpr: JSON.stringify(JSON.stringify(val)) };
+  }
+  return { isDynamic: false, pyExpr: JSON.stringify(String(val)) };
+}
+
+function generateVariablesNode(node: any, stepNum: number, total: number): string {
+  const lines: string[] = [];
+  const data = node.data || {};
+  const label = data.label || node.id;
+  const varDictName = `_vars_${pyVarName(node.id)}`;
+
+  lines.push(`# === [${stepNum}/${total}] Nodo: variables - ${label} ===`);
+  lines.push(`logger.info("[${stepNum}/${total}] Inicializando variables: ${label}")`);
+  lines.push(`${varDictName} = {}`);
+
+  let varList: Array<{ key: string; type: string; value: any; description?: string }> = [];
+  if (Array.isArray(data.variables) && data.variables.length > 0) {
+    varList = data.variables.filter((v: any) => v && v.key && String(v.key).trim() !== '');
+  } else if (data.rawJson && typeof data.rawJson === 'string' && data.rawJson.trim() !== '') {
+    try {
+      const parsed = JSON.parse(data.rawJson);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        varList = Object.entries(parsed).map(([k, val]) => ({
+          key: k,
+          type: typeof val === 'number' ? 'number' : typeof val === 'boolean' ? 'boolean' : typeof val === 'object' ? 'json' : 'string',
+          value: val,
+        }));
+      }
+    } catch {}
+  }
+
+  for (const v of varList) {
+    const key = String(v.key).trim();
+    const safeKey = key.replace(/[^a-zA-Z0-9_]/g, '_');
+    const vVarName = `${varDictName}_${safeKey}`;
+    const { pyExpr } = getPythonPresetExpr(v.value);
+    const type = v.type || 'string';
+
+    lines.push(`# Variable: ${key}`);
+    lines.push(`_def_${vVarName} = ${pyExpr}`);
+    lines.push(`_env_${vVarName} = os.getenv("VAR_${safeKey}") or os.getenv("${safeKey.toUpperCase()}")`);
+    lines.push(`if _env_${vVarName} is not None and str(_env_${vVarName}).strip() != "":`);
+    lines.push(`    _val_${vVarName} = str(_env_${vVarName}).strip()`);
+    lines.push(`else:`);
+    lines.push(`    try:`);
+    lines.push(`        if sys.stdin.isatty():`);
+    lines.push(`            _user_in = input(f"Ingrese valor para '${key}' [{_def_${vVarName}}]: ").strip()`);
+    lines.push(`            _val_${vVarName} = _user_in if _user_in != "" else _def_${vVarName}`);
+    lines.push(`        else:`);
+    lines.push(`            _val_${vVarName} = _def_${vVarName}`);
+    lines.push(`    except Exception:`);
+    lines.push(`        _val_${vVarName} = _def_${vVarName}`);
+
+    if (type === 'number') {
+      lines.push(`try:`);
+      lines.push(`    _val_${vVarName} = float(_val_${vVarName}) if "." in str(_val_${vVarName}) else int(_val_${vVarName})`);
+      lines.push(`except Exception: pass`);
+    } else if (type === 'boolean') {
+      lines.push(`if isinstance(_val_${vVarName}, str):`);
+      lines.push(`    _val_${vVarName} = _val_${vVarName}.lower() in ("true", "1", "yes", "si", "s", "verdadero")`);
+    } else if (type === 'json') {
+      lines.push(`if isinstance(_val_${vVarName}, str) and _val_${vVarName}.strip().startswith(("{", "[")):`);
+      lines.push(`    try: _val_${vVarName} = json.loads(_val_${vVarName})`);
+      lines.push(`    except Exception: pass`);
+    }
+
+    lines.push(`logger.info(f"  Variable '${key}' = {_val_${vVarName}}")`);
+    lines.push(`${varDictName}[${JSON.stringify(key)}] = _val_${vVarName}`);
+    lines.push('');
+  }
+
+  lines.push(`context[${JSON.stringify(node.id)}] = ${varDictName}`);
+  if (label && label !== node.id) {
+    lines.push(`context[${JSON.stringify(label)}] = ${varDictName}`);
+  }
+  lines.push(`if "Variables" not in context: context["Variables"] = {}`);
+  lines.push(`if isinstance(context["Variables"], dict): context["Variables"].update(${varDictName})`);
+  for (const v of varList) {
+    const k = String(v.key).trim();
+    lines.push(`context[${JSON.stringify(k)}] = ${varDictName}[${JSON.stringify(k)}]`);
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 function generateTimerNode(node: any, stepNum: number, total: number): string {
   const lines: string[] = [];
   const data = node.data || {};
@@ -879,6 +1022,88 @@ function generateTimerNode(node: any, stepNum: number, total: number): string {
   return lines.join('\n');
 }
 
+function generateJsonTransformNode(
+  node: any,
+  stepNum: number | string,
+  total: number,
+  edges: any[],
+  nodes: any[],
+  flowName: string,
+  jsFiles: TranspilerJsFile[],
+  isInsideLoop?: boolean
+): string {
+  const lines: string[] = [];
+  const data = node.data || {};
+  const label = data.label || node.id;
+  const varName = pyVarName(node.id);
+
+  lines.push(`# === [${stepNum}/${total}] Nodo: jsonTransform - ${label} ===`);
+  lines.push(`logger.info("[${stepNum}/${total}] Transformando datos: ${label}")`);
+  lines.push(`try:`);
+
+  // 1. Resolve input data
+  const inputSource = (data.inputSource || '').trim();
+  if (inputSource) {
+    lines.push(`    ${varName}_input = resolve_template(context, ${JSON.stringify(inputSource)})`);
+  } else {
+    const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+    if (upstreamIds.length > 0) {
+      lines.push(`    ${varName}_input = context.get(${JSON.stringify(upstreamIds[0])})`);
+    } else if (isInsideLoop) {
+      lines.push(`    ${varName}_input = context.get("_item")`);
+    } else {
+      lines.push(`    ${varName}_input = None`);
+    }
+  }
+
+  // Unwrap _data if present
+  lines.push(`    if isinstance(${varName}_input, dict) and "_data" in ${varName}_input:`);
+  lines.push(`        ${varName}_input = ${varName}_input["_data"]`);
+
+  // 2. Check transformType
+  const transformType = data.transformType || 'javascript';
+  const mappings = Array.isArray(data.mappings) ? data.mappings : [];
+  const isMapMode = (transformType === 'pick' || transformType === 'map') && mappings.length > 0;
+
+  if (isMapMode) {
+    const keepOthers = Boolean(data.keepOthers);
+    lines.push(`    ${varName}_mappings = ${JSON.stringify(mappings)}`);
+    lines.push(`    ${varName}_result = transform_map_data(${varName}_input, ${varName}_mappings, ${keepOthers ? 'True' : 'False'}, context)`);
+  } else {
+    // JavaScript transformation
+    const expr = String(data.expression || '').trim() || 'return data;';
+    const slugLabel = label.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'transform';
+    const stepSlug = String(stepNum).replace(/\./g, '_');
+    const jsFileName = `step_${stepSlug}_${slugLabel}.js`;
+
+    jsFiles.push({
+      fileName: jsFileName,
+      nodeLabel: label,
+      content: expr,
+    });
+
+    lines.push(`    ${varName}_result = run_js_transform(`);
+    lines.push(`        os.path.join("transforms", ${JSON.stringify(jsFileName)}),`);
+    lines.push(`        ${varName}_input,`);
+    lines.push(`        context,`);
+    lines.push(`        inline_code=${JSON.stringify(expr)}`);
+    lines.push(`    )`);
+  }
+
+  // Store in context by id and by label
+  lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_result`);
+  if (label && label !== node.id) {
+    lines.push(`    context[${JSON.stringify(label)}] = ${varName}_result`);
+  }
+  lines.push(`    logger.info(f"  Transformacion completada exitosamente")`);
+  lines.push(`except Exception as e:`);
+  lines.push(`    logger.error(f"  ERROR en transformacion '${label}': {e}")`);
+  lines.push(`    sys.exit(1)`);
+  lines.push('');
+
+  return lines.join('\n');
+}
+
 function generateForEachNode(
   node: any,
   stepNum: number,
@@ -888,7 +1113,8 @@ function generateForEachNode(
   nodes: any[],
   ctx: TranspilerContext,
   flowName: string,
-  sqlFiles: TranspilerSqlFile[]
+  sqlFiles: TranspilerSqlFile[],
+  jsFiles: TranspilerJsFile[]
 ): string {
   const lines: string[] = [];
   const data = node.data || {};
@@ -943,6 +1169,12 @@ function generateForEachNode(
       case 'dataList':
         subCode = generateDataListNode(subNode, subStep as any, total);
         break;
+      case 'variables':
+        subCode = generateVariablesNode(subNode, subStep as any, total);
+        break;
+      case 'jsonTransform':
+        subCode = generateJsonTransformNode(subNode, subStep as any, total, edges, nodes, flowName, jsFiles, true);
+        break;
       case 'timer': case 'delay':
         subCode = generateTimerNode(subNode, subStep as any, total);
         break;
@@ -995,6 +1227,7 @@ export function transpileFlowToPython(
   const nodes: any[] = definition.nodes || [];
   const edges: any[] = definition.edges || [];
   const sqlFiles: TranspilerSqlFile[] = [];
+  const jsFiles: TranspilerJsFile[] = [];
 
   const slug = flowName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
 
@@ -1005,7 +1238,8 @@ export function transpileFlowToPython(
       requirementsTxt: 'python-dotenv>=1.0.0\n',
       envExample: '# Sin variables requeridas\n',
       readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.`,
-      sqlFiles: []
+      sqlFiles: [],
+      jsFiles: []
     };
   }
 
@@ -1133,6 +1367,25 @@ export function transpileFlowToPython(
     }
     envLines.push('');
   }
+
+  const variableNodes = nodes.filter(n => n.type === 'variables');
+  if (variableNodes.length > 0) {
+    envLines.push('# ==============================================================================');
+    envLines.push('# Variables del Flujo (Opcional: sobrescribir valores sin solicitar por consola)');
+    envLines.push('# ==============================================================================');
+    for (const vNode of variableNodes) {
+      const vars = vNode.data?.variables || [];
+      if (Array.isArray(vars) && vars.length > 0) {
+        for (const v of vars) {
+          if (!v || !v.key) continue;
+          const k = String(v.key).trim().replace(/[^a-zA-Z0-9_]/g, '_');
+          const hint = v.value !== undefined ? ` (Por defecto: ${v.value})` : '';
+          envLines.push(`# VAR_${k}=${v.value ?? ''}${hint ? ' ' + hint : ''}`);
+        }
+      }
+    }
+    envLines.push('');
+  }
   const envExample = envLines.join('\n');
 
   // 3. Build Script code (collects sqlFiles along the way)
@@ -1160,6 +1413,7 @@ import json
 import time
 import logging
 import re
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -1419,6 +1673,175 @@ def format_excel_file(file_path, header_color=None):
         logger.warning(f"No se pudo aplicar formato visual al Excel: {e}")
 `);
 
+  parts.push(`def transform_map_record(row, mappings, keep_others, context):
+    """Mapea los campos de un registro individual segun la configuracion del nodo."""
+    if not isinstance(row, dict):
+        return row
+    out = dict(row) if keep_others else {}
+    for m in mappings:
+        from_k = m.get("from", "")
+        to_k = m.get("to") or from_k
+        if not from_k:
+            continue
+        if "{{" in from_k:
+            out[to_k] = resolve_template({**context, "_item": row, "item": row}, from_k)
+            continue
+        val = row.get(from_k)
+        if val is None:
+            fk_lower = from_k.lower()
+            k = next((k for k in row.keys() if k.lower() == fk_lower), None)
+            if k:
+                val = row.get(k)
+        if keep_others and from_k != to_k and "." not in from_k and from_k in out:
+            del out[from_k]
+        out[to_k] = val
+    return out
+
+
+def transform_map_data(input_data, mappings, keep_others, context):
+    """Aplica transformacion de mapeo/seleccion de campos sobre datos (lista u objeto)."""
+    if isinstance(input_data, list):
+        return [transform_map_record(r, mappings, keep_others, context) for r in input_data]
+    if isinstance(input_data, dict):
+        for k in ["rows", "data", "items"]:
+            if isinstance(input_data.get(k), list):
+                return [transform_map_record(r, mappings, keep_others, context) for r in input_data[k]]
+        return transform_map_record(input_data, mappings, keep_others, context)
+    return input_data
+
+
+def run_js_transform(js_filename_or_path, input_data, context, inline_code=None):
+    """
+    Ejecuta un script de transformacion JavaScript usando Node.js.
+    Emula fielmente el sandbox de ejecucion de OrquestaFlow (data, context, item, index, console).
+    """
+    import shutil
+    import subprocess
+    import json
+    import os
+
+    # 1. Localizar archivo .js o usar codigo inline de respaldo
+    possible_paths = [
+        js_filename_or_path,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), js_filename_or_path),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "transforms", os.path.basename(js_filename_or_path)),
+    ]
+    script_path = next((p for p in possible_paths if os.path.isfile(p)), None)
+
+    script_code = inline_code or ""
+    if script_path:
+        try:
+            with open(script_path, "r", encoding="utf-8") as f:
+                script_code = f.read()
+        except Exception as e:
+            logger.warning(f"No se pudo leer {script_path}, utilizando codigo inline: {e}")
+
+    if not script_code.strip():
+        logger.warning(f"No hay codigo JavaScript para ejecutar en {js_filename_or_path}")
+        return input_data
+
+    # 2. Verificar que Node.js este instalado en el sistema
+    node_bin = shutil.which("node")
+    if not node_bin:
+        logger.error("=" * 60)
+        logger.error("ERROR: Node.js no esta instalado o no se encuentra en el PATH.")
+        logger.error("Para ejecutar nodos de transformacion JavaScript ('jsonTransform')")
+        logger.error("es necesario tener Node.js instalado (version 18 o superior).")
+        logger.error("Descargalo gratis en: https://nodejs.org")
+        logger.error("=" * 60)
+        raise RuntimeError(f"Node.js requerido para ejecutar la transformacion: {js_filename_or_path}")
+
+    # 3. Payload para el runner en Node.js
+    payload = {
+        "inlineCode": script_code,
+        "data": input_data,
+        "context": context,
+        "item": context.get("_item"),
+        "index": context.get("_index"),
+    }
+
+    runner_script = r'''
+const fs = require('fs');
+
+let rawInput = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { rawInput += chunk; });
+process.stdin.on('end', () => {
+    try {
+        const payload = JSON.parse(rawInput);
+        const { inlineCode, data, context, item, index } = payload;
+        const scriptCode = inlineCode || '';
+
+        // Reemplazar templates {{path}} en el codigo si los hay
+        const body = scriptCode.replace(/\\{\\{([^}]+)\\}\\}/g, (_m, pathStr) => {
+            const parts = pathStr.trim().split('.');
+            let cur = context;
+            for (const p of parts) {
+                if (cur == null) break;
+                cur = cur[p];
+            }
+            return JSON.stringify(cur ?? null);
+        });
+
+        const fnMatch = body.match(/(?:^|\\n)\\s*function\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\(/);
+        const declaredFnName = fnMatch ? fnMatch[1] : null;
+
+        const hasReturn = /\\breturn\\b/.test(body);
+        const fnBody = hasReturn ? body : ('return (' + body + '\\n);');
+
+        const consoleMock = {
+            log: (...args) => console.error('[JS Log]', ...args),
+            info: (...args) => console.error('[JS Info]', ...args),
+            warn: (...args) => console.error('[JS Warn]', ...args),
+            error: (...args) => console.error('[JS Error]', ...args),
+            debug: (...args) => console.error('[JS Debug]', ...args),
+            table: (t) => console.error('[JS Table]', JSON.stringify(t)),
+            checkpoint: (lbl, val) => console.error('[JS Checkpoint] ' + (lbl || '') + ':', val !== undefined ? JSON.stringify(val) : '')
+        };
+
+        const fnCode = '"use strict";\\n' + fnBody + '\\n' + (declaredFnName ? ('try { if (typeof ' + declaredFnName + ' === "function") return ' + declaredFnName + '(data, context); } catch(e) { return ' + declaredFnName + '(data); }') : '');
+        const fn = new Function('data', 'context', 'item', 'index', 'console', fnCode);
+
+        const result = fn(data, context, item, index, consoleMock);
+        process.stdout.write(JSON.stringify({ success: true, result: result === undefined ? null : result }));
+    } catch (err) {
+        process.stdout.write(JSON.stringify({ success: false, error: err ? (err.message || String(err)) : 'Error desconocido' }));
+    }
+});
+'''
+
+    try:
+        proc = subprocess.run(
+            [node_bin, "-e", runner_script],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"La transformacion JavaScript '{js_filename_or_path}' excedio el tiempo limite de 60 segundos.")
+    except Exception as e:
+        raise RuntimeError(f"Error invocando Node.js para '{js_filename_or_path}': {e}")
+
+    if proc.stderr:
+        for err_line in proc.stderr.strip().splitlines():
+            logger.info(f"  {err_line}")
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"Node.js termino con codigo de error {proc.returncode}: {proc.stderr}")
+
+    try:
+        out_json = json.loads(proc.stdout)
+    except Exception as e:
+        raise ValueError(f"Respuesta no valida de la transformacion JS: {proc.stdout[:300]}") from e
+
+    if not out_json.get("success"):
+        raise RuntimeError(f"Error en script JS '{js_filename_or_path}': {out_json.get('error')}")
+
+    return out_json.get("result")
+`);
+
   // Main function
   parts.push(`def run_flow():`);
   parts.push(`    context = {}`);
@@ -1452,6 +1875,12 @@ def format_excel_file(file_path, header_color=None):
       case 'dataList':
         code = generateDataListNode(node, step, total);
         break;
+      case 'variables':
+        code = generateVariablesNode(node, step, total);
+        break;
+      case 'jsonTransform':
+        code = generateJsonTransformNode(node, step, total, edges, nodes, flowName, jsFiles, false);
+        break;
       case 'timer': case 'delay':
         code = generateTimerNode(node, step, total);
         break;
@@ -1460,7 +1889,7 @@ def format_excel_file(file_path, header_color=None):
           node, step, total,
           forEachSubgraphMap[node.id] || [],
           edges, nodes, ctx,
-          flowName, sqlFiles
+          flowName, sqlFiles, jsFiles
         );
         break;
       case 'forEachEnd':
@@ -1501,12 +1930,16 @@ def format_excel_file(file_path, header_color=None):
   if (sqlFiles.length > 0) {
     readmeLines.push(`- \`queries/\`: Carpeta con los archivos \`.sql\` de cada consulta a base de datos ejecutada por el flujo.`);
   }
+  if (jsFiles.length > 0) {
+    readmeLines.push(`- \`transforms/\`: Carpeta con los scripts JavaScript (\`.js\`) de transformacion de datos ejecutados por el flujo.`);
+  }
 
   readmeLines.push(
     '',
     `## Requisitos Previos`,
     `- Python 3.9 o superior`,
     needsPyodbc ? `- [ODBC Driver 17 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) (o superior) instalado en el sistema` : '',
+    jsFiles.length > 0 ? `- [Node.js](https://nodejs.org) (version 18 o superior) instalado en el sistema (requerido para ejecutar transformaciones JavaScript en nodos 'jsonTransform')` : '',
     '',
     `## Instalacion y Configuracion`,
     '',
@@ -1567,6 +2000,21 @@ def format_excel_file(file_path, header_color=None):
     );
   }
 
+  if (jsFiles.length > 0) {
+    readmeLines.push(
+      '## Transformaciones JavaScript',
+      '',
+      'Las transformaciones de datos definidas en codigo JavaScript se exportan desacopladas en la carpeta `transforms/`:',
+      '',
+      '| Archivo | Nodo del Flujo |',
+      '|---|---|'
+    );
+    jsFiles.forEach(jf => {
+      readmeLines.push(`| \`transforms/${jf.fileName}\` | ${jf.nodeLabel} |`);
+    });
+    readmeLines.push('');
+  }
+
   if (fileSourceNodes.length > 0) {
     readmeLines.push(
       '## Carga de Archivos Locales',
@@ -1594,6 +2042,7 @@ def format_excel_file(file_path, header_color=None):
     requirementsTxt,
     envExample,
     readmeMd,
-    sqlFiles
+    sqlFiles,
+    jsFiles
   };
 }

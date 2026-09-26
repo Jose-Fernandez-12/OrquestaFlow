@@ -1,11 +1,12 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import type { Node, Edge } from '@xyflow/react';
-import { ArrowRight, Plus, Trash2, Bug, ListPlus } from 'lucide-react';
+import { ArrowRight, Plus, Trash2, Bug, ListPlus, Terminal, Pencil, Code2, FileCode2, AlertTriangle } from 'lucide-react';
 import { JsonTreeViewer } from '../../JsonTreeViewer';
 import { cn } from '../../../../lib/utils';
 import { useAppSelector } from '../../../../store/hooks';
 import { VariableField } from '../editors/VariableField';
 import { findParentForEachNode, getForEachItems, getUpstreamNodes } from '../utils';
+import { JsonTransformModal } from './JsonTransformModal';
 
 interface JsonTransformInspectorProps {
   node: Node;
@@ -28,6 +29,13 @@ const JS_TEMPLATES: Array<{ label: string; code: string }> = [
   { label: 'Resumen', code: 'return {\n  registros: data.length,\n  procesadoEn: new Date().toISOString()\n};' },
 ];
 
+const LOG_LEVEL_STYLES: Record<string, { color: string; badge: string; badgeBg: string }> = {
+  log:   { color: 'text-emerald-400', badge: 'LOG',   badgeBg: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' },
+  info:  { color: 'text-sky-400',     badge: 'INFO',  badgeBg: 'bg-sky-500/20 text-sky-400 border border-sky-500/30' },
+  warn:  { color: 'text-amber-400',   badge: 'WARN',  badgeBg: 'bg-amber-500/20 text-amber-400 border border-amber-500/30' },
+  error: { color: 'text-rose-400',    badge: 'ERROR', badgeBg: 'bg-rose-500/20 text-rose-400 border border-rose-500/30' },
+};
+
 function getMappings(data: Record<string, any>): FieldMapping[] {
   if (Array.isArray(data.mappings)) return data.mappings.map((m: any) => ({ from: String(m?.from ?? ''), to: String(m?.to ?? '') }));
   return String(data.pickFields ?? '')
@@ -49,10 +57,14 @@ function firstRow(value: any): any {
 
 export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nodeResult, debugPreview }: JsonTransformInspectorProps) {
   const data = (node.data || {}) as Record<string, any>;
-  const mode = data.transformType === 'map' || data.transformType === 'pick' ? 'map' : 'javascript';
   const mappings = getMappings(data);
+  const mode = (data.transformType === 'map' || data.transformType === 'pick') && mappings.length > 0 ? 'map' : 'javascript';
   const nodeResults = useAppSelector(state => state.flows.nodeResults || {});
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
+
+  const [showCodeModal, setShowCodeModal] = useState(false);
+  const [customInputOpen, setCustomInputOpen] = useState(false);
+  const showCustomInput = customInputOpen || Boolean(String(data.inputData ?? '').trim());
 
   // Fields of the incoming rows, used to suggest mapping sources
   const detectedFields = useMemo(() => {
@@ -83,43 +95,97 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
     setMappings([...mappings, ...detectedFields.filter(f => !existing.has(f)).map(f => ({ from: f, to: f }))]);
   };
 
+  // Where the data comes from when "Datos de entrada" is left empty
+  const defaultInput = useMemo(() => {
+    const upstream = getUpstreamNodes(node, edges, nodes)[0];
+    if (upstream) {
+      return { label: String(upstream.data?.label || upstream.id), isLoop: upstream.type === 'forEach' };
+    }
+    const loop = findParentForEachNode(node, edges, nodes);
+    if (loop) return { label: String(loop.data?.label || loop.id), isLoop: true };
+    return null;
+  }, [node, edges, nodes]);
+
+  const code = String(data.expression ?? '');
+  const hasCode = code.trim().length > 0;
+  const codeLines = code.replace(/\s+$/, '').split('\n');
+  const usesConsole = /console\.(log|info|warn|error)\s*\(/.test(code);
+
   const inputPreview = debugPreview?.kind === 'transform' ? debugPreview.input : null;
   const datalistId = `fields-${node.id}`;
 
+  // Check for logs in node result
+  const hasLogs = nodeResult && typeof nodeResult === 'object' && Array.isArray(nodeResult._logs) && nodeResult._logs.length > 0;
+  const logs: Array<{ level: string; args: string[]; ts: number }> = hasLogs ? nodeResult._logs : [];
+  const cleanResult = hasLogs
+    ? (nodeResult._data !== undefined ? nodeResult._data : Object.fromEntries(Object.entries(nodeResult).filter(([k]) => k !== '_logs')))
+    : nodeResult;
+
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-1 p-0.5 bg-bg rounded border border-border">
-        {([
-          ['map', 'Mapear campos'],
-          ['javascript', 'JavaScript'],
-        ] as const).map(([value, label]) => (
+      {/* Legacy field-mapping nodes: offer the move to JavaScript */}
+      {mode === 'map' && (
+        <div className="flex items-center justify-between gap-2 p-2 rounded border border-border bg-bg text-[11px] text-muted">
+          <span>Este nodo usa el modo antiguo de mapeo de campos.</span>
           <button
-            key={value}
             type="button"
-            onClick={() => updateNodeData('transformType', value)}
-            className={cn(
-              'text-xs py-1.5 px-2 rounded font-medium transition-colors',
-              mode === value ? 'bg-surface text-accent shadow-sm border border-accent/30' : 'text-muted hover:text-fg'
-            )}
+            onClick={() => updateNodeData('transformType', 'javascript')}
+            className="text-accent font-medium hover:underline shrink-0"
           >
-            {label}
+            Usar JavaScript
           </button>
-        ))}
-      </div>
+        </div>
+      )}
 
-      <div className="space-y-1">
-        <label className="text-xs font-medium flex items-center justify-between">
-          <span>Datos de entrada</span>
-          <span className="text-[10px] text-muted font-normal">Vacío = nodo anterior conectado</span>
-        </label>
-        <VariableField
-          node={node}
-          nodes={nodes}
-          edges={edges}
-          value={String(data.inputData ?? '')}
-          onChange={v => updateNodeData('inputData', v)}
-          placeholder="{{nodo_anterior}}"
-        />
+      {/* Input data source: automatic by default, custom expression only on demand */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <label className="text-xs font-medium">Datos de entrada</label>
+          {!showCustomInput && defaultInput && (
+            <button type="button" onClick={() => setCustomInputOpen(true)} className="text-[10px] text-muted hover:text-accent">
+              Usar otra fuente
+            </button>
+          )}
+        </div>
+
+        {!showCustomInput ? (
+          defaultInput ? (
+            <div className="flex items-center gap-2 px-2.5 py-2 rounded-sm border border-border bg-bg/60 text-[11px]">
+              <ArrowRight size={12} className="text-accent shrink-0" />
+              <span className="text-muted">Recibe automáticamente la salida de</span>
+              <span className="px-1.5 py-0.5 rounded bg-accent/10 text-accent font-medium truncate">{defaultInput.label}</span>
+              {defaultInput.isLoop && <span className="text-muted shrink-0">(elemento del bucle)</span>}
+            </div>
+          ) : (
+            <div className="px-2.5 py-2 rounded-sm border border-amber-400/50 bg-amber-500/5 text-[11px] text-fg">
+              Conecta un nodo anterior para que este nodo reciba sus datos.{' '}
+              <button type="button" onClick={() => setCustomInputOpen(true)} className="text-accent hover:underline">
+                O indica una expresión
+              </button>
+            </div>
+          )
+        ) : (
+          <>
+            <VariableField
+              node={node}
+              nodes={nodes}
+              edges={edges}
+              value={String(data.inputData ?? '')}
+              onChange={v => updateNodeData('inputData', v)}
+              placeholder="{{nodo.campo}}"
+            />
+            <p className="text-[10px] text-muted">
+              Expresión personalizada en lugar del nodo anterior.{' '}
+              <button
+                type="button"
+                onClick={() => { updateNodeData('inputData', ''); setCustomInputOpen(false); }}
+                className="text-accent hover:underline"
+              >
+                Volver a automático
+              </button>
+            </p>
+          </>
+        )}
       </div>
 
       {mode === 'map' ? (
@@ -203,40 +269,77 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
           </p>
         </div>
       ) : (
-        <div className="space-y-2">
-          <div className="flex flex-wrap gap-1">
-            {JS_TEMPLATES.map(t => (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Código JavaScript</label>
+
+          {hasCode ? (
+            <div className="border border-border rounded-sm bg-surface overflow-hidden">
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border bg-bg/60">
+                <span className="flex items-center gap-1.5 text-[11px] text-fg font-medium">
+                  <FileCode2 size={13} className="text-teal-600" />
+                  {codeLines.length} {codeLines.length === 1 ? 'línea' : 'líneas'}
+                  {usesConsole && <span className="text-[10px] text-muted font-normal">· con console.log</span>}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowCodeModal(true)}
+                  className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent-hover font-medium px-2 py-1 rounded bg-accent/5 hover:bg-accent/10 border border-accent/20 transition-colors"
+                >
+                  <Pencil size={11} />
+                  Editar código
+                </button>
+              </div>
               <button
-                key={t.label}
                 type="button"
-                onClick={() => updateNodeData('expression', t.code)}
-                className="text-[10px] px-1.5 py-0.5 rounded bg-bg border border-border text-muted hover:text-fg hover:border-muted"
+                onClick={() => setShowCodeModal(true)}
+                className="w-full text-left px-3 py-2 font-mono text-[11px] text-muted leading-relaxed hover:bg-bg/60 transition-colors"
+                title="Abrir el editor de código"
               >
-                {t.label}
+                {codeLines.slice(0, 3).map((l, i) => (
+                  <div key={i} className="truncate whitespace-pre">{l || ' '}</div>
+                ))}
+                {codeLines.length > 3 && <div className="text-[10px] text-muted-light">… {codeLines.length - 3} líneas más</div>}
               </button>
-            ))}
-          </div>
+            </div>
+          ) : (
+            <div className="p-3 rounded-sm border border-amber-400/50 bg-amber-500/5 space-y-2">
+              <p className="text-[11px] text-fg flex items-start gap-1.5">
+                <AlertTriangle size={13} className="text-amber-600 shrink-0 mt-px" />
+                <span>
+                  <span className="font-medium">No hay código JavaScript.</span> El nodo pasará los datos de entrada sin cambios.
+                </span>
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowCodeModal(true)}
+                  className="inline-flex items-center gap-1 text-[11px] text-accent-on font-medium px-2.5 py-1 rounded bg-accent hover:bg-accent-hover transition-colors"
+                >
+                  <Code2 size={12} />
+                  Escribir código
+                </button>
+                {JS_TEMPLATES.map(t => (
+                  <button
+                    key={t.label}
+                    type="button"
+                    onClick={() => updateNodeData('expression', t.code)}
+                    className="text-[10px] px-2 py-1 rounded bg-surface border border-border text-muted hover:text-fg hover:border-muted transition-colors"
+                    title={t.code}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
-          <VariableField
-            node={node}
-            nodes={nodes}
-            edges={edges}
-            multiline
-            rows={9}
-            value={String(data.expression ?? '')}
-            onChange={v => updateNodeData('expression', v)}
-            placeholder={'// data = datos de entrada\nreturn data.map(row => ({ id: row.id, total: row.total }));'}
-            className="bg-bg"
-          />
-
-          <ul className="text-[10px] text-muted space-y-0.5 list-disc pl-4">
-            <li><code>data</code>: datos de entrada · <code>context</code>: resultados de todos los nodos · <code>item</code> / <code>index</code>: elemento del bucle</li>
-            <li><code>{'{{nodo.campo}}'}</code> se reemplaza por su valor ya entre comillas (texto) o como número/objeto.</li>
-            <li>Se ejecuta en el servidor, aislado y con un límite de 5 segundos.</li>
-          </ul>
+          <p className="text-[10px] text-muted leading-relaxed">
+            <code>data</code> = datos de entrada · <code>context</code> = resultados de nodos · límite de 5s.
+          </p>
         </div>
       )}
 
+      {/* Debug Preview */}
       {inputPreview && (
         <div className="p-2.5 border border-amber-400/50 bg-amber-500/5 rounded text-xs space-y-1.5">
           <p className="font-medium text-fg flex items-center gap-1.5">
@@ -249,17 +352,62 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
         </div>
       )}
 
-      {nodeResult !== undefined && !nodeResult?.skipped && !nodeResult?.error && (
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-fg flex items-center justify-between">
-            <span>Resultado</span>
-            {Array.isArray(nodeResult) && <span className="text-[10px] text-muted font-mono">{nodeResult.length} registros</span>}
-          </label>
-          <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
-            <JsonTreeViewer data={Array.isArray(nodeResult) ? nodeResult.slice(0, 20) : nodeResult} />
+      {/* Console output from console.log calls */}
+      {hasLogs && (
+        <div className="bg-gray-950 rounded-md border border-gray-800 overflow-hidden shadow-xs">
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-800 bg-gray-900/80">
+            <Terminal size={12} className="text-emerald-400" />
+            <span className="text-[11px] font-mono text-gray-300 font-medium">Consola de depuración</span>
+            <span className="text-[10px] text-gray-500 ml-auto font-mono">{logs.length} {logs.length === 1 ? 'mensaje' : 'mensajes'}</span>
+          </div>
+          <div className="max-h-48 overflow-auto p-1 font-mono text-xs">
+            {logs.map((log, i) => {
+              const style = LOG_LEVEL_STYLES[log.level] || LOG_LEVEL_STYLES.log;
+              return (
+                <div
+                  key={i}
+                  className="flex items-start gap-2 px-2.5 py-1 text-xs border-b border-gray-800/40 last:border-0 hover:bg-gray-900/50 transition-colors"
+                >
+                  <span className={cn('text-[9px] px-1.5 py-0.2 rounded font-semibold shrink-0 mt-0.5', style.badgeBg)}>
+                    {style.badge}
+                  </span>
+                  <span className={cn('flex-1 break-all whitespace-pre-wrap leading-relaxed', style.color)}>
+                    {log.args.join(' ')}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
+
+      {/* Node execution result */}
+      {cleanResult !== undefined && !cleanResult?.skipped && !cleanResult?.error && (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-fg flex items-center justify-between">
+            <span>Resultado</span>
+            {Array.isArray(cleanResult) && <span className="text-[10px] text-muted font-mono">{cleanResult.length} registros</span>}
+          </label>
+          <div className="max-h-48 overflow-auto border border-border rounded p-2 bg-bg text-[11px]">
+            <JsonTreeViewer data={Array.isArray(cleanResult) ? cleanResult.slice(0, 20) : cleanResult} />
+          </div>
+        </div>
+      )}
+
+      {/* Expanded CodeMirror Editor Modal */}
+      <JsonTransformModal
+        isOpen={showCodeModal}
+        onClose={() => setShowCodeModal(false)}
+        code={String(data.expression ?? '')}
+        onChange={newCode => {
+          updateNodeData('expression', newCode);
+          updateNodeData('transformType', 'javascript');
+        }}
+        node={node}
+        nodes={nodes}
+        edges={edges}
+        templates={JS_TEMPLATES}
+      />
     </div>
   );
 }

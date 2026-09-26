@@ -38,7 +38,7 @@ async function start(): Promise<void> {
 
   // Plugins
   await app.register(cors, {
-    origin: ['http://localhost:5173', 'http://localhost:3000'],
+    origin: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
   });
 

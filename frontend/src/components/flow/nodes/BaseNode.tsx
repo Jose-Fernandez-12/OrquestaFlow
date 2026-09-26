@@ -21,7 +21,8 @@ import {
   Radio,
   KeyRound,
   Bot,
-  SkipForward
+  SkipForward,
+  SlidersHorizontal
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -57,6 +58,7 @@ const typeIcons: Record<string, React.ElementType> = {
   dataSource: FileSpreadsheet,
   fileSource: FileSpreadsheet,
   dataList: List,
+  variables: SlidersHorizontal,
   forEach: Repeat,
   forEachEnd: Square,
   conditionalBranch: GitFork,
@@ -91,6 +93,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     dataSource: 'text-emerald-600',
     fileSource: 'text-emerald-600',
     dataList: 'text-violet-600',
+    variables: 'text-violet-600',
     forEach: 'text-sky-600',
     forEachEnd: 'text-sky-600',
     conditionalBranch: 'text-amber-500',
@@ -113,6 +116,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     dataSource: 'Obtener datos (Excel/CSV)',
     fileSource: 'Obtener datos (Excel/CSV)',
     dataList: 'Lista de datos',
+    variables: 'Variables',
     forEach: 'Inicio de bucle',
     forEachEnd: 'Fin de bucle',
     conditionalBranch: 'Bifurcación',
@@ -462,6 +466,23 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
             </div>
           )}
 
+          {/* Variables count */}
+          {type === 'variables' && (
+            <div className="mt-1 text-[10px] text-muted">
+              {Array.isArray(data.variables) && data.variables.length > 0 ? (
+                <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                  {data.variables.filter((v: any) => v?.key).length} {data.variables.filter((v: any) => v?.key).length === 1 ? 'variable' : 'variables'}
+                </span>
+              ) : data.rawJson ? (
+                <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
+                  Variables (JSON)
+                </span>
+              ) : (
+                <span className="italic">Sin variables</span>
+              )}
+            </div>
+          )}
+
           {/* ForEach progress info */}
           {type === 'forEach' && executing && progress && (
             <div className="mt-1 text-[10px] text-sky-600 font-medium">
@@ -471,16 +492,25 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
 
           {/* Export node quick double-click hint */}
           {type === 'export' && (
-            <div className="mt-1 text-[9px] text-muted/80 flex items-center gap-1">
-              <span>Doble clic para previsualizar</span>
+            <div className="mt-1 space-y-0.5">
+              {data.fileName && (
+                <div className="text-[10px] text-muted truncate max-w-[170px]">
+                  <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border" title={String(data.fileName)}>
+                    {String(data.fileName)}
+                  </span>
+                </div>
+              )}
+              <div className="text-[9px] text-muted/80 flex items-center gap-1">
+                <span>Doble clic para previsualizar</span>
+              </div>
             </div>
           )}
 
           {type === 'jsonTransform' && (
             <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
               <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
-                {data.transformType === 'map' || data.transformType === 'pick'
-                  ? `Mapeo · ${Array.isArray(data.mappings) ? data.mappings.filter((m: any) => m?.from).length : String(data.pickFields || '').split(',').filter((s: string) => s.trim()).length} campos`
+                {(data.transformType === 'map' || data.transformType === 'pick') && Array.isArray(data.mappings) && data.mappings.length > 0
+                  ? `Mapeo · ${data.mappings.filter((m: any) => m?.from).length} campos`
                   : 'JavaScript'}
               </span>
               {completed && !skipped && Array.isArray(nodeResult) && (

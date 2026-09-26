@@ -7,6 +7,8 @@ import { InspectorTabs } from '../InspectorTabs';
 import { ColumnMappingEditor } from '../editors/ColumnMappingEditor';
 import { JoinMappingEditor } from '../editors/JoinMappingEditor';
 import { JsonSelectorModal } from '../editors/JsonSelectorModal';
+import { MapSourceButton } from '../editors/MapSourceButton';
+import { NodeSourcePicker } from '../editors/NodeSourcePicker';
 import { isDataProducerNode, getUpstreamNodes } from '../utils';
 import type { InspectorProps, TabDefinition } from '../types';
 import type { Node } from '@xyflow/react';
@@ -83,12 +85,25 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
         {activeTab === 'general' && (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium">Nombre de archivo</label>
+              <div className="flex justify-between items-center gap-2 flex-wrap">
+                <label className="text-xs font-medium">Nombre de archivo</label>
+                <div className="flex gap-1.5 items-center flex-wrap justify-end">
+                  <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) => {
+                        const current = (node.data?.fileName as string) || '';
+                        const nextVal = current && current !== 'export' ? `${current}_${val}` : val;
+                        updateNodeData('fileName', nextVal);
+                      }} />
+                </div>
+              </div>
               <Input
-                value={(node.data?.fileName as string) || 'export'}
+                value={(node.data?.fileName as string) ?? 'export'}
                 onChange={(e) => updateNodeData('fileName', e.target.value)}
-                placeholder="export"
+                placeholder="ej. reporte_{{Variables.fechaInicio}} o export"
+                className="font-mono text-xs"
               />
+              <p className="text-[10px] text-muted leading-relaxed">
+                Puedes escribir un nombre fijo o referenciar variables dinámicas usando <code>{'{{Variables.campo}}'}</code> o los botones de mapeo superiores.
+              </p>
             </div>
 
             <div className="space-y-1.5">
@@ -163,26 +178,15 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
               <>
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium">Nodo Origen de Datos</label>
-                  <select
-                    className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
+                  <NodeSourcePicker
+                    nodes={upstreamDataNodes}
                     value={(node.data?.sourceNodeId as string) || ''}
-                    onChange={(e) => {
-                      const selectedId = e.target.value;
+                    autoLabel="Auto-detectar"
+                    onChange={(selectedId) => {
                       updateNodeData('sourceNodeId', selectedId);
-                      if (selectedId) {
-                        updateNodeData('dataSource', `{{${selectedId}}}`);
-                      } else {
-                        updateNodeData('dataSource', '');
-                      }
+                      updateNodeData('dataSource', selectedId ? `{{${selectedId}}}` : '');
                     }}
-                  >
-                    <option value="">Auto-detectar (Último nodo ejecutado)</option>
-                    {upstreamDataNodes.map(upNode => (
-                      <option key={upNode.id} value={upNode.id}>
-                        {(upNode.data?.label as string) || upNode.type} ({upNode.id})
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
 
                 <div className="space-y-1.5">
