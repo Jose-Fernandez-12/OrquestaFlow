@@ -31,6 +31,7 @@ backend/uploads/
 # IDEs and editors
 .idea/
 .vscode/
+.claude/
 *.suo
 *.ntvs*
 *.njsproj
