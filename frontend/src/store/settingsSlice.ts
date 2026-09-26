@@ -10,7 +10,6 @@ export interface SystemSettings {
   table_preview_row_limit: number;
   user_display_name: string;
   user_role_label: string;
-  experimental_nodes_enabled: boolean;
 }
 
 export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -22,7 +21,6 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   table_preview_row_limit: 500,
   user_display_name: 'Jose Fernandez',
   user_role_label: 'Administrador',
-  experimental_nodes_enabled: false,
 };
 
 // Safe load from localStorage if available

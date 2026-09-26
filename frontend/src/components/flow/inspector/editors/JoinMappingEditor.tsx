@@ -250,9 +250,6 @@ export function JoinMappingEditor({
                   <div className="flex items-center gap-1.5 font-medium text-xs text-fg">
                     <Link2 size={13} className="text-accent" />
                     <span>Cruce #{i + 1}</span>
-                    <span className="text-[10px] text-muted font-normal">
-                      (Base: <strong className="text-accent">{mainNodeLabel}</strong>)
-                    </span>
                   </div>
                   <Button
                     variant="icon"
@@ -267,18 +264,15 @@ export function JoinMappingEditor({
 
                 {/* Node selection */}
                 <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[10px] text-muted">
-                    <label className="font-medium uppercase tracking-wider block">
-                      Vincular datos desde
-                    </label>
-                    <span>(Se unirá a {mainNodeLabel})</span>
-                  </div>
+                  <label className="text-[10px] font-medium text-muted uppercase tracking-wider block">
+                    Nodo a cruzar
+                  </label>
                   <select
                     className="flex w-full h-7 rounded border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
                     value={join.nodeId}
                     onChange={e => handleSelectJoinedNode(i, e.target.value)}
                   >
-                    <option value="">Seleccionar nodo secundario a cruzar...</option>
+                    <option value="">Seleccionar nodo a cruzar...</option>
                     {availableNodes.map(n => (
                       <option key={n.id} value={n.id}>
                         {(n.data?.label as string) || n.type} ({n.id.slice(0, 8)}...)

@@ -2,7 +2,9 @@ import React, { useState, useMemo } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import { ChevronDown, ChevronRight, Copy, Check, X, Braces, Repeat, Search } from 'lucide-react';
 import { cn } from '../../../lib/utils';
-import { useAvailableVariables } from './useAvailableVariables';
+import { getUpstreamNodes, isDataProducerNode, getForEachItems, findParentForEachNode } from './utils';
+import { useAppSelector } from '../../../store/hooks';
+import type { VariableGroup, VariableItem } from './types';
 
 interface VariableDrawerProps {
   node: Node;
@@ -17,7 +19,91 @@ export function VariableDrawer({ node, nodes, edges, isOpen = true, onClose }: V
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['loop', 'upstream-0']));
 
-  const groups = useAvailableVariables(node, nodes, edges);
+  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults || {});
+  const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
+
+  const parentForEachNode = useMemo(() => findParentForEachNode(node, edges, nodes), [node, edges, nodes]);
+
+  const parentLoopItems = useMemo(() => {
+    if (!parentForEachNode) return [];
+    return getForEachItems(parentForEachNode, nodes, edges, nodeResults, intermediateContext);
+  }, [parentForEachNode, nodes, edges, nodeResults, intermediateContext]);
+
+  const parentLoopKeys = useMemo(() => {
+    if (!parentLoopItems || parentLoopItems.length === 0) return [];
+    const first = parentLoopItems[0];
+    if (first && typeof first === 'object' && !Array.isArray(first)) {
+      return Object.keys(first);
+    }
+    return [];
+  }, [parentLoopItems]);
+
+  const upstreamNodes = useMemo(() => getUpstreamNodes(node, edges, nodes), [node, edges, nodes]);
+
+  const groups: VariableGroup[] = useMemo(() => {
+    const result: VariableGroup[] = [];
+
+    // Loop variables (if inside forEach)
+    if (parentForEachNode) {
+      const loopVars: VariableItem[] = [];
+      if (parentLoopKeys.length > 0) {
+        parentLoopKeys.forEach(k => {
+          loopVars.push({
+            label: k,
+            expression: `{{_item.${k}}}`,
+            type: 'campo',
+          });
+        });
+      }
+      loopVars.push({ label: 'Elemento completo', expression: '{{_item}}', type: 'objeto' });
+      loopVars.push({ label: 'Indice actual', expression: '{{_index}}', type: 'numero' });
+      loopVars.push({ label: 'Total elementos', expression: '{{_total}}', type: 'numero' });
+
+      result.push({
+        id: 'loop',
+        label: `Bucle: ${String(parentForEachNode.data?.label || parentForEachNode.id)}`,
+        color: 'text-sky-600',
+        variables: loopVars,
+      });
+    }
+
+    // Upstream node variables
+    upstreamNodes.forEach((upNode, idx) => {
+      const upResult = nodeResults[upNode.id] || intermediateContext?.[upNode.id];
+      const vars: VariableItem[] = [];
+
+      // Try to detect keys from the result
+      if (upResult) {
+        let sample = upResult;
+        if (Array.isArray(sample) && sample.length > 0) sample = sample[0];
+        if (sample && typeof sample === 'object' && !Array.isArray(sample)) {
+          Object.keys(sample).forEach(k => {
+            vars.push({
+              label: k,
+              expression: `{{${upNode.id}.${k}}}`,
+              type: typeof sample[k] === 'number' ? 'numero' : typeof sample[k],
+            });
+          });
+        }
+      }
+
+      // Always add a reference to the full node result
+      vars.push({
+        label: 'Resultado completo',
+        expression: `{{${upNode.id}}}`,
+        type: 'referencia',
+      });
+
+      result.push({
+        id: `upstream-${idx}`,
+        label: String(upNode.data?.label || upNode.type || upNode.id),
+        color: isDataProducerNode(upNode.type) ? 'text-accent' : 'text-muted',
+        variables: vars,
+      });
+    });
+
+    return result;
+  }, [parentForEachNode, parentLoopKeys, upstreamNodes, nodeResults, intermediateContext]);
 
   const totalVariables = useMemo(() => {
     return groups.reduce((acc, g) => acc + g.variables.length, 0);
