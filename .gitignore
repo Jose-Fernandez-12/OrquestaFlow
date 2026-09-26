@@ -31,6 +31,7 @@ backend/uploads/
 # IDEs and editors
 .idea/
 .vscode/
+.claude/
 *.suo
 *.ntvs*
 *.njsproj
@@ -51,4 +52,18 @@ Thumbs.db
 # Project specific
 Automatización-visual-de-flujos/
 test.xls
-test_xml.cjs
+test_xml.cjs
+temp_*
+test_*
+scratch_*
+*.xlsx
+
+# Documentation & local analysis
+ANALISIS_PROPIEDADES_NODOS.md
+CAMBIOS_VISUALES_PROPIEDADES.md
+ANALISIS_Y_ESCALABILIDAD.md
+ORIGINAL_REQUEST.md
+PROJECT.md
+
+test_xml.cjs
+
