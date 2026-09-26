@@ -26,7 +26,8 @@ import {
   Repeat,
   ArrowLeft,
   ArrowRight,
-  History
+  History,
+  Terminal
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -74,7 +75,132 @@ interface DebugContextViewerProps {
   bannerOnly?: boolean;
 }
 
-type ModalTab = 'request' | 'response' | 'input';
+function renderConsoleTable(tableData: any) {
+  if (!tableData || typeof tableData !== 'object') {
+    return <pre className="p-2 text-xs text-gray-300 font-mono">{String(tableData)}</pre>;
+  }
+
+  // Case 1: Array of objects
+  if (Array.isArray(tableData)) {
+    if (tableData.length === 0) return <div className="p-2 text-xs text-gray-500 italic">Tabla vacía [ ]</div>;
+    const first = tableData[0];
+    if (typeof first !== 'object' || first === null) {
+      return (
+        <table className="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
+              <th className="p-1.5 border-r border-gray-800 w-12 text-center">(Index)</th>
+              <th className="p-1.5">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tableData.map((v, idx) => (
+              <tr key={idx} className="border-b border-gray-800/50 hover:bg-gray-900/50">
+                <td className="p-1.5 border-r border-gray-800 text-gray-500 text-center">{idx}</td>
+                <td className="p-1.5 text-gray-200">{String(v)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      );
+    }
+    const cols = Array.from(new Set(tableData.flatMap(row => (row && typeof row === 'object' ? Object.keys(row) : []))));
+    return (
+      <table className="w-full text-left text-xs border-collapse">
+        <thead>
+          <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
+            <th className="p-1.5 border-r border-gray-800 w-12 text-center font-semibold">(Index)</th>
+            {cols.map(c => (
+              <th key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 font-semibold">{c}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {tableData.slice(0, 100).map((row, idx) => (
+            <tr key={idx} className="border-b border-gray-800/50 hover:bg-gray-900/50">
+              <td className="p-1.5 border-r border-gray-800 text-gray-500 text-center">{idx}</td>
+              {cols.map(c => {
+                const val = row?.[c];
+                return (
+                  <td key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 text-gray-200 whitespace-nowrap">
+                    {val === null ? <span className="text-rose-400">null</span> :
+                     val === undefined ? <span className="text-gray-500">undefined</span> :
+                     typeof val === 'object' ? JSON.stringify(val) : String(val)}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  // Case 2: Object of objects (e.g. dictionary grouped by ID)
+  const rowKeys = Object.keys(tableData);
+  if (rowKeys.length === 0) return <div className="p-2 text-xs text-gray-500 italic">Objeto vacío {'{ }'}</div>;
+  const firstVal = tableData[rowKeys[0]];
+  if (typeof firstVal === 'object' && firstVal !== null && !Array.isArray(firstVal)) {
+    const cols = Array.from(new Set(rowKeys.flatMap(k => {
+      const v = tableData[k];
+      return v && typeof v === 'object' ? Object.keys(v) : [];
+    })));
+    return (
+      <table className="w-full text-left text-xs border-collapse">
+        <thead>
+          <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
+            <th className="p-1.5 border-r border-gray-800 w-24 font-semibold text-center">(Index)</th>
+            {cols.map(c => (
+              <th key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 font-semibold">{c}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rowKeys.map(rKey => {
+            const rowObj = tableData[rKey] || {};
+            return (
+              <tr key={rKey} className="border-b border-gray-800/50 hover:bg-gray-900/50">
+                <td className="p-1.5 border-r border-gray-800 text-accent font-semibold text-center">{rKey}</td>
+                {cols.map(c => {
+                  const val = rowObj[c];
+                  return (
+                    <td key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 text-gray-200 whitespace-nowrap">
+                      {val === null ? <span className="text-rose-400">null</span> :
+                       val === undefined ? <span className="text-gray-500">undefined</span> :
+                       typeof val === 'object' ? JSON.stringify(val) : String(val)}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  }
+
+  // Fallback: simple key-value table
+  return (
+    <table className="w-full text-left text-xs border-collapse">
+      <thead>
+        <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
+          <th className="p-1.5 border-r border-gray-800 w-1/3 font-semibold">(Index)</th>
+          <th className="p-1.5 font-semibold">Valor</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rowKeys.map(k => (
+          <tr key={k} className="border-b border-gray-800/50 hover:bg-gray-900/50">
+            <td className="p-1.5 border-r border-gray-800 text-accent font-medium">{k}</td>
+            <td className="p-1.5 text-gray-200">{typeof tableData[k] === 'object' ? JSON.stringify(tableData[k]) : String(tableData[k])}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+type ModalTab = 'request' | 'response' | 'input' | 'console' | 'output';
 
 export function DebugContextViewer({
   node,
@@ -134,6 +260,52 @@ export function DebugContextViewer({
   const viewingIterNum = selectedIterNum ?? activeIterationNumber;
   const isViewingActiveIter = viewingIterNum === activeIterationNumber;
 
+  const currentNodePreview = allNodePreviews[node.id]?.nodePreview;
+  const effectiveOutput = useMemo(() => {
+    if (currentNodePreview?.kind === 'transform_result') {
+      return currentNodePreview.output;
+    }
+    const fromCtx = context[node.id];
+    if (fromCtx !== undefined) {
+      if (fromCtx && typeof fromCtx === 'object' && fromCtx._data !== undefined) return fromCtx._data;
+      if (fromCtx && typeof fromCtx === 'object' && fromCtx._logs !== undefined) {
+        return Object.fromEntries(Object.entries(fromCtx).filter(([k]) => k !== '_logs'));
+      }
+      return fromCtx;
+    }
+    return undefined;
+  }, [currentNodePreview, context, node.id]);
+
+  // Console logs captured from execution
+  const nodeLogs = useMemo(() => {
+    const list: Array<{ level: string; args: string[]; ts: number; nodeLabel?: string; tableData?: any }> = [];
+    if (currentNodePreview?.logs && Array.isArray(currentNodePreview.logs)) {
+      currentNodePreview.logs.forEach((l: any) => list.push({ ...l, nodeLabel: (node.data?.label as string) || node.id }));
+    }
+    const direct = context[node.id];
+    if (direct && typeof direct === 'object' && Array.isArray(direct._logs)) {
+      direct._logs.forEach((l: any) => {
+        if (!list.some(existing => existing.ts === l.ts && existing.args[0] === l.args[0])) {
+          list.push({ ...l, nodeLabel: (node.data?.label as string) || node.id });
+        }
+      });
+    }
+    // Also collect from other nodes in context
+    for (const [k, v] of Object.entries(context)) {
+      if (k === node.id) continue;
+      if (v && typeof v === 'object' && Array.isArray(v._logs) && v._logs.length > 0) {
+        const targetNode = nodes.find(n => n.id === k);
+        const nodeLabel = (targetNode?.data?.label as string) || k;
+        v._logs.forEach((l: any) => {
+          if (!list.some(existing => existing.ts === l.ts && existing.args[0] === l.args[0])) {
+            list.push({ ...l, nodeLabel });
+          }
+        });
+      }
+    }
+    return list;
+  }, [context, node.id, node.data?.label, nodes, currentNodePreview]);
+
   const currentHistRecord = useMemo(() => {
     return iterationHistory.find(h => h.iterationIndex === viewingIterNum) || null;
   }, [iterationHistory, viewingIterNum]);
@@ -158,10 +330,14 @@ export function DebugContextViewer({
       setActiveTab('response');
     } else if (requestPreview) {
       setActiveTab('request');
+    } else if (currentNodePreview?.kind === 'transform_result' || currentNodePreview?.kind === 'transform_error' || nodeLogs.length > 0) {
+      setActiveTab('console');
+    } else if (effectiveOutput !== undefined) {
+      setActiveTab('output');
     } else {
       setActiveTab('input');
     }
-  }, [responsePreview, requestPreview]);
+  }, [responsePreview, requestPreview, currentNodePreview, nodeLogs.length, effectiveOutput]);
 
   // STRICT GRAPH ISOLATION:
   // Traverse backwards along incoming edges to find ONLY real ancestor nodes that lead into this node
@@ -656,6 +832,27 @@ export function DebugContextViewer({
             </div>
           )}
 
+          {currentNodePreview?.kind === 'transform_result' && (
+            <div className="flex items-center justify-between gap-2 text-muted">
+              <span className="truncate text-fg/80 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                <span>Transformación ejecutada</span>
+                {nodeLogs.length > 0 && (
+                  <span className="font-mono text-[10px] text-emerald-400">({nodeLogs.length} logs)</span>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={() => openModalWithTab(nodeLogs.length > 0 ? 'console' : 'output')}
+                className="text-accent hover:underline text-[10px] shrink-0 font-medium cursor-pointer flex items-center gap-1"
+                title="Ver consola y salida de la transformación"
+              >
+                <Terminal size={11} />
+                <span>Ver consola</span>
+              </button>
+            </div>
+          )}
+
           {upstreamAncestorNodes.length > 0 && (
             <div className="flex items-center justify-between text-muted border-t border-border/20 pt-1">
               <span className="truncate max-w-[180px]">
@@ -703,6 +900,16 @@ export function DebugContextViewer({
                         Respuesta {effectiveResponse.status}
                       </span>
                     )}
+                    {currentNodePreview?.kind === 'transform_result' && (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded border font-mono bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
+                        Transformación Completada
+                      </span>
+                    )}
+                    {currentNodePreview?.kind === 'transform_error' && (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded border font-mono bg-rose-500/10 text-rose-600 border-rose-500/20">
+                        Error en Script
+                      </span>
+                    )}
                     {totalIterations > 1 && (
                       <span className="text-[10px] bg-accent/10 text-accent font-semibold px-2 py-0.5 rounded border border-accent/20 font-mono">
                         Iteración {viewingIterNum} de {totalIterations}
@@ -725,6 +932,8 @@ export function DebugContextViewer({
                     const dataToCopy =
                       activeTab === 'request' ? (formattedRequestBody || effectiveRequest?.endpoint) :
                       activeTab === 'response' ? formattedResponseBody :
+                      activeTab === 'console' ? nodeLogs.map((l, idx) => `[Punto #${idx+1}] [${l.level.toUpperCase()}] ${l.args.join(' ')}`).join('\n') :
+                      activeTab === 'output' ? JSON.stringify(effectiveOutput, null, 2) :
                       JSON.stringify(activeInputData, null, 2);
                     if (dataToCopy) handleCopy(dataToCopy);
                   }}
@@ -935,6 +1144,46 @@ export function DebugContextViewer({
                   <span>Datos de Entrada</span>
                   <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface border border-border text-muted">
                     {upstreamAncestorNodes.length} origen{upstreamAncestorNodes.length > 1 ? 'es' : ''}
+                  </span>
+                </button>
+              )}
+
+              {effectiveOutput !== undefined && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('output')}
+                  className={cn(
+                    "px-3.5 py-2.5 text-xs font-medium border-b-2 flex items-center gap-2 transition-colors cursor-pointer",
+                    activeTab === 'output'
+                      ? "border-accent text-accent font-semibold"
+                      : "border-transparent text-muted hover:text-fg"
+                  )}
+                >
+                  <Code2 size={14} />
+                  <span>Resultado</span>
+                  {Array.isArray(effectiveOutput) && (
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-accent/10 text-accent font-semibold">
+                      {effectiveOutput.length}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {nodeLogs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('console')}
+                  className={cn(
+                    "px-3.5 py-2.5 text-xs font-medium border-b-2 flex items-center gap-2 transition-colors cursor-pointer",
+                    activeTab === 'console'
+                      ? "border-accent text-accent font-semibold"
+                      : "border-transparent text-muted hover:text-fg"
+                  )}
+                >
+                  <Terminal size={14} />
+                  <span>Consola / Puntos de Control</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-400 font-semibold">
+                    {nodeLogs.length}
                   </span>
                 </button>
               )}
@@ -1455,6 +1704,118 @@ export function DebugContextViewer({
               </div>
             )}
 
+            {/* TAB 4: CONSOLE LOGS & CHECKPOINTS */}
+            {activeTab === 'console' && (
+              <div className="flex-1 overflow-auto p-4 bg-bg/40 flex flex-col gap-3">
+                <div className="bg-gray-950 rounded-md border border-gray-800 overflow-hidden flex flex-col flex-1 shadow-inner">
+                  <div className="flex items-center justify-between px-3.5 py-2 border-b border-gray-800 bg-gray-900/90">
+                    <div className="flex items-center gap-2">
+                      <Terminal size={14} className="text-emerald-400" />
+                      <span className="text-xs font-mono text-gray-200 font-semibold">Puntos de Control y Salida de Consola</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-mono text-gray-400 bg-gray-800/80 px-2 py-0.5 rounded border border-gray-700">
+                        {nodeLogs.length} {nodeLogs.length === 1 ? 'punto registrado' : 'puntos registrados'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-auto p-3 font-mono text-xs space-y-2.5">
+                    {nodeLogs.length === 0 ? (
+                      <div className="h-40 flex items-center justify-center text-gray-500 italic">
+                        No se han registrado mensajes de consola todavía. Usa console.log(...) o console.table(...) en tu código.
+                      </div>
+                    ) : (
+                      nodeLogs.map((log, i) => {
+                        const levelStyles: Record<string, { badge: string; badgeBg: string; text: string; border: string }> = {
+                          log:        { badge: 'LOG',        badgeBg: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30', text: 'text-emerald-300', border: 'border-emerald-500/20' },
+                          info:       { badge: 'INFO',       badgeBg: 'bg-sky-500/20 text-sky-400 border border-sky-500/30',         text: 'text-sky-300',     border: 'border-sky-500/20' },
+                          warn:       { badge: 'WARN',       badgeBg: 'bg-amber-500/20 text-amber-400 border border-amber-500/30',     text: 'text-amber-300',   border: 'border-amber-500/20' },
+                          error:      { badge: 'ERROR',      badgeBg: 'bg-rose-500/20 text-rose-400 border border-rose-500/30',       text: 'text-rose-300',    border: 'border-rose-500/20' },
+                          debug:      { badge: 'DEBUG',      badgeBg: 'bg-purple-500/20 text-purple-400 border border-purple-500/30', text: 'text-purple-300', border: 'border-purple-500/20' },
+                          table:      { badge: 'TABLE',      badgeBg: 'bg-teal-500/20 text-teal-400 border border-teal-500/30',       text: 'text-teal-300',   border: 'border-teal-500/30' },
+                          checkpoint: { badge: 'CHECKPOINT', badgeBg: 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30', text: 'text-indigo-300', border: 'border-indigo-500/30' },
+                        };
+                        const s = levelStyles[log.level] || levelStyles.log;
+
+                        return (
+                          <div
+                            key={i}
+                            className={cn(
+                              "p-2.5 rounded-md bg-gray-900/60 border transition-all hover:bg-gray-900/90",
+                              s.border
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-gray-800/60 mb-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-semibold text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded font-mono">
+                                  Punto #{i + 1}
+                                </span>
+                                <span className={cn("text-[9px] px-1.5 py-0.5 rounded font-bold uppercase", s.badgeBg)}>
+                                  {s.badge}
+                                </span>
+                                {log.nodeLabel && (
+                                  <span className="text-[10px] text-gray-400 bg-gray-800/80 px-1.5 py-0.2 rounded border border-gray-700/60">
+                                    {log.nodeLabel}
+                                  </span>
+                                )}
+                              </div>
+                              {log.ts && (
+                                <span className="text-[10px] text-gray-500 font-mono">
+                                  {new Date(log.ts).toLocaleTimeString()}:{String(new Date(log.ts).getMilliseconds()).padStart(3, '0')}
+                                </span>
+                              )}
+                            </div>
+
+                            {log.level === 'table' && log.tableData ? (
+                              <div className="mt-1 overflow-x-auto rounded border border-gray-800 bg-gray-950">
+                                {renderConsoleTable(log.tableData)}
+                              </div>
+                            ) : (
+                              <div className={cn("select-text break-all whitespace-pre-wrap leading-relaxed", s.text)}>
+                                {log.args.join(' ')}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 5: NODE OUTPUT RESULT */}
+            {activeTab === 'output' && (
+              <div className="flex-1 overflow-auto p-4 bg-bg/20 flex flex-col gap-3">
+                <div className="p-3 bg-surface rounded-md border border-border flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Code2 size={15} className="text-accent" />
+                    <span className="text-xs font-semibold text-fg">Resultado de la Transformación</span>
+                    {Array.isArray(effectiveOutput) && (
+                      <span className="text-[10px] font-mono text-muted bg-bg px-2 py-0.5 rounded border border-border">
+                        {effectiveOutput.length} registros
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleCopy(JSON.stringify(effectiveOutput, null, 2))}
+                      className="text-xs text-muted hover:text-fg px-2 py-1 rounded border border-border hover:bg-bg transition-colors flex items-center gap-1 cursor-pointer"
+                    >
+                      <Copy size={12} />
+                      <span>{copied ? 'Copiado' : 'Copiar Resultado'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-auto p-4 bg-surface rounded-md border border-border shadow-xs">
+                  {renderStructuredData(effectiveOutput, 'output')}
+                </div>
+              </div>
+            )}
+
             {/* Modal Step Actions Footer */}
             <div className="p-3 bg-surface border-t border-border flex items-center justify-between shrink-0">
               <div className="text-xs text-muted flex items-center gap-2">
@@ -1464,8 +1825,16 @@ export function DebugContextViewer({
                 <span>•</span>
                 <span>
                   Estado:{' '}
-                  <strong className={effectiveResponse ? "text-emerald-600" : "text-amber-600"}>
-                    {effectiveResponse ? 'Respuesta recibida' : 'Pausado para inspección'}
+                  <strong className={
+                    effectiveResponse ? "text-emerald-600" :
+                    currentNodePreview?.kind === 'transform_result' ? "text-emerald-600" :
+                    currentNodePreview?.kind === 'transform_error' ? "text-rose-600" :
+                    "text-amber-600"
+                  }>
+                    {effectiveResponse ? 'Respuesta recibida' :
+                     currentNodePreview?.kind === 'transform_result' ? 'Transformación completada' :
+                     currentNodePreview?.kind === 'transform_error' ? 'Error en ejecución de script' :
+                     'Pausado para inspección'}
                   </strong>
                 </span>
                 {totalIterations > 1 && (
@@ -1523,19 +1892,23 @@ export function DebugContextViewer({
                         </>
                       ) : (
                         <>
-                          {effectiveResponse ? (
+                          {effectiveResponse || currentNodePreview?.kind === 'transform_result' ? (
                             <StepForward size={14} className="text-accent" />
-                          ) : (
+                          ) : effectiveRequest ? (
                             <Send size={14} />
+                          ) : (
+                            <StepForward size={14} className="text-accent" />
                           )}
                           <span>
                             {effectiveResponse
                               ? (totalIterations > 1 && activeIterationNumber < totalIterations
                                   ? `Siguiente petición (#${activeIterationNumber + 1}/${totalIterations})`
                                   : 'Paso siguiente')
-                              : effectiveRequest
-                                ? (totalIterations > 1 ? `Enviar petición #${activeIterationNumber}` : 'Enviar esta petición')
-                                : 'Paso siguiente'}
+                              : currentNodePreview?.kind === 'transform_result'
+                                ? 'Paso siguiente'
+                                : effectiveRequest
+                                  ? (totalIterations > 1 ? `Enviar petición #${activeIterationNumber}` : 'Enviar esta petición')
+                                  : 'Paso siguiente'}
                           </span>
                         </>
                       )}

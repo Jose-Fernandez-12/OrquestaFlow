@@ -4,7 +4,20 @@ import type { Node, Edge } from '@xyflow/react';
 
 export const isDataProducerNode = (type?: string) => {
   if (!type) return false;
-  return type.startsWith('http') || type === 'query' || type === 'dataSource' || type === 'fileSource' || type === 'dataList' || type === 'forEach' || type === 'forEachEnd';
+  return (
+    type.startsWith('http') ||
+    type === 'query' ||
+    type === 'dataSource' ||
+    type === 'fileSource' ||
+    type === 'dataList' ||
+    type === 'variables' ||
+    type === 'forEach' ||
+    type === 'forEachEnd' ||
+    type === 'jsonTransform' ||
+    type === 'webhookTrigger' ||
+    type === 'oauth2Connector' ||
+    type === 'aiChatCompletion'
+  );
 };
 
 /* ── Graph traversal ── */

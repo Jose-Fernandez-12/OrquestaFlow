@@ -11,6 +11,7 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Card } from '../ui/card';
 import { cn } from '../../lib/utils';
+import { QueryResultsTable } from './QueryResultsTable';
 
 export function DatabaseView() {
   const dispatch = useAppDispatch();
@@ -992,28 +993,7 @@ export function DatabaseView() {
                     </div>
                   )}
 
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs border-collapse">
-                      <thead>
-                        <tr className="bg-bg border-b border-border">
-                          {activeColumns.map(col => (
-                            <th key={col} className="p-3 font-mono font-medium text-muted">{col}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {queriesState.results.rows?.map((row, idx) => (
-                          <tr key={idx} className="border-b border-border hover:bg-bg/40 last:border-0">
-                            {activeColumns.map(col => (
-                              <td key={col} className="p-3 truncate max-w-[200px]" title={String(row[col] ?? '')}>
-                                {String(row[col] ?? '')}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <QueryResultsTable rows={queriesState.results.rows || []} columns={activeColumns} />
                 </div>
               )}
             </div>

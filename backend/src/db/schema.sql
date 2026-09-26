@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS execution_logs (
   completed_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS flow_versions (
+  id TEXT PRIMARY KEY,
+  flow_id TEXT NOT NULL,
+  version_number INTEGER NOT NULL,
+  name TEXT,
+  definition TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'auto',
+  note TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_flow_versions_flow ON flow_versions(flow_id, version_number);
+
 CREATE TABLE IF NOT EXISTS system_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
