@@ -65,8 +65,8 @@ export function NodeInspector({
 
   const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
-  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode || {});
-  const nodeDebugPreview = allNodePreviews[selectedNodeId];
+  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode);
+  const nodeDebugPreview = allNodePreviews?.[selectedNodeId];
   const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
   const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
 
@@ -78,7 +78,7 @@ export function NodeInspector({
     : globalResponsePreview;
   const iterationHistory = nodeDebugPreview?.history || [];
   const currentFlow = useAppSelector(state => state.flows.currentFlow);
-  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults || {});
+  const nodeResults = useAppSelector(state => state.flows.nodeResults);
   const isPaused = pausedNodeIds.includes(selectedNodeId);
 
   const updateNodeData = useCallback(

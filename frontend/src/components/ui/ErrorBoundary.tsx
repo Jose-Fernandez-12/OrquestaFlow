@@ -10,6 +10,7 @@ interface Props {
 interface State {
   hasError: boolean;
   error: Error | null;
+  componentStack?: string;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
@@ -24,10 +25,11 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error('ErrorBoundary caught an error:', error, errorInfo);
+    this.setState({ componentStack: errorInfo.componentStack || '' });
   }
 
   private handleReset = () => {
-    this.setState({ hasError: false, error: null });
+    this.setState({ hasError: false, error: null, componentStack: undefined });
   };
 
   public render() {
@@ -45,6 +47,11 @@ export class ErrorBoundary extends Component<Props, State> {
           <p className="text-xs text-muted max-w-md mb-4 font-mono">
             {this.state.error?.message || 'Error inesperado al renderizar el componente.'}
           </p>
+          {this.state.componentStack && (
+            <pre id="error-component-stack" className="text-[11px] text-danger text-left font-mono bg-bg p-3 border border-border rounded max-h-60 overflow-auto max-w-2xl mb-4 whitespace-pre-wrap">
+              {this.state.componentStack}
+            </pre>
+          )}
           <Button
             size="sm"
             onClick={this.handleReset}

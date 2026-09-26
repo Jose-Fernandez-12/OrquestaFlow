@@ -138,7 +138,7 @@ function FlowCanvas() {
   const executionMode = useAppSelector(state => state.flows.executionMode);
   const nodeResults = useAppSelector(state => state.flows.nodeResults);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
-  const queries = useAppSelector(state => (state as any).queries.queries || []);
+  const queries = useAppSelector(state => state.queries.queries);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   
   const { id: routeFlowId } = useParams<{ id: string }>();
@@ -150,8 +150,14 @@ function FlowCanvas() {
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const lastPointer = useRef<{ x: number; y: number } | null>(null);
 
+  const selectedNodeIdRef = useRef(selectedNodeId);
+  useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+  const isInternalSelectionChangeRef = useRef(false);
+
   const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
-  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode || {});
+  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode);
   const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
   const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
 
@@ -172,7 +178,7 @@ function FlowCanvas() {
   const debugResponsePreview = nodeDebugPreview !== undefined ? nodeDebugPreview.responsePreview : globalResponsePreview;
   const iterationHistory = nodeDebugPreview?.history || [];
 
-  // Keep React Flow nodes.selected in sync with Redux selectedNodeId
+  // Keep React Flow nodes.selected in sync with Redux selectedNodeId without circular triggers
   useEffect(() => {
     setNodes(nds => {
       let hasChanges = false;
@@ -184,7 +190,11 @@ function FlowCanvas() {
         }
         return n;
       });
-      return hasChanges ? updated : nds;
+      if (hasChanges) {
+        isInternalSelectionChangeRef.current = true;
+        return updated;
+      }
+      return nds;
     });
   }, [selectedNodeId, setNodes]);
   const [editingName, setEditingName] = useState(currentFlow?.name || '');
@@ -611,8 +621,16 @@ function FlowCanvas() {
   );
 
   const onSelectionChange = useCallback(({ nodes: selNodes }: { nodes: Node[] }) => {
+    if (isInternalSelectionChangeRef.current) {
+      isInternalSelectionChangeRef.current = false;
+      return;
+    }
     if (selNodes.length === 1) {
-      dispatch(selectNode(selNodes[0].id));
+      if (selNodes[0].id !== selectedNodeIdRef.current) {
+        dispatch(selectNode(selNodes[0].id));
+      }
+    } else if (selNodes.length === 0 && selectedNodeIdRef.current !== null) {
+      dispatch(selectNode(null));
     }
   }, [dispatch]);
 
