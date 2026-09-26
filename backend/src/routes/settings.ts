@@ -10,7 +10,6 @@ export interface SystemSettingsMap {
   table_preview_row_limit: number;
   user_display_name: string;
   user_role_label: string;
-  experimental_nodes_enabled: boolean;
   [key: string]: any;
 }
 
@@ -22,11 +21,8 @@ export const DEFAULT_SETTINGS: SystemSettingsMap = {
   http_max_retries: 1,
   table_preview_row_limit: 500,
   user_display_name: 'Jose Fernandez',
-  user_role_label: 'Administrador',
-  experimental_nodes_enabled: false
+  user_role_label: 'Administrador'
 };
-
-const BOOLEAN_SETTINGS = ['experimental_nodes_enabled'];
 
 export function getSystemSettingsFromDb(): SystemSettingsMap {
   try {
@@ -38,8 +34,6 @@ export function getSystemSettingsFromDb(): SystemSettingsMap {
       if (['http_timeout_seconds', 'mssql_connection_timeout_seconds', 'mssql_request_timeout_seconds', 'script_timeout_seconds', 'http_max_retries', 'table_preview_row_limit'].includes(row.key)) {
         const num = Number(row.value);
         result[row.key] = isNaN(num) ? DEFAULT_SETTINGS[row.key] : num;
-      } else if (BOOLEAN_SETTINGS.includes(row.key)) {
-        result[row.key] = row.value === 'true';
       } else {
         result[row.key] = row.value;
       }
@@ -71,8 +65,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       'http_max_retries',
       'table_preview_row_limit',
       'user_display_name',
-      'user_role_label',
-      ...BOOLEAN_SETTINGS
+      'user_role_label'
     ];
 
     try {
@@ -87,8 +80,6 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         } else if (k === 'http_max_retries') {
           const num = Math.max(0, Math.min(5, parseInt(stringValue, 10) || 0));
           stringValue = String(num);
-        } else if (BOOLEAN_SETTINGS.includes(k)) {
-          stringValue = v === true || v === 'true' ? 'true' : 'false';
         }
 
         const existing = db.prepare('SELECT key FROM system_settings WHERE key = ?').get(k);

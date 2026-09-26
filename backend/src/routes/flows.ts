@@ -1,5 +1,4 @@
 import { FastifyInstance } from 'fastify';
-import crypto from 'crypto';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
 
@@ -331,7 +330,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       flow: {
         name: flow.name,
         description: flow.description || '',
-        definition: stripNodeSecrets(definition)
+        definition
       },
       queries: Array.from(queriesMap.values()),
       connections: Array.from(connectionsMap.values())
@@ -349,7 +348,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     '/:id',
     async (request, reply) => {
       const db = getDb();
-      const existing = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
+      const existing = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id);
       if (!existing) return reply.status(404).send({ error: 'Flow not found' });
 
       const { name, description, definition, status, is_locked } = request.body;
@@ -358,18 +357,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
       if (name !== undefined) { updates.push('name = ?'); values.push(name); }
       if (description !== undefined) { updates.push('description = ?'); values.push(description); }
-      if (definition !== undefined) {
-        const definitionStr = typeof definition === 'object' ? JSON.stringify(definition) : definition;
-        updates.push('definition = ?');
-        values.push(definitionStr);
-        if (definitionStr !== existing.definition) {
-          const hasVersions = db.prepare('SELECT 1 FROM flow_versions WHERE flow_id = ? LIMIT 1').get(existing.id);
-          if (!hasVersions) {
-            recordFlowVersion(existing.id, existing.name, existing.definition, 'initial', 'Estado previo al historial');
-          }
-          recordFlowVersion(existing.id, name ?? existing.name, definitionStr, 'auto', null);
-        }
-      }
+      if (definition !== undefined) { updates.push('definition = ?'); values.push(typeof definition === 'object' ? JSON.stringify(definition) : definition); }
       if (status !== undefined) { updates.push('status = ?'); values.push(status); }
       if (is_locked !== undefined) { updates.push('is_locked = ?'); values.push(is_locked); }
       updates.push("updated_at = datetime('now')");
@@ -390,7 +378,6 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
     // Delete schedules associated with this flow
     db.prepare("DELETE FROM schedules WHERE target_type = 'flow' AND target_id = ?").run(request.params.id);
-    db.prepare('DELETE FROM flow_versions WHERE flow_id = ?').run(request.params.id);
     // Delete flow
     db.prepare('DELETE FROM flows WHERE id = ?').run(request.params.id);
 
@@ -662,275 +649,4 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
     return { data: { logId, nodeId: request.params.nodeId, status: 'completed', duration } };
   });
-
-
-  // ── Flow versions ──
-
-  app.get<{ Params: { id: string } }>('/:id/versions', async (request, reply) => {
-    const db = getDb();
-    const flow = db.prepare('SELECT id FROM flows WHERE id = ?').get(request.params.id);
-    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
-
-    const rows = db.prepare(`
-      SELECT id, flow_id, version_number, name, note, kind, definition, created_at, updated_at
-      FROM flow_versions WHERE flow_id = ? ORDER BY version_number DESC
-    `).all(request.params.id) as any[];
-
-    return {
-      data: rows.map(({ definition, ...row }) => ({ ...row, ...summarizeDefinition(definition) }))
-    };
-  });
-
-  app.get<{ Params: { id: string; versionId: string } }>('/:id/versions/:versionId', async (request, reply) => {
-    const db = getDb();
-    const version = db.prepare('SELECT * FROM flow_versions WHERE id = ? AND flow_id = ?')
-      .get(request.params.versionId, request.params.id);
-    if (!version) return reply.status(404).send({ error: 'Versión no encontrada' });
-    return { data: version };
-  });
-
-  app.post<{ Params: { id: string }; Body: { note?: string } }>('/:id/versions', async (request, reply) => {
-    const db = getDb();
-    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
-    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
-
-    const version = recordFlowVersion(flow.id, flow.name, flow.definition, 'manual', request.body?.note?.trim() || null);
-    return { data: version };
-  });
-
-  app.post<{ Params: { id: string; versionId: string } }>('/:id/versions/:versionId/restore', async (request, reply) => {
-    const db = getDb();
-    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
-    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
-    if (flow.is_locked === 1) return reply.status(409).send({ error: 'El flujo está bloqueado. Desbloquéalo para restaurar una versión.' });
-
-    const version = db.prepare('SELECT * FROM flow_versions WHERE id = ? AND flow_id = ?')
-      .get(request.params.versionId, request.params.id) as any;
-    if (!version) return reply.status(404).send({ error: 'Versión no encontrada' });
-
-    const { activeFlowExecutions } = await import('../engine/executor.js');
-    if (activeFlowExecutions.get(flow.id)?.status === 'running') {
-      return reply.status(409).send({ error: 'No se puede restaurar mientras el flujo se está ejecutando' });
-    }
-
-    recordFlowVersion(flow.id, flow.name, flow.definition, 'auto', null);
-    db.prepare("UPDATE flows SET definition = ?, updated_at = datetime('now') WHERE id = ?").run(version.definition, flow.id);
-    recordFlowVersion(flow.id, flow.name, version.definition, 'restore', `Restaurada desde v${version.version_number}`);
-
-    const updated = db.prepare('SELECT * FROM flows WHERE id = ?').get(flow.id);
-    return { data: updated };
-  });
-
-  // ── Webhook trigger ──
-  // Registered in its own scope so the raw body is available for HMAC validation
-  // without changing how JSON is parsed on the other flow routes.
-  await app.register(async (scope) => {
-    scope.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
-      (req as any).rawBody = body;
-      const text = String(body || '').trim();
-      if (!text) return done(null, {});
-      try {
-        done(null, JSON.parse(text));
-      } catch {
-        const err: any = new Error('El cuerpo de la petición no es un JSON válido');
-        err.statusCode = 400;
-        done(err, undefined);
-      }
-    });
-
-    scope.post<{ Params: { webhookId: string } }>('/webhook/:webhookId', async (request, reply) => {
-      const { getSystemSettingsFromDb } = await import('./settings.js');
-      if (!getSystemSettingsFromDb().experimental_nodes_enabled) {
-        return reply.status(403).send({ error: 'Los webhooks están deshabilitados (nodos experimentales desactivados en Configuración)' });
-      }
-
-      const { webhookId } = request.params;
-      const db = getDb();
-      const flows = db.prepare('SELECT * FROM flows').all() as any[];
-
-      let targetFlow: any = null;
-      let targetNode: any = null;
-      for (const f of flows) {
-        try {
-          const def = JSON.parse(f.definition || '{}');
-          const node = (def.nodes || []).find(
-            (n: any) => n.type === 'webhookTrigger' && (n.data?.webhookId === webhookId || n.id === webhookId)
-          );
-          if (node) {
-            targetFlow = f;
-            targetNode = node;
-            break;
-          }
-        } catch {}
-      }
-
-      if (!targetFlow || !targetNode) {
-        return reply.status(404).send({ error: `Webhook ${webhookId} no encontrado` });
-      }
-
-      const secret = String(targetNode.data?.secret || '');
-      if (secret) {
-        const authError = verifyWebhookAuth(request, secret);
-        if (authError) return reply.status(401).send({ error: authError });
-      }
-
-      const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
-      if (activeFlowExecutions.get(targetFlow.id)?.status === 'running') {
-        return reply.status(409).send({ error: 'El flujo ya se está ejecutando; reintenta cuando termine' });
-      }
-
-      const { getIo } = await import('../engine/socket.js');
-      const io = getIo();
-
-      const payload = {
-        body: request.body ?? {},
-        headers: sanitizeWebhookHeaders(request.headers as Record<string, any>),
-        query: request.query ?? {},
-        timestamp: new Date().toISOString()
-      };
-
-      const logId = uuid();
-      db.prepare(`
-        INSERT INTO execution_logs (id, target_type, target_id, status)
-        VALUES (?, 'flow', ?, 'running')
-      `).run(logId, targetFlow.id);
-      const startTime = Date.now();
-
-      executeFlowEngine(
-        targetFlow.id,
-        (nodeId, status, result) => {
-          io.emit('flow-progress', { flowId: targetFlow.id, nodeId, status, result, current: result?.current, total: result?.total });
-        },
-        { mode: 'normal', initialContext: { _webhookPayload: payload } }
-      ).then(() => {
-        const duration = Date.now() - startTime;
-        db.prepare(`
-          UPDATE execution_logs
-          SET status = 'completed', duration_ms = ?, result = ?, completed_at = datetime('now')
-          WHERE id = ?
-        `).run(duration, JSON.stringify({ trigger: 'webhook', webhookId }), logId);
-        db.prepare("UPDATE flows SET last_run_at = datetime('now'), last_run_duration_ms = ? WHERE id = ?").run(duration, targetFlow.id);
-        io.emit('flow-completed', { flowId: targetFlow.id, duration, source: 'webhook' });
-      }).catch(err => {
-        const duration = Date.now() - startTime;
-        db.prepare(`
-          UPDATE execution_logs
-          SET status = 'error', duration_ms = ?, error_message = ?, completed_at = datetime('now')
-          WHERE id = ?
-        `).run(duration, err.message, logId);
-        io.emit('flow-failed', { flowId: targetFlow.id, error: err.message, duration });
-        app.log.error(err, 'Error executing flow via webhook');
-      });
-
-      return reply.status(202).send({
-        message: 'Webhook recibido; flujo en ejecución',
-        flowId: targetFlow.id,
-        executionId: logId
-      });
-    });
-  });
-}
-
-const SENSITIVE_WEBHOOK_HEADERS = ['authorization', 'x-webhook-signature', 'x-hub-signature-256', 'cookie'];
-
-function sanitizeWebhookHeaders(headers: Record<string, any>): Record<string, any> {
-  const clean: Record<string, any> = {};
-  for (const [k, v] of Object.entries(headers || {})) {
-    if (!SENSITIVE_WEBHOOK_HEADERS.includes(k.toLowerCase())) clean[k] = v;
-  }
-  return clean;
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
-}
-
-// Accepts either an HMAC-SHA256 signature of the raw body or the secret as a Bearer token
-function verifyWebhookAuth(request: any, secret: string): string | null {
-  const signature = (request.headers['x-webhook-signature'] || request.headers['x-hub-signature-256']) as string | undefined;
-  if (signature) {
-    const raw = typeof request.rawBody === 'string' ? request.rawBody : JSON.stringify(request.body ?? {});
-    const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
-    return safeEqual(signature.trim(), expected) ? null : 'Firma HMAC inválida';
-  }
-
-  const auth = request.headers['authorization'] as string | undefined;
-  if (auth) {
-    return safeEqual(auth.replace(/^Bearer\s+/i, '').trim(), secret) ? null : 'Token de autorización inválido';
-  }
-
-  return 'Este webhook requiere autenticación: envía la cabecera x-webhook-signature o Authorization: Bearer <secreto>';
-}
-
-const SECRET_NODE_FIELDS = ['apiKey', 'clientSecret', 'password', 'refreshToken', 'secret'];
-
-// Secrets typed directly into nodes are removed from exports; env:VARIABLE references are kept
-export function stripNodeSecrets(definition: { nodes: any[]; edges: any[] }) {
-  return {
-    ...definition,
-    nodes: (definition.nodes || []).map(node => {
-      if (!node?.data) return node;
-      const data = { ...node.data };
-      for (const field of SECRET_NODE_FIELDS) {
-        if (typeof data[field] === 'string' && data[field] && !data[field].startsWith('env:')) {
-          data[field] = '';
-        }
-      }
-      return { ...node, data };
-    })
-  };
-}
-
-const MAX_VERSIONS_PER_FLOW = 50;
-const AUTO_VERSION_MERGE_WINDOW_MS = 5 * 60 * 1000;
-
-function summarizeDefinition(definition: string) {
-  try {
-    const def = JSON.parse(definition || '{}');
-    return { node_count: (def.nodes || []).length, edge_count: (def.edges || []).length };
-  } catch {
-    return { node_count: 0, edge_count: 0 };
-  }
-}
-
-// Consecutive automatic saves within a short window are folded into one version
-// so every click on "Guardar"/"Ejecutar" does not flood the history.
-export function recordFlowVersion(
-  flowId: string,
-  name: string,
-  definition: string,
-  kind: 'auto' | 'manual' | 'restore' | 'initial',
-  note: string | null
-) {
-  const db = getDb();
-  const latest = db.prepare(`
-    SELECT * FROM flow_versions WHERE flow_id = ? ORDER BY version_number DESC LIMIT 1
-  `).get(flowId) as any;
-
-  if (latest && latest.definition === definition && kind === 'auto') {
-    return latest;
-  }
-
-  const latestAge = latest ? Date.now() - Date.parse(`${String(latest.created_at).replace(' ', 'T')}Z`) : Infinity;
-  if (kind === 'auto' && latest?.kind === 'auto' && latestAge < AUTO_VERSION_MERGE_WINDOW_MS) {
-    db.prepare("UPDATE flow_versions SET definition = ?, name = ?, updated_at = datetime('now') WHERE id = ?")
-      .run(definition, name, latest.id);
-    return db.prepare('SELECT * FROM flow_versions WHERE id = ?').get(latest.id);
-  }
-
-  const id = uuid();
-  const versionNumber = (latest?.version_number || 0) + 1;
-  db.prepare(`
-    INSERT INTO flow_versions (id, flow_id, version_number, name, definition, kind, note)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, flowId, versionNumber, name, definition, kind, note);
-
-  db.prepare(`
-    DELETE FROM flow_versions
-    WHERE flow_id = ? AND version_number <= ?
-  `).run(flowId, versionNumber - MAX_VERSIONS_PER_FLOW);
-
-  return db.prepare('SELECT * FROM flow_versions WHERE id = ?').get(id);
 }
