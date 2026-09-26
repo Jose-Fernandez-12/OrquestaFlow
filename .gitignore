@@ -55,4 +55,12 @@ test_xml.cjs
 temp_*
 test_*
 scratch_*
-*.xlsx
+*.xlsx
+
+# Documentation & local analysis
+ANALISIS_PROPIEDADES_NODOS.md
+CAMBIOS_VISUALES_PROPIEDADES.md
+ANALISIS_Y_ESCALABILIDAD.md
+ORIGINAL_REQUEST.md
+PROJECT.md
+
