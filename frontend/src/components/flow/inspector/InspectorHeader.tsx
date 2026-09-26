@@ -10,7 +10,7 @@ import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
 import type { Node } from '@xyflow/react';
 
-const TYPE_ICONS: Record<string, React.ElementType> = {
+export const TYPE_ICONS: Record<string, React.ElementType> = {
   start: Play,
   httpGet: Globe,
   httpPost: Globe,

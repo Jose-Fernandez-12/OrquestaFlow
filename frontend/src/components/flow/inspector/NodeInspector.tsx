@@ -24,7 +24,7 @@ import { JsonTransformInspector } from './inspectors/JsonTransformInspector';
 import { WebhookTriggerInspector } from './inspectors/WebhookTriggerInspector';
 import { OAuth2ConnectorInspector } from './inspectors/OAuth2ConnectorInspector';
 import { AiChatCompletionInspector } from './inspectors/AiChatCompletionInspector';
-import { findParentForEachNode, getForEachItems } from './utils';
+import { findParentForEachNode, getForEachItems, getUpstreamNodes } from './utils';
 
 export interface NodeInspectorProps {
   nodes: Node[];
@@ -117,6 +117,12 @@ export function NodeInspector({
     return findParentForEachNode(node, edges, nodes);
   }, [node, edges, nodes]);
 
+  // Variables exist only when there is an upstream node or an enclosing loop
+  const hasAvailableVariables = React.useMemo(() => {
+    if (!node) return false;
+    return Boolean(parentForEachNode) || getUpstreamNodes(node, edges, nodes).length > 0;
+  }, [node, edges, nodes, parentForEachNode]);
+
   const parentLoopItems = React.useMemo(() => {
     if (!parentForEachNode) return [];
     return getForEachItems(parentForEachNode, nodes, edges, nodeResults, intermediateContext);
@@ -176,7 +182,8 @@ export function NodeInspector({
         onClose={() => dispatch(selectNode(null))}
       />
 
-      {/* Action bar (Variable Panel trigger + Helpers) */}
+      {/* Action bar (Variable Panel trigger + Helpers) — hidden when there is nothing to offer */}
+      {hasAvailableVariables && (
       <div className="px-5 py-3 border-b border-border bg-bg/40 flex items-center justify-between shrink-0">
         <button
           type="button"
@@ -198,15 +205,16 @@ export function NodeInspector({
         </button>
 
         {parentForEachNode && (
-          <span className="text-[10px] font-semibold text-loop-accent bg-loop-accent-bg border border-loop-accent/30 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm">
+          <span className="text-[10px] font-semibold text-accent bg-accent/5 border border-accent/20 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm">
             <Repeat size={11} strokeWidth={2.5} />
             <span>En bucle</span>
           </span>
         )}
       </div>
+      )}
 
       {/* Inline Variable Panel (Seamless - no overlay, no secondary menu) */}
-      {isVariableDrawerOpen && (
+      {isVariableDrawerOpen && hasAvailableVariables && (
         <VariableDrawer
           node={node}
           nodes={nodes}
@@ -239,10 +247,10 @@ export function NodeInspector({
 
         {/* Compact Loop Quick-Access Bar (if inside forEach) */}
         {parentForEachNode && (
-          <div className="p-3 bg-loop-accent-bg/50 border border-loop-accent/20 rounded-lg shadow-sm space-y-2">
+          <div className="p-3 bg-bg/60 border border-border rounded-lg space-y-2">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 font-semibold text-loop-accent text-xs">
-                <Repeat size={13} strokeWidth={2.5} />
+              <div className="flex items-center gap-2 font-semibold text-fg text-xs">
+                <Repeat size={13} strokeWidth={2.5} className="text-accent" />
                 <span>Dentro de: {String(parentForEachNode.data?.label || parentForEachNode.id)}</span>
               </div>
               <span className="text-[10px] font-mono text-muted-light">
@@ -256,7 +264,7 @@ export function NodeInspector({
                     key={k}
                     type="button"
                     onClick={() => copyVariable(`{{_item.${k}}}`)}
-                    className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-md bg-surface border border-border text-fg hover:border-loop-accent hover:text-loop-accent transition-all shadow-sm"
+                    className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-md bg-surface border border-border text-fg hover:border-accent hover:text-accent transition-all shadow-sm"
                     title={`Copiar {{_item.${k}}}`}
                   >
                     <span>{k}</span>
