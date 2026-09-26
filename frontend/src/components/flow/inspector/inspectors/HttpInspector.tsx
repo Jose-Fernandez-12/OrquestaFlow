@@ -5,11 +5,8 @@ import { Globe, ShieldCheck, Send, ArrowDownToLine, Repeat, Plus, Trash2, Wand2,
 import { useAppSelector } from '../../../../store/hooks';
 import { InspectorTabs } from '../InspectorTabs';
 import { JsonSelectorModal } from '../editors/JsonSelectorModal';
-import { MapSourceButton } from '../editors/MapSourceButton';
-import { JsonCodeField } from '../editors/JsonCodeField';
 import { KeyValueEditor, repairJsonString } from '../editors/KeyValueEditor';
 import { getUpstreamNodes, findParentForEachNode } from '../utils';
-import { cn } from '../../../../lib/utils';
 import type { InspectorProps, TabDefinition } from '../types';
 
 type HttpInspectorProps = Pick<
@@ -135,22 +132,17 @@ export function HttpInspector({
   ];
 
   return (
-    <div className="flex flex-col -m-5">
+    <div className="flex flex-col -m-4">
       <InspectorTabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
 
-      <div className="p-5 space-y-5">
+      <div className="p-4 space-y-4">
         {/* Tab General */}
         {activeTab === 'general' && (
           <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-fg-secondary block">Método HTTP</label>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Método HTTP</label>
               <select
-                className={cn(
-                  "w-full rounded-md border border-border bg-surface px-3 py-2.5 text-sm font-semibold",
-                  "transition-colors duration-150 cursor-pointer",
-                  "hover:border-border-hover",
-                  "focus:border-accent focus:ring-2 focus:ring-accent/20 focus-visible:outline-none"
-                )}
+                className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm font-semibold focus-visible:outline-none focus-visible:border-accent"
                 value={method}
                 onChange={(e) => updateNodeData('method', e.target.value)}
               >
@@ -166,7 +158,12 @@ export function HttpInspector({
               <div className="flex justify-between items-center">
                 <label className="text-xs font-medium">Endpoint URL</label>
                 <div className="flex gap-1">
-                  <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) => {
+                  {upstreamDataNodes.map(upNode => (
+                    <JsonSelectorModal
+                      key={upNode.id}
+                      node={upNode}
+                      customLabel="Mapear"
+                      onSelectValue={(val) => {
                         const current = endpoint;
                         if (/\{param_[^{}]*\}/.test(current)) {
                           updateNodeData('endpoint', current.replace(/\{param_[^{}]*\}/, val));
@@ -176,7 +173,9 @@ export function HttpInspector({
                           const sep = current.endsWith('/') || current === '' ? '' : '/';
                           updateNodeData('endpoint', current + sep + val);
                         }
-                      }} />
+                      }}
+                    />
+                  ))}
                 </div>
               </div>
               <Input
@@ -249,10 +248,17 @@ export function HttpInspector({
                         </span>
                         <span className="text-[11px] text-muted shrink-0">Mapear con:</span>
                         <div className="flex-1 flex gap-1 items-center justify-end">
-                          <MapSourceButton nodes={upstreamDataNodes} label="Seleccionar campo" onSelectValue={(val) => {
+                          {upstreamDataNodes.map(upNode => (
+                            <JsonSelectorModal
+                              key={upNode.id}
+                              node={upNode}
+                              customLabel="Seleccionar campo"
+                              onSelectValue={(val) => {
                                 const nextUrl = endpoint.replace(token, val);
                                 updateNodeData('endpoint', nextUrl);
-                              }} />
+                              }}
+                            />
+                          ))}
                         </div>
                       </div>
                     ))}
@@ -268,10 +274,17 @@ export function HttpInspector({
                         </span>
                         <span className="text-[10px] text-emerald-600 font-medium shrink-0">Mapeado</span>
                         <div className="flex-1 flex gap-1 items-center justify-end">
-                          <MapSourceButton nodes={upstreamDataNodes} label="Cambiar" onSelectValue={(val) => {
+                          {upstreamDataNodes.map(upNode => (
+                            <JsonSelectorModal
+                              key={upNode.id}
+                              node={upNode}
+                              customLabel="Cambiar"
+                              onSelectValue={(val) => {
                                 const nextUrl = endpoint.replace(token, val);
                                 updateNodeData('endpoint', nextUrl);
-                              }} />
+                              }}
+                            />
+                          ))}
                         </div>
                       </div>
                     ))}
@@ -338,7 +351,14 @@ export function HttpInspector({
                 <div className="flex justify-between items-center">
                   <label className="text-xs font-medium text-accent">Token (Bearer)</label>
                   <div className="flex gap-1">
-                    <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) => updateNodeData('authToken', val)} />
+                    {upstreamDataNodes.map(upNode => (
+                      <JsonSelectorModal
+                        key={upNode.id}
+                        node={upNode}
+                        customLabel="Mapear"
+                        onSelectValue={(val) => updateNodeData('authToken', val)}
+                      />
+                    ))}
                   </div>
                 </div>
                 <Input
@@ -359,7 +379,14 @@ export function HttpInspector({
                   <div className="flex justify-between items-center">
                     <label className="text-xs font-medium text-accent">Usuario</label>
                     <div className="flex gap-1">
-                      <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) => updateNodeData('authUsername', val)} />
+                      {upstreamDataNodes.map(upNode => (
+                        <JsonSelectorModal
+                          key={upNode.id}
+                          node={upNode}
+                          customLabel="Mapear"
+                          onSelectValue={(val) => updateNodeData('authUsername', val)}
+                        />
+                      ))}
                     </div>
                   </div>
                   <Input
@@ -374,7 +401,14 @@ export function HttpInspector({
                   <div className="flex justify-between items-center">
                     <label className="text-xs font-medium text-accent">Contraseña</label>
                     <div className="flex gap-1">
-                      <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) => updateNodeData('authPassword', val)} />
+                      {upstreamDataNodes.map(upNode => (
+                        <JsonSelectorModal
+                          key={upNode.id}
+                          node={upNode}
+                          customLabel="Mapear"
+                          onSelectValue={(val) => updateNodeData('authPassword', val)}
+                        />
+                      ))}
                     </div>
                   </div>
                   <Input
@@ -412,20 +446,28 @@ export function HttpInspector({
                     {showRawHeaders ? 'Vista Guiada' : 'Ver JSON'}
                   </button>
                   <div className="flex gap-1">
-                    <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) =>
+                    {upstreamDataNodes.map(upNode => (
+                      <JsonSelectorModal
+                        key={upNode.id}
+                        node={upNode}
+                        customLabel="Mapear"
+                        onSelectValue={(val) =>
                           updateNodeData('headers', ((node.data?.headers as string) || '') + val)
-                        } />
+                        }
+                      />
+                    ))}
                   </div>
                 </div>
               </div>
 
               {showRawHeaders ? (
-                <JsonCodeField
+                <textarea
+                  className="flex w-full min-h-[70px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
                   value={
                     (node.data?.headers as string) ||
                     '{\n  "Content-Type": "application/json"\n}'
                   }
-                  onChange={(v) => updateNodeData('headers', v)}
+                  onChange={(e) => updateNodeData('headers', e.target.value)}
                   placeholder={'{\n  "Authorization": "Bearer token"\n}'}
                 />
               ) : (
@@ -454,9 +496,10 @@ export function HttpInspector({
               </div>
 
               {showRawParams ? (
-                <JsonCodeField
+                <textarea
+                  className="flex w-full min-h-[70px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent"
                   value={paramsJson}
-                  onChange={(v) => updateNodeData('params', v)}
+                  onChange={(e) => updateNodeData('params', e.target.value)}
                   placeholder={'{\n  "id": "94",\n  "status": "active"\n}'}
                 />
               ) : (
@@ -469,17 +512,24 @@ export function HttpInspector({
                       >
                         <div className="flex justify-between items-center gap-1">
                           <span
-                            className="text-[11px] font-mono font-semibold text-accent truncate min-w-0 flex-1"
+                            className="text-[11px] font-mono font-semibold text-accent truncate max-w-[140px]"
                             title={key}
                           >
                             {key}
                           </span>
-                          <div className="flex gap-1.5 items-center flex-wrap justify-end">
-                            <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(mappedVal) => updateParamValue(key, mappedVal)} />
+                          <div className="flex gap-1 items-center">
+                            {upstreamDataNodes.map(upNode => (
+                              <JsonSelectorModal
+                                key={upNode.id}
+                                node={upNode}
+                                customLabel="Mapear"
+                                onSelectValue={(mappedVal) => updateParamValue(key, mappedVal)}
+                              />
+                            ))}
                             <button
                               type="button"
                               onClick={() => removeParam(key)}
-                              className="text-muted hover:text-danger p-0.5 ml-0.5 shrink-0"
+                              className="text-muted hover:text-danger p-0.5"
                               title="Eliminar parámetro"
                             >
                               <Trash2 size={13} />
@@ -557,18 +607,25 @@ export function HttpInspector({
                       {showRawBody ? 'Vista Guiada' : 'Ver JSON raw'}
                     </button>
                     <div className="flex gap-1">
-                      <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) =>
+                      {upstreamDataNodes.map(upNode => (
+                        <JsonSelectorModal
+                          key={upNode.id}
+                          node={upNode}
+                          customLabel="Mapear"
+                          onSelectValue={(val) =>
                             updateNodeData('body', ((node.data?.body as string) || '') + val)
-                          } />
+                          }
+                        />
+                      ))}
                     </div>
                   </div>
                 </div>
 
                 {showRawBody ? (
-                  <JsonCodeField
-                    minHeight="160px"
+                  <textarea
+                    className="flex w-full min-h-[140px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-xs font-mono focus-visible:outline-none focus-visible:border-accent leading-relaxed"
                     value={(node.data?.body as string) || ''}
-                    onChange={(v) => updateNodeData('body', v)}
+                    onChange={(e) => updateNodeData('body', e.target.value)}
                     placeholder={'{\n  "id": "{{start.data.id}}"\n}'}
                   />
                 ) : (
@@ -743,7 +800,14 @@ export function HttpInspector({
                         onChange={(e) => updateNodeData('iterateOver', e.target.value)}
                         placeholder="{{ID_NODO}}"
                       />
-                      <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) => updateNodeData('iterateOver', val)} />
+                      {upstreamDataNodes.map(upNode => (
+                        <JsonSelectorModal
+                          key={upNode.id}
+                          node={upNode}
+                          customLabel="Mapear"
+                          onSelectValue={(val) => updateNodeData('iterateOver', val)}
+                        />
+                      ))}
                     </div>
                     <p className="text-[10px] text-muted leading-relaxed">
                       Selecciona la lista completa con [*] y luego usa{' '}

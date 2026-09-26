@@ -6,7 +6,7 @@ let ioInstance: Server | null = null;
 export function initIo(server: HttpServer) {
   ioInstance = new Server(server, {
     cors: {
-      origin: '*',
+      origin: ['http://localhost:5173', 'http://localhost:3000'],
       methods: ['GET', 'POST', 'PUT', 'DELETE']
     }
   });

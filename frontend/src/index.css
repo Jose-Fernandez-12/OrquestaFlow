@@ -5,64 +5,28 @@
 @tailwind utilities;
 /* ── Design tokens as CSS custom properties ─── */
 :root {
-  /* ── Surface & Background ─── */
   --bg: #fafafa;
   --surface: #ffffff;
-
-  /* ── Foreground (expanded hierarchy) ─── */
   --fg: #111111;
-  --fg-secondary: #3d3d3d;
   --muted: #6b6b6b;
-  --muted-light: #9ca3af;
-
-  /* ── Borders (expanded states) ─── */
   --border: #e5e5e5;
-  --border-light: #f0f0f0;
-  --border-hover: #d1d5db;
-  --border-focus: #2f6feb;
-
-  /* ── Accent ─── */
   --accent: #2f6feb;
   --accent-on: #ffffff;
   --accent-hover: color-mix(in oklab, var(--accent), black 8%);
   --accent-active: color-mix(in oklab, var(--accent), black 14%);
   --accent-light: color-mix(in oklab, var(--accent), transparent 90%);
-
-  /* ── Semantic Colors ─── */
   --success: #17a34a;
   --warn: #eab308;
   --danger: #dc2626;
-
-  /* ── Node States ─── */
-  --state-executing: #3b82f6;
-  --state-executing-bg: #dbeafe;
-  --state-paused: #f59e0b;
-  --state-paused-bg: #fef3c7;
-  --state-completed: #17a34a;
-  --state-error: #dc2626;
-
-  /* ── Loop Context ─── */
-  --loop-accent: #0ea5e9;
-  --loop-accent-bg: #e0f2fe;
-
-  /* ── Typography ─── */
   --font-display: 'Inter', -apple-system, system-ui, sans-serif;
   --font-body: 'Inter', -apple-system, system-ui, sans-serif;
   --font-mono: ui-monospace, 'JetBrains Mono', monospace;
-
-  /* ── Border Radius ─── */
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-pill: 9999px;
-
-  /* ── Shadows ─── */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
   --shadow-raised: 0 2px 8px color-mix(in oklab, var(--fg), transparent 92%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 70%);
-
-  /* ── Motion ─── */
   --motion-fast: 150ms;
   --motion-base: 200ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
@@ -159,7 +123,6 @@ textarea:focus-visible,
 
 /* ── Utility classes ─── */
 @layer utilities {
-  /* Typography */
   .font-display {
     font-family: var(--font-display);
   }
@@ -168,73 +131,16 @@ textarea:focus-visible,
     font-family: var(--font-mono);
   }
 
-  /* Text Colors */
-  .text-fg-secondary {
-    color: var(--fg-secondary);
-  }
-
   .text-muted {
     color: var(--muted);
   }
 
-  .text-muted-light {
-    color: var(--muted-light);
-  }
-
-  /* Backgrounds */
   .bg-accent-light {
     background: var(--accent-light);
   }
 
-  .bg-state-executing {
-    background: var(--state-executing-bg);
-  }
-
-  .bg-state-paused {
-    background: var(--state-paused-bg);
-  }
-
-  .bg-loop-accent {
-    background: var(--loop-accent-bg);
-  }
-
-  /* Borders */
   .border-default {
     border-color: var(--border);
-  }
-
-  .border-light {
-    border-color: var(--border-light);
-  }
-
-  .border-hover {
-    border-color: var(--border-hover);
-  }
-
-  .border-focus {
-    border-color: var(--border-focus);
-  }
-
-  /* Text with border colors (for convenience) */
-  .text-loop-accent {
-    color: var(--loop-accent);
-  }
-
-  .text-state-executing {
-    color: var(--state-executing);
-  }
-
-  .text-state-paused {
-    color: var(--state-paused);
-  }
-
-  /* Shadows */
-  .shadow-sm {
-    box-shadow: var(--shadow-sm);
-  }
-
-  .shadow-md {
-    box-shadow: var(--shadow-md);
   }
 
   .shadow-raised {

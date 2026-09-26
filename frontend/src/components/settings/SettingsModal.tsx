@@ -11,11 +11,7 @@ import {
   Save,
   CheckCircle2,
   AlertCircle,
-  Loader2,
-  FlaskConical,
-  Radio,
-  KeyRound,
-  Bot
+  Loader2
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';
@@ -29,7 +25,7 @@ export function SettingsModal() {
   const isOpen = useAppSelector((state) => state.ui.settingsModalOpen);
   const { settings, saving, loading } = useAppSelector((state) => state.settings);
 
-  const [activeTab, setActiveTab] = useState<'timeouts' | 'display' | 'experimental'>('timeouts');
+  const [activeTab, setActiveTab] = useState<'timeouts' | 'display'>('timeouts');
   const [formData, setFormData] = useState<SystemSettings>(settings);
   const [hasChanges, setHasChanges] = useState(false);
 
@@ -129,19 +125,6 @@ export function SettingsModal() {
           >
             <Sliders size={14} />
             Visualización y Tablas
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('experimental')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'experimental'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <FlaskConical size={14} />
-            Experimental
           </button>
         </div>
 
@@ -283,57 +266,6 @@ export function SettingsModal() {
                 <p className="text-[11px] text-muted">
                   Controla la cantidad de registros renderizados en pantalla al explorar resultados de consultas SQL o archivos cargados en nodos de datos.
                 </p>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'experimental' && (
-            <div className="space-y-4">
-              <div className="p-3.5 bg-bg rounded-md border border-border flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <label htmlFor="experimental-toggle" className="text-xs font-semibold text-fg flex items-center gap-1.5 cursor-pointer">
-                    <FlaskConical size={14} className="text-fuchsia-600" />
-                    Habilitar nodos experimentales
-                  </label>
-                  <p className="text-[11px] text-muted leading-relaxed">
-                    Muestra estos nodos en la librería y permite ejecutarlos. Están en fase beta: su configuración puede cambiar
-                    entre versiones. Si lo desactivas, los flujos que ya los usan no podrán ejecutarse y los webhooks responderán 403.
-                  </p>
-                </div>
-                <button
-                  id="experimental-toggle"
-                  type="button"
-                  role="switch"
-                  aria-checked={!!formData.experimental_nodes_enabled}
-                  onClick={() => handleChange('experimental_nodes_enabled', !formData.experimental_nodes_enabled)}
-                  className={cn(
-                    'relative shrink-0 w-10 h-5 rounded-full transition-colors',
-                    formData.experimental_nodes_enabled ? 'bg-accent' : 'bg-border'
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform',
-                      formData.experimental_nodes_enabled && 'translate-x-5'
-                    )}
-                  />
-                </button>
-              </div>
-
-              <div className={cn('grid gap-2 transition-opacity', !formData.experimental_nodes_enabled && 'opacity-50')}>
-                {[
-                  { icon: Radio, color: 'text-pink-600', name: 'Webhook Trigger', desc: 'Dispara el flujo al recibir un POST en una URL propia, con validación por secreto (HMAC o Bearer).' },
-                  { icon: KeyRound, color: 'text-indigo-600', name: 'Conector OAuth2', desc: 'Obtiene tokens (client credentials, password o refresh token) y los reutiliza mientras no expiren.' },
-                  { icon: Bot, color: 'text-fuchsia-600', name: 'IA / Chat LLM', desc: 'Envía prompts con datos del flujo a cualquier API compatible con OpenAI (OpenAI, Groq, OpenRouter, Ollama…).' },
-                ].map(item => (
-                  <div key={item.name} className="flex items-start gap-3 p-3 rounded-md border border-border bg-surface">
-                    <item.icon size={16} className={cn('mt-0.5 shrink-0', item.color)} />
-                    <div>
-                      <p className="text-xs font-semibold text-fg">{item.name}</p>
-                      <p className="text-[11px] text-muted">{item.desc}</p>
-                    </div>
-                  </div>
-                ))}
               </div>
             </div>
           )}

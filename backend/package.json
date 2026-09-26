@@ -24,8 +24,7 @@
     "node-cron": "^3.0.3",
     "socket.io": "^4.8.1",
     "sql.js": "^1.14.2",
-    "uuid": "^11.1.0",
-    "jszip": "^3.10.1"
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
