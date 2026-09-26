@@ -2,7 +2,9 @@ import initSqlJs from 'sql.js';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 
-const DB_PATH = join(process.cwd(), 'data', 'orquesta.sqlite');
+// ORQUESTA_DB_PATH=':memory:' keeps the database in memory only (used by the automated tests)
+const DB_PATH = process.env.ORQUESTA_DB_PATH || join(process.cwd(), 'data', 'orquesta.sqlite');
+const IN_MEMORY = DB_PATH === ':memory:';
 
 let sqlDb: any = null;
 
@@ -76,11 +78,11 @@ export async function initDb(): Promise<void> {
   });
 
   const dataDir = join(process.cwd(), 'data');
-  if (!existsSync(dataDir)) {
+  if (!IN_MEMORY && !existsSync(dataDir)) {
     mkdirSync(dataDir, { recursive: true });
   }
 
-  if (existsSync(DB_PATH)) {
+  if (!IN_MEMORY && existsSync(DB_PATH)) {
     const fileBuffer = readFileSync(DB_PATH);
     sqlDb = new SQL.Database(fileBuffer);
   } else {
@@ -92,6 +94,7 @@ export async function initDb(): Promise<void> {
   // Run schema
   const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf-8');
   wrappedDb.exec(schema);
+  migrateExecutionLogs(wrappedDb);
 
   try {
     wrappedDb.exec('ALTER TABLE flows ADD COLUMN is_locked INTEGER DEFAULT 0;');
@@ -173,7 +176,47 @@ export function getDb(): SqlJsWrapper {
   return wrappedDb;
 }
 
+// Older databases: allow the 'cancelled' status and add the trigger / per-node trace columns
+function migrateExecutionLogs(db: SqlJsWrapper) {
+  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'execution_logs'").get() as { sql?: string } | undefined;
+  if (table?.sql && !table.sql.includes("'cancelled'")) {
+    const cols = (db.prepare('PRAGMA table_info(execution_logs)').all() as Array<{ name: string }>).map(c => c.name);
+    const keep = ['id', 'target_type', 'target_id', 'schedule_id', 'status', 'result', 'error_message', 'duration_ms', 'record_count', 'trigger_type', 'node_trace', 'started_at', 'completed_at']
+      .filter(c => cols.includes(c))
+      .join(', ');
+    db.exec(`
+      ALTER TABLE execution_logs RENAME TO execution_logs_old;
+      CREATE TABLE execution_logs (
+        id TEXT PRIMARY KEY,
+        target_type TEXT NOT NULL CHECK(target_type IN ('flow', 'script', 'query', 'node')),
+        target_id TEXT NOT NULL,
+        schedule_id TEXT,
+        status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'error', 'cancelled')),
+        result TEXT,
+        error_message TEXT,
+        duration_ms INTEGER,
+        record_count INTEGER,
+        trigger_type TEXT,
+        node_trace TEXT,
+        started_at TEXT DEFAULT (datetime('now')),
+        completed_at TEXT
+      );
+      INSERT INTO execution_logs (${keep}) SELECT ${keep} FROM execution_logs_old;
+      DROP TABLE execution_logs_old;
+      CREATE INDEX IF NOT EXISTS idx_execution_logs_target ON execution_logs(target_type, target_id, started_at);
+    `);
+    console.log('[DB] Migrated: execution_logs now supports cancelled runs and node traces');
+  }
+
+  // Before 'cancelled' existed, stopped runs were stored as errors
+  db.exec("UPDATE execution_logs SET status = 'cancelled' WHERE status = 'error' AND (error_message LIKE '%detenid%' OR error_message LIKE '%cancelad%')");
+
+  // Runs left as 'running' by a server restart will never finish
+  db.exec("UPDATE execution_logs SET status = 'error', error_message = COALESCE(error_message, 'Interrumpido: el servidor se reinició durante la ejecución'), completed_at = COALESCE(completed_at, datetime('now')) WHERE status = 'running'");
+}
+
 function saveToDisk() {
+  if (IN_MEMORY) return;
   if (sqlDb) {
     const data = sqlDb.export();
     const buffer = Buffer.from(data);

@@ -74,14 +74,18 @@ CREATE TABLE IF NOT EXISTS execution_logs (
   target_type TEXT NOT NULL CHECK(target_type IN ('flow', 'script', 'query', 'node')),
   target_id TEXT NOT NULL,
   schedule_id TEXT,
-  status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'error')),
+  status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'error', 'cancelled')),
   result TEXT,
   error_message TEXT,
   duration_ms INTEGER,
   record_count INTEGER,
+  trigger_type TEXT,
+  node_trace TEXT,
   started_at TEXT DEFAULT (datetime('now')),
   completed_at TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_execution_logs_target ON execution_logs(target_type, target_id, started_at);
 
 CREATE TABLE IF NOT EXISTS flow_versions (
   id TEXT PRIMARY KEY,

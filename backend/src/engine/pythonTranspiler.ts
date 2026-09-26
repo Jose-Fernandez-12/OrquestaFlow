@@ -1,7 +1,15 @@
 /**
  * pythonTranspiler.ts
- * Convierte la definicion JSON de un flujo de OrquestaFlow a un script Python ejecutable y autonomo.
+ * Converts an OrquestaFlow flow definition into a standalone Python package.
+ *
+ * The generated <flow>_flow.py reads like the flow itself: one short, decorated function per node
+ * and a main() that runs them in order (loops become `for`, branches become `if`). All the mechanics
+ * (templates, HTTP with retries, SQL, exports, conditions...) live in orquesta_runtime.py.
  */
+
+import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes } from './graph.js';
+import { PYTHON_RUNTIME } from './python/runtime.js';
+import { envKey, pyCall, pyComment, pyIdentifier, pyLiteral, pyStr, slugify, type PyArg } from './python/pyCode.js';
 
 export interface TranspilerConnectionInfo {
   id: string;
@@ -24,6 +32,10 @@ export interface TranspilerQueryInfo {
 export interface TranspilerContext {
   // Map of queryId -> full query info with connection data
   queries: Record<string, TranspilerQueryInfo>;
+  /** System settings used as defaults (HTTP retries / timeout) */
+  settings?: { httpMaxRetries?: number; httpTimeoutSeconds?: number };
+  /** Scraping scripts found on the server: script name -> { fileName, content } */
+  scripts?: Record<string, { fileName: string; content: string }>;
 }
 
 export interface TranspilerSqlFile {
@@ -39,8 +51,15 @@ export interface TranspilerJsFile {
   content: string;
 }
 
+export interface TranspilerScriptFile {
+  fileName: string;
+  content: string;
+}
+
 export interface TranspilerOutput {
   script: string;
+  runtimePy: string;
+  scriptFiles: TranspilerScriptFile[];
   requirementsTxt: string;
   envExample: string;
   readmeMd: string;
@@ -48,1175 +67,782 @@ export interface TranspilerOutput {
   jsFiles: TranspilerJsFile[];
 }
 
-// ---------------------------------------------------------------------------
-// Topological sort (Kahn)
-// ---------------------------------------------------------------------------
-function buildTopologicalOrder(nodes: any[], edges: any[]): any[] {
-  const inDegree: Record<string, number> = {};
-  const adjList: Record<string, string[]> = {};
+const HTTP_TYPES = ['httpGet', 'httpPost', 'httpRequest'];
+const RETRYABLE_TYPES = [...HTTP_TYPES, 'scraping', 'query', 'oauth2Connector', 'aiChatCompletion'];
+const NO_CONTINUE_TYPES = ['start', 'forEach', 'forEachEnd', 'conditionalBranch'];
 
+// ---------------------------------------------------------------------------
+// Graph analysis
+// ---------------------------------------------------------------------------
+
+interface LoopInfo {
+  endId: string | null;
+  body: any[];
+  terminalEdges: any[];
+}
+
+interface FlowGraph {
+  nodes: any[];
+  edges: any[];
+  byId: Map<string, any>;
+  mainOrder: any[];
+  loops: Map<string, LoopInfo>;
+  /** Loop body node id -> forEach id */
+  loopOf: Map<string, string>;
+  /** forEachEnd id -> forEach id */
+  endOf: Map<string, string>;
+}
+
+function kahnOrder(nodes: any[], edges: any[], exclude: Set<string> = new Set()): any[] {
+  const ids = new Set(nodes.map(n => n.id));
+  const inDegree = new Map<string, number>();
+  const adj = new Map<string, string[]>();
   nodes.forEach(n => {
-    inDegree[n.id] = 0;
-    adjList[n.id] = [];
+    inDegree.set(n.id, 0);
+    adj.set(n.id, []);
   });
-
-  const normalizedEdges = edges.map(edge => {
-    const srcNode = nodes.find(n => n.id === edge.source);
-    const tgtNode = nodes.find(n => n.id === edge.target);
-    if (srcNode && tgtNode) {
-      const srcConfigStr = JSON.stringify(srcNode.data || {});
-      if (srcConfigStr.includes(tgtNode.id)) {
-        return { ...edge, source: tgtNode.id, target: srcNode.id };
-      }
-    }
-    return edge;
-  });
-
-  normalizedEdges.forEach(edge => {
-    if (adjList[edge.source] !== undefined) {
-      adjList[edge.source].push(edge.target);
-      inDegree[edge.target] = (inDegree[edge.target] || 0) + 1;
-    }
-  });
-
-  const forEachNodes = nodes.filter(n => n.type === 'forEach');
-  const forEachManagedNodeIds = new Set<string>();
-
-  for (const feNode of forEachNodes) {
-    const endId = findForEachEndNode(feNode.id, adjList, nodes);
-    if (endId) {
-      const subIds = getForEachSubgraphNodes(feNode.id, endId, adjList, nodes);
-      subIds.forEach(sid => {
-        forEachManagedNodeIds.add(sid);
-        inDegree[sid] = Infinity;
-      });
-      normalizedEdges.forEach(edge => {
-        if (edge.target === endId && subIds.includes(edge.source)) {
-          inDegree[endId] = Math.max(0, (inDegree[endId] || 0) - 1);
-        }
-      });
-      if (!adjList[feNode.id].includes(endId)) {
-        adjList[feNode.id].push(endId);
-        inDegree[endId] = (inDegree[endId] || 0) + 1;
-      }
-    }
+  for (const e of edges) {
+    if (!ids.has(e.source) || !ids.has(e.target) || exclude.has(e.target) || exclude.has(e.source)) continue;
+    adj.get(e.source)!.push(e.target);
+    inDegree.set(e.target, (inDegree.get(e.target) || 0) + 1);
   }
-
-  const queue: string[] = [];
-  nodes.forEach(n => {
-    if (inDegree[n.id] === 0 && !forEachManagedNodeIds.has(n.id)) {
-      queue.push(n.id);
-    }
-  });
-
+  const queue = nodes.filter(n => !exclude.has(n.id) && inDegree.get(n.id) === 0).map(n => n.id);
   const ordered: any[] = [];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    const node = nodes.find(n => n.id === current);
-    if (!node || forEachManagedNodeIds.has(current)) continue;
-    ordered.push(node);
-
-    (adjList[current] || []).forEach(dep => {
-      inDegree[dep]--;
-      if (inDegree[dep] === 0 && !forEachManagedNodeIds.has(dep)) {
-        queue.push(dep);
-      }
-    });
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  while (queue.length) {
+    const id = queue.shift()!;
+    ordered.push(byId.get(id));
+    for (const next of adj.get(id) || []) {
+      inDegree.set(next, inDegree.get(next)! - 1);
+      if (inDegree.get(next) === 0) queue.push(next);
+    }
   }
-
+  // Nodes left out by a cycle are appended so nothing silently disappears
+  for (const n of nodes) if (!exclude.has(n.id) && !ordered.includes(n)) ordered.push(n);
   return ordered;
 }
 
-function findForEachEndNode(forEachNodeId: string, adjList: Record<string, string[]>, nodes: any[]): string | null {
-  const visited = new Set<string>();
-  const queue = [...(adjList[forEachNodeId] || [])];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    if (visited.has(current)) continue;
-    visited.add(current);
-    const node = nodes.find(n => n.id === current);
-    if (node?.type === 'forEachEnd') return current;
-    for (const next of (adjList[current] || [])) {
-      if (!visited.has(next)) queue.push(next);
-    }
+function analyzeGraph(nodes: any[], rawEdges: any[]): FlowGraph {
+  const edges = normalizeEdges(nodes, rawEdges);
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const adjList: Record<string, string[]> = {};
+  nodes.forEach(n => (adjList[n.id] = []));
+  edges.forEach(e => adjList[e.source]?.push(e.target));
+
+  const loops = new Map<string, LoopInfo>();
+  const loopOf = new Map<string, string>();
+  const endOf = new Map<string, string>();
+  for (const fe of nodes.filter(n => n.type === 'forEach')) {
+    const endId = findForEachEndNode(fe.id, adjList, nodes);
+    const bodyIds = endId ? getForEachSubgraphNodes(fe.id, endId, adjList) : [];
+    bodyIds.forEach(id => loopOf.set(id, fe.id));
+    if (endId) endOf.set(endId, fe.id);
+    const bodyNodes = nodes.filter(n => bodyIds.includes(n.id));
+    const bodyEdges = edges.filter(e => bodyIds.includes(e.source) && bodyIds.includes(e.target));
+    loops.set(fe.id, {
+      endId,
+      body: kahnOrder(bodyNodes, bodyEdges),
+      terminalEdges: edges.filter(e => e.target === endId && bodyIds.includes(e.source)),
+    });
   }
-  return null;
+
+  // Main DAG: loop bodies run inside their loop; the end node waits for its forEach
+  const mainEdges = edges
+    .filter(e => !loopOf.has(e.source) && !loopOf.has(e.target))
+    .concat([...endOf.entries()].map(([endId, feId]) => ({ source: feId, target: endId })));
+  const mainOrder = kahnOrder(nodes, mainEdges, new Set(loopOf.keys()));
+
+  return { nodes, edges, byId, mainOrder, loops, loopOf, endOf };
 }
 
-function getForEachSubgraphNodes(forEachNodeId: string, forEachEndNodeId: string, adjList: Record<string, string[]>, nodes: any[]): string[] {
-  const subgraphNodes: string[] = [];
-  const visited = new Set<string>();
-  const queue = [...(adjList[forEachNodeId] || [])];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    if (visited.has(current)) continue;
-    visited.add(current);
-    if (current === forEachEndNodeId) continue;
-    subgraphNodes.push(current);
-    for (const next of (adjList[current] || [])) {
-      if (!visited.has(next) && next !== forEachEndNodeId) queue.push(next);
-    }
-  }
-  return subgraphNodes;
-}
-
-function getEffectiveDataSources(nodeId: string, edges: any[], nodes: any[]): string[] {
-  const incomingEdges = edges.filter(e => e.target === nodeId);
+/** Upstream nodes whose output feeds this node (timers and branches pass data through; start has none) */
+function effectiveSources(nodeId: string, g: FlowGraph, seen = new Set<string>()): string[] {
+  if (seen.has(nodeId)) return [];
+  seen.add(nodeId);
   const result: string[] = [];
-  for (const edge of incomingEdges) {
-    const sourceNode = nodes.find(n => n.id === edge.source);
-    if (!sourceNode) { result.push(edge.source); continue; }
-    if (sourceNode.type === 'timer' || sourceNode.type === 'delay') {
-      result.push(...getEffectiveDataSources(sourceNode.id, edges, nodes));
-    } else if (sourceNode.type !== 'start') {
-      result.push(sourceNode.id);
-    }
+  for (const e of g.edges.filter(e => e.target === nodeId)) {
+    const src = g.byId.get(e.source);
+    if (!src) continue;
+    if (['timer', 'delay', 'conditionalBranch'].includes(src.type)) result.push(...effectiveSources(src.id, g, seen));
+    else if (src.type !== 'start') result.push(src.id);
   }
   return [...new Set(result)];
 }
 
-// ---------------------------------------------------------------------------
-// Template analysis helpers
-// ---------------------------------------------------------------------------
-
-function extractTemplatePlaceholders(value: any): string[] {
-  if (typeof value !== 'string') {
-    return extractTemplatePlaceholders(JSON.stringify(value ?? ''));
-  }
-  const matches = [...value.matchAll(/\{\{([^}]+)\}\}/g)];
-  return matches.map(m => m[1].trim());
-}
-
-function getUpstreamNodeIds(nodeId: string, edges: any[], nodes: any[]): Set<string> {
-  const upstream = new Set<string>();
+function upstreamIds(nodeId: string, g: FlowGraph): Set<string> {
+  const found = new Set<string>();
   const queue = [nodeId];
-  const visited = new Set<string>();
-  while (queue.length > 0) {
+  while (queue.length) {
     const current = queue.shift()!;
-    if (visited.has(current)) continue;
-    visited.add(current);
-    edges.filter(e => e.target === current).forEach(e => {
-      if (!visited.has(e.source)) {
-        upstream.add(e.source);
+    for (const e of g.edges.filter(e => e.target === current)) {
+      if (!found.has(e.source)) {
+        found.add(e.source);
         queue.push(e.source);
       }
+    }
+  }
+  return found;
+}
+
+/** Incoming edges that decide whether a node runs (a forEachEnd only depends on its loop) */
+function incomingForGuard(node: any, g: FlowGraph): Array<{ source: string; handle?: string }> {
+  const loopId = g.endOf.get(node.id);
+  if (loopId) return [{ source: loopId }];
+  return g.edges
+    .filter(e => e.target === node.id && g.byId.has(e.source))
+    .filter(e => g.loopOf.get(e.source) === g.loopOf.get(node.id) || e.source === g.loopOf.get(node.id))
+    .map(e => {
+      const src = g.byId.get(e.source);
+      return { source: e.source, handle: src?.type === 'conditionalBranch' && isBranchHandle(e.sourceHandle) ? e.sourceHandle : undefined };
     });
-  }
-  return upstream;
 }
 
-function isPlaceholderResolvable(placeholder: string, upstreamNodeIds: Set<string>, nodes: any[]): boolean {
-  const firstPart = placeholder.split('.')[0].trim();
-  if (['_item', '_index', '_total', 'item'].includes(firstPart)) return true;
-  return nodes.some(n => {
-    if (!upstreamNodeIds.has(n.id)) return false;
-    if (n.id === firstPart) return true;
-    if (n.data?.label && n.data.label.trim() === firstPart) return true;
-    if (n.type === 'variables') {
-      if (firstPart === 'Variables' || firstPart === 'variables') return true;
-      if (Array.isArray(n.data?.variables) && n.data.variables.some((v: any) => v && v.key === firstPart)) {
-        return true;
-      }
-    }
-    return false;
-  });
-}
-
-function detectInteractiveParams(fields: string[], nodeId: string, edges: any[], nodes: any[]): string[] {
-  const upstream = getUpstreamNodeIds(nodeId, edges, nodes);
-  const unresolvable = new Set<string>();
-  for (const field of fields) {
-    const placeholders = extractTemplatePlaceholders(field);
-    for (const ph of placeholders) {
-      if (!isPlaceholderResolvable(ph, upstream, nodes)) {
-        unresolvable.add(ph);
-      }
-    }
+/** A node may be skipped only when every one of its inputs can be inactive (same rule as the engine) */
+function computeMaybeSkipped(g: FlowGraph): Set<string> {
+  const maybe = new Set<string>();
+  const ordered = [...g.mainOrder.flatMap(n => (n.type === 'forEach' ? [n, ...(g.loops.get(n.id)?.body || [])] : [n]))];
+  for (const n of ordered) {
+    const incoming = incomingForGuard(n, g);
+    if (incoming.length > 0 && incoming.every(i => i.handle || maybe.has(i.source))) maybe.add(n.id);
   }
-  return [...unresolvable];
+  return maybe;
 }
 
 // ---------------------------------------------------------------------------
-// Python helper string generators
+// Templates and inputs
 // ---------------------------------------------------------------------------
 
-function templateToPython(template: string | undefined): string {
-  if (!template) return '""';
-  if (!template.includes('{{')) return JSON.stringify(template);
-  const exactMatch = template.trim().match(/^\{\{([^}]+)\}\}$/);
-  if (exactMatch) {
-    return contextAccessPython(exactMatch[1].trim());
-  }
-  return `resolve_template(context, ${JSON.stringify(template)})`;
+function placeholders(value: unknown): string[] {
+  const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  return [...text.matchAll(/\{\{([^}]+)\}\}/g)].map(m => m[1].trim());
 }
 
-function contextAccessPython(path: string): string {
-  const parts = path.split('.');
-  if (parts.length === 1) return `context.get(${JSON.stringify(parts[0])})`;
-  let acc = `context.get(${JSON.stringify(parts[0])}, {})`;
-  for (let i = 1; i < parts.length; i++) {
-    acc = `(${acc} or {}).get(${JSON.stringify(parts[i])})`;
-  }
-  return acc;
+/** Placeholders the flow itself never produces: they are asked for when the script runs */
+function externalPlaceholders(fields: unknown[], nodeId: string, g: FlowGraph): string[] {
+  const upstream = upstreamIds(nodeId, g);
+  const loopId = g.loopOf.get(nodeId);
+  const known = (first: string) => {
+    if (['_item', '_index', '_total', 'item', 'Variables', 'variables'].includes(first)) return true;
+    if (loopId && first === loopId) return true;
+    if (loopId && first === String(g.byId.get(loopId)?.data?.itemAlias || '').trim()) return true;
+    return g.nodes.some(n => {
+      if (!upstream.has(n.id)) return false;
+      if (n.id === first || String(n.data?.label || '').trim() === first) return true;
+      return n.type === 'variables' && Array.isArray(n.data?.variables) && n.data.variables.some((v: any) => v?.key === first);
+    });
+  };
+  const out = new Set<string>();
+  for (const f of fields) for (const ph of placeholders(f)) if (!known(ph.split(/[.[]/)[0].trim())) out.add(ph);
+  return [...out];
 }
 
-/** Sanitize a node id to always produce a valid, safe Python variable name */
-function pyVarName(nodeId: string): string {
-  const sanitized = nodeId.replace(/[^a-zA-Z0-9_]/g, '_');
-  return `node_${sanitized}`;
-}
-
-function indent(code: string, spaces: number): string {
-  const pad = ' '.repeat(spaces);
-  return code.split('\n').map(line => (line.trim() === '' ? '' : pad + line)).join('\n');
-}
-
-// ---------------------------------------------------------------------------
-// Node code generators
-// ---------------------------------------------------------------------------
-
-function generateStartNode(node: any, stepNum: number, total: number): string {
-  return [
-    `# === [${stepNum}/${total}] Nodo: start - ${node.data?.label || node.id} ===`,
-    `logger.info("[${stepNum}/${total}] Inicio del flujo")`,
-    `context[${JSON.stringify(node.id)}] = {"msg": "Flow started"}`,
-    ''
-  ].join('\n');
-}
-
-function generateHttpNode(node: any, stepNum: number, total: number, edges: any[], nodes: any[]): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const varName = pyVarName(node.id);
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: ${node.type} - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Ejecutando peticion HTTP: ${label}")`);
-
-  let method = (data.method || 'GET').toUpperCase();
-  if (node.type === 'httpPost') method = 'POST';
-
-  const endpoint = data.endpoint || '';
-  const headers = data.headers || '';
-  const body = data.body || '';
-  const params = data.params || '';
-  const authType = data.authType || '';
-  const extractPath = data.extractPath || '';
-  const iterateOver = data.iterateOver || '';
-  const iterateMode = data.iterateMode || false;
-
-  // Detect interactive params (variables that cannot be resolved upstream)
-  const fieldsToCheck = [endpoint, headers, body, params].filter(Boolean);
-  const interactiveParams = detectInteractiveParams(fieldsToCheck, node.id, edges, nodes);
-  for (const ph of interactiveParams) {
-    const safeParamVar = `${varName}_input_${ph.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-    lines.push(`${safeParamVar} = input("Ingrese valor para '${ph}': ")`);
-    lines.push(`context[${JSON.stringify(ph.split('.')[0])}] = context.get(${JSON.stringify(ph.split('.')[0])}, {})`);
-    const parts = ph.split('.');
-    if (parts.length === 1) {
-      lines.push(`context[${JSON.stringify(parts[0])}] = ${safeParamVar}`);
-    }
-  }
-
-  // Base headers dict
-  lines.push(`${varName}_headers = {"Content-Type": "application/json"}`);
-  if (headers && headers.trim()) {
-    lines.push(`try:`);
-    lines.push(`    _custom_hdrs = json.loads(resolve_template(context, ${JSON.stringify(headers)}))`);
-    lines.push(`    if isinstance(_custom_hdrs, dict): ${varName}_headers.update(_custom_hdrs)`);
-    lines.push(`except Exception: pass`);
-  }
-
-  // Auth
-  if (authType === 'bearer') {
-    const token = data.authToken || '';
-    lines.push(`${varName}_token = ${templateToPython(token)} or os.getenv("HTTP_BEARER_TOKEN", "")`);
-    lines.push(`if ${varName}_token:`);
-    lines.push(`    ${varName}_headers["Authorization"] = f"Bearer {${varName}_token}"`);
-  } else if (authType === 'basic') {
-    const user = data.authUsername || '';
-    const pwd = data.authPassword || '';
-    lines.push(`import base64 as _b64`);
-    lines.push(`${varName}_basic_user = ${templateToPython(user)} or os.getenv("HTTP_BASIC_USER", "")`);
-    lines.push(`${varName}_basic_pwd = ${templateToPython(pwd)} or os.getenv("HTTP_BASIC_PASSWORD", "")`);
-    lines.push(`if ${varName}_basic_user:`);
-    lines.push(`    ${varName}_headers["Authorization"] = "Basic " + _b64.b64encode(f"{${varName}_basic_user}:{${varName}_basic_pwd}".encode()).decode()`);
-  }
-
-  const hasBody = ['POST', 'PUT', 'PATCH'].includes(method) && body && body.trim();
-  const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
-  const cleanIterOver = (iterateOver || '').trim();
-  const iterExpr = cleanIterOver && cleanIterOver !== '{{ID_NODO}}' && !cleanIterOver.startsWith('{{_item') ? cleanIterOver : null;
-  const needsIteration = iterExpr || iterateMode;
-
-  if (needsIteration) {
-    lines.push(`${varName}_items = None`);
-    if (iterExpr) {
-      lines.push(`try:`);
-      lines.push(`    ${varName}_items = resolve_template(context, ${JSON.stringify(iterExpr)})`);
-      lines.push(`except Exception: pass`);
-    }
-    lines.push(`if not isinstance(${varName}_items, list) or len(${varName}_items) == 0:`);
-    lines.push(`    for _uid in ${JSON.stringify(upstreamIds)}:`);
-    lines.push(`        _val = context.get(_uid)`);
-    lines.push(`        if isinstance(_val, list) and len(_val) > 0:`);
-    lines.push(`            ${varName}_items = _val`);
-    lines.push(`            break`);
-    lines.push(`if not isinstance(${varName}_items, list):`);
-    lines.push(`    ${varName}_items = next((v for v in context.values() if isinstance(v, list) and len(v) > 0), [None])`);
-
-    lines.push(`${varName}_results = []`);
-    lines.push(`for _iter_idx, _iter_item in enumerate(${varName}_items):`);
-    lines.push(`    _iter_context = {**context, "_item": _iter_item, "_index": _iter_idx, "_total": len(${varName}_items)}`);
-    lines.push(`    _iter_headers = dict(${varName}_headers)`);
-    lines.push(`    _iter_url = resolve_template(_iter_context, ${JSON.stringify(endpoint)})`);
-
-    if (params && params.trim()) {
-      lines.push(`    _iter_params = None`);
-      lines.push(`    try:`);
-      lines.push(`        _p_raw = resolve_template(_iter_context, ${JSON.stringify(params)})`);
-      lines.push(`        _iter_params = json.loads(_p_raw) if isinstance(_p_raw, str) else _p_raw`);
-      lines.push(`    except Exception: pass`);
-    }
-
-    if (hasBody) {
-      lines.push(`    _iter_body = None`);
-      lines.push(`    try:`);
-      lines.push(`        _b_raw = resolve_template(_iter_context, ${JSON.stringify(body)})`);
-      lines.push(`        if isinstance(_b_raw, str):`);
-      lines.push(`            try: _iter_body = json.loads(_b_raw)`);
-      lines.push(`            except Exception: _iter_body = _b_raw`);
-      lines.push(`        else: _iter_body = _b_raw`);
-      lines.push(`    except Exception: pass`);
-    }
-
-    lines.push(`    try:`);
-    lines.push(`        _resp = requests.request(`);
-    lines.push(`            ${JSON.stringify(method)},`);
-    lines.push(`            _iter_url,`);
-    if (params && params.trim()) lines.push(`            params=_iter_params,`);
-    lines.push(`            headers=_iter_headers,`);
-    if (hasBody) {
-      lines.push(`            json=_iter_body if isinstance(_iter_body, (dict, list)) else None,`);
-      lines.push(`            data=_iter_body if isinstance(_iter_body, str) else None,`);
-    }
-    lines.push(`            timeout=30`);
-    lines.push(`        )`);
-    lines.push(`        _resp.raise_for_status()`);
-    lines.push(`        try:`);
-    lines.push(`            _resp_data = _resp.json()`);
-    lines.push(`        except Exception:`);
-    lines.push(`            _resp_data = {"text": _resp.text, "status_code": _resp.status_code}`);
-
-    if (extractPath) {
-      lines.push(`        for _k in ${JSON.stringify(extractPath.split('.'))}:`);
-      lines.push(`            _resp_data = _resp_data.get(_k, _resp_data) if isinstance(_resp_data, dict) else _resp_data`);
-    }
-    lines.push(`        ${varName}_results.append(_resp_data)`);
-    lines.push(`        logger.info(f"  [{_iter_idx+1}/{len(${varName}_items)}] OK - Status {_resp.status_code}")`);
-    lines.push(`    except Exception as e:`);
-    lines.push(`        logger.error(f"  [{_iter_idx+1}] ERROR: {e}")`);
-    lines.push(`        sys.exit(1)`);
-
-    lines.push(`context[${JSON.stringify(node.id)}] = ${varName}_results`);
-  } else {
-    // Single execution
-    lines.push(`_req_url = resolve_template(context, ${JSON.stringify(endpoint)})`);
-    if (params && params.trim()) {
-      lines.push(`_req_params = None`);
-      lines.push(`try:`);
-      lines.push(`    _p_raw = resolve_template(context, ${JSON.stringify(params)})`);
-      lines.push(`    _req_params = json.loads(_p_raw) if isinstance(_p_raw, str) else _p_raw`);
-      lines.push(`except Exception: pass`);
-    }
-
-    if (hasBody) {
-      lines.push(`_req_body = None`);
-      lines.push(`try:`);
-      lines.push(`    _b_raw = resolve_template(context, ${JSON.stringify(body)})`);
-      lines.push(`    if isinstance(_b_raw, str):`);
-      lines.push(`        try: _req_body = json.loads(_b_raw)`);
-      lines.push(`        except Exception: _req_body = _b_raw`);
-      lines.push(`    else: _req_body = _b_raw`);
-      lines.push(`except Exception: pass`);
-    }
-
-    lines.push(`try:`);
-    lines.push(`    ${varName}_resp = requests.request(`);
-    lines.push(`        ${JSON.stringify(method)},`);
-    lines.push(`        _req_url,`);
-    if (params && params.trim()) lines.push(`        params=_req_params,`);
-    lines.push(`        headers=${varName}_headers,`);
-    if (hasBody) {
-      lines.push(`        json=_req_body if isinstance(_req_body, (dict, list)) else None,`);
-      lines.push(`        data=_req_body if isinstance(_req_body, str) else None,`);
-    }
-    lines.push(`        timeout=30`);
-    lines.push(`    )`);
-    lines.push(`    ${varName}_resp.raise_for_status()`);
-    lines.push(`    try:`);
-    lines.push(`        ${varName}_data = ${varName}_resp.json()`);
-    lines.push(`    except Exception:`);
-    lines.push(`        ${varName}_data = {"text": ${varName}_resp.text, "status_code": ${varName}_resp.status_code}`);
-
-    if (extractPath) {
-      lines.push(`    for _k in ${JSON.stringify(extractPath.split('.'))}:`);
-      lines.push(`        ${varName}_data = ${varName}_data.get(_k, ${varName}_data) if isinstance(${varName}_data, dict) else ${varName}_data`);
-    }
-    lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_data`);
-    lines.push(`    logger.info(f"  OK - Status {${varName}_resp.status_code}")`);
-    lines.push(`except Exception as e:`);
-    lines.push(`    logger.error(f"  ERROR en ${label}: {e}")`);
-    lines.push(`    sys.exit(1)`);
-  }
-
-  lines.push('');
-  return lines.join('\n');
-}
-
-function generateQueryNode(
-  node: any,
-  stepNum: number,
-  total: number,
-  queryInfo: TranspilerQueryInfo | undefined,
-  edges: any[],
-  nodes: any[],
-  flowName: string,
-  sqlFiles: TranspilerSqlFile[]
-): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const varName = pyVarName(node.id);
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: query - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Ejecutando consulta SQL: ${label}")`);
-
-  if (!queryInfo || !queryInfo.sql_text) {
-    lines.push(`# ADVERTENCIA: No se encontro informacion de la consulta SQL configurada en este nodo.`);
-    lines.push(`context[${JSON.stringify(node.id)}] = []`);
-    lines.push('');
-    return lines.join('\n');
-  }
-
-  // Create individual SQL file for this query in the queries/ directory
-  const querySlug = (label || queryInfo.name || 'query')
-    .toLowerCase()
-    .replace(/\s+/g, '_')
-    .replace(/[^a-z0-9_]/g, '');
-  const sqlFileName = `${String(stepNum).padStart(2, '0')}_${querySlug}.sql`;
-
-  const connSummary = (queryInfo.connections || [])
-    .map(c => `${c.name} (${c.database_name} @ ${c.host})`)
-    .join(', ') || 'Default';
-
-  sqlFiles.push({
-    fileName: sqlFileName,
-    queryName: queryInfo.name || label,
-    nodeLabel: label,
-    sql: `-- ==============================================================================
--- Flujo: ${flowName}
--- Paso: [${stepNum}/${total}]
--- Nodo: ${label}
--- Consulta: ${queryInfo.name}
--- Base de Datos: ${connSummary}
--- Generado por OrquestaFlow
--- ==============================================================================
-
-${queryInfo.sql_text}
-`
-  });
-
-  let queryParamMapping: Record<string, string> = {};
-  if (data.queryParams && data.queryParams.trim()) {
-    try { queryParamMapping = JSON.parse(data.queryParams); } catch { }
-  }
-
-  // Detect #param_name in SQL
-  const paramMatches = [...queryInfo.sql_text.matchAll(/(?:^|[\s\(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g)];
-  const sqlParams = [...new Set(paramMatches.map(m => m[1]))];
-
-  const upstream = getUpstreamNodeIds(node.id, edges, nodes);
-  const interactiveParams: string[] = [];
-  for (const p of sqlParams) {
-    const mapping = queryParamMapping[p];
-    if (!mapping) {
-      interactiveParams.push(p);
-    } else {
-      const placeholders = extractTemplatePlaceholders(mapping);
-      const unresolvable = placeholders.filter(ph => !isPlaceholderResolvable(ph, upstream, nodes));
-      if (unresolvable.length > 0) interactiveParams.push(p);
-    }
-  }
-
-  for (const p of interactiveParams) {
-    lines.push(`${varName}_param_${p} = input("Ingrese valor para parametro SQL '${p}': ")`);
-  }
-
-  lines.push(`${varName}_sql_params = {}`);
-  for (const p of sqlParams) {
-    if (interactiveParams.includes(p)) {
-      lines.push(`${varName}_sql_params[${JSON.stringify(p)}] = ${varName}_param_${p}`);
-    } else {
-      const mapping = queryParamMapping[p];
-      lines.push(`${varName}_sql_params[${JSON.stringify(p)}] = ${templateToPython(mapping)}`);
-    }
-  }
-
-  // Load SQL query from queries/ folder with fallback to inlined SQL
-  lines.push(`# Cargar consulta SQL (${queryInfo.name}) desde archivo queries/${sqlFileName} o fallback`);
-  lines.push(`_sql_file = os.path.join(os.path.dirname(__file__), "queries", "${sqlFileName}")`);
-  lines.push(`if os.path.exists(_sql_file):`);
-  lines.push(`    with open(_sql_file, "r", encoding="utf-8") as _f:`);
-  lines.push(`        _raw_sql = _f.read()`);
-  lines.push(`else:`);
-  lines.push(`    _raw_sql = ${JSON.stringify(queryInfo.sql_text)}`);
-  lines.push(`_sql_exec = re.sub(r'#param_[a-zA-Z_][a-zA-Z0-9_]*\\b', '?', _raw_sql)`);
-
-  const connections = queryInfo.connections && queryInfo.connections.length > 0
-    ? queryInfo.connections
-    : [{
-      id: 'default',
-      name: 'SQL Server',
-      host: 'localhost',
-      database_name: '',
-      port: 1433,
-      env_credential_key: 'SQLSERVER',
-      driver: 'ODBC Driver 17 for SQL Server'
-    }];
-
-  if (connections.length === 1) {
-    const conn = connections[0];
-    const envKey = (conn.env_credential_key || 'SQLSERVER').toUpperCase();
-    const port = conn.port || 1433;
-    const driver = conn.driver || 'ODBC Driver 17 for SQL Server';
-
-    lines.push(`# Configuracion de conexion para: ${conn.name} (${envKey})`);
-    lines.push(`_driver_${varName} = os.getenv("DB_DRIVER_${envKey}", "${driver}")`);
-    lines.push(`_host_${varName} = os.getenv("DB_HOST_${envKey}", "${conn.host}")`);
-    lines.push(`_port_${varName} = os.getenv("DB_PORT_${envKey}", "${port}")`);
-    lines.push(`_db_${varName} = os.getenv("DB_NAME_${envKey}", "${conn.database_name}")`);
-    lines.push(`_user_${varName} = os.getenv("DB_USER_${envKey}", os.getenv("DB_USER_DEFAULT", ""))`);
-    lines.push(`_pwd_${varName} = os.getenv("DB_PASSWORD_${envKey}", os.getenv("DB_PASSWORD_DEFAULT", ""))`);
-    lines.push(`_custom_conn_${varName} = os.getenv("DB_CONN_STR_${envKey}", "").strip()`);
-    lines.push(`if _custom_conn_${varName} and "UID=;" not in _custom_conn_${varName} and "PWD=;" not in _custom_conn_${varName}:`);
-    lines.push(`    ${varName}_conn_str = _custom_conn_${varName}`);
-    lines.push(`else:`);
-    lines.push(`    ${varName}_conn_str = (`);
-    lines.push(`        f"DRIVER={{{_driver_${varName}}}};"`);
-    lines.push(`        f"SERVER={_host_${varName}},{_port_${varName}};"`);
-    lines.push(`        f"DATABASE={_db_${varName}};"`);
-    lines.push(`        f"UID={_user_${varName}};"`);
-    lines.push(`        f"PWD={_pwd_${varName}}"`);
-    lines.push(`    )`);
-
-    lines.push(`try:`);
-    lines.push(`    import pyodbc`);
-    lines.push(`    ${varName}_db = pyodbc.connect(${varName}_conn_str)`);
-    lines.push(`    ${varName}_cursor = ${varName}_db.cursor()`);
-
-    if (sqlParams.length === 0) {
-      lines.push(`    ${varName}_cursor.execute(_sql_exec)`);
-    } else {
-      const paramList = `[${sqlParams.map(p => `${varName}_sql_params[${JSON.stringify(p)}]`).join(', ')}]`;
-      lines.push(`    ${varName}_cursor.execute(_sql_exec, ${paramList})`);
-    }
-
-    lines.push(`    ${varName}_cols = [d[0] for d in ${varName}_cursor.description]`);
-    lines.push(`    ${varName}_rows = [dict(zip(${varName}_cols, r)) for r in ${varName}_cursor.fetchall()]`);
-
-    const extractMode = data.extractMode || 'all';
-    if (extractMode === 'selected_columns') {
-      const cols = (data.extractColumns || '').split(',').map((c: string) => c.trim()).filter(Boolean);
-      lines.push(`    ${varName}_rows = [{k: r[k] for k in ${JSON.stringify(cols)} if k in r} for r in ${varName}_rows]`);
-    }
-
-    lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_rows`);
-    lines.push(`    logger.info(f"  OK - {len(${varName}_rows)} filas obtenidas")`);
-    lines.push(`    ${varName}_db.close()`);
-    lines.push(`except Exception as e:`);
-    lines.push(`    logger.error(f"  ERROR en query '${label}': {e}")`);
-    lines.push(`    sys.exit(1)`);
-  } else {
-    // Multi-connection
-    lines.push(`${varName}_all_rows = []`);
-    for (const conn of connections) {
-      const envKey = (conn.env_credential_key || 'SQLSERVER').toUpperCase();
-      const port = conn.port || 1433;
-      const driver = conn.driver || 'ODBC Driver 17 for SQL Server';
-
-      lines.push(`# Conexion: ${conn.name} (${envKey})`);
-      lines.push(`try:`);
-      lines.push(`    import pyodbc`);
-      lines.push(`    _driver = os.getenv("DB_DRIVER_${envKey}", "${driver}")`);
-      lines.push(`    _host = os.getenv("DB_HOST_${envKey}", "${conn.host}")`);
-      lines.push(`    _port = os.getenv("DB_PORT_${envKey}", "${port}")`);
-      lines.push(`    _db_name = os.getenv("DB_NAME_${envKey}", "${conn.database_name}")`);
-      lines.push(`    _user = os.getenv("DB_USER_${envKey}", os.getenv("DB_USER_DEFAULT", ""))`);
-      lines.push(`    _pwd = os.getenv("DB_PASSWORD_${envKey}", os.getenv("DB_PASSWORD_DEFAULT", ""))`);
-      lines.push(`    _custom_conn = os.getenv("DB_CONN_STR_${envKey}", "").strip()`);
-      lines.push(`    if _custom_conn and "UID=;" not in _custom_conn and "PWD=;" not in _custom_conn:`);
-      lines.push(`        _conn_str = _custom_conn`);
-      lines.push(`    else:`);
-      lines.push(`        _conn_str = (`);
-      lines.push(`            f"DRIVER={{{_driver}}};"`);
-      lines.push(`            f"SERVER={_host},{_port};"`);
-      lines.push(`            f"DATABASE={_db_name};"`);
-      lines.push(`            f"UID={_user};"`);
-      lines.push(`            f"PWD={_pwd}"`);
-      lines.push(`        )`);
-      lines.push(`    _db = pyodbc.connect(_conn_str)`);
-      lines.push(`    _cursor = _db.cursor()`);
-
-      if (sqlParams.length === 0) {
-        lines.push(`    _cursor.execute(_sql_exec)`);
-      } else {
-        const paramList = `[${sqlParams.map(p => `${varName}_sql_params[${JSON.stringify(p)}]`).join(', ')}]`;
-        lines.push(`    _cursor.execute(_sql_exec, ${paramList})`);
-      }
-
-      lines.push(`    _cols = [d[0] for d in _cursor.description]`);
-      lines.push(`    _rows = [dict(zip(_cols, r)) for r in _cursor.fetchall()]`);
-      lines.push(`    ${varName}_all_rows.extend(_rows)`);
-      lines.push(`    logger.info(f"  OK [${conn.name}] - {len(_rows)} filas")`);
-      lines.push(`    _db.close()`);
-      lines.push(`except Exception as e:`);
-      lines.push(`    logger.error(f"  ERROR en query '${label}' [${conn.name}]: {e}")`);
-      lines.push(`    sys.exit(1)`);
-    }
-    lines.push(`context[${JSON.stringify(node.id)}] = ${varName}_all_rows`);
-  }
-
-  lines.push('');
-  return lines.join('\n');
-}
-
-function generateExportNode(node: any, stepNum: number, total: number, edges: any[], nodes: any[]): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const varName = pyVarName(node.id);
-  const format = (data.format || 'CSV').toUpperCase();
-  const rawFileName = data.fileName || `exportacion_${node.id}`;
-  const dataSource = data.dataSource || '';
-  const exportMode = data.exportMode || 'single';
-  const columns = Array.isArray(data.columns) ? data.columns : [];
-  const joins = Array.isArray(data.joins) ? data.joins : [];
-  const headerColor = data.headerColor || '#1E293B';
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: export - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Exportando datos: ${label}")`);
-  lines.push(`try:`);
-
-  if (dataSource && dataSource.trim()) {
-    const exactMatch = dataSource.match(/^\{\{(.+)\}\}$/);
-    const pathStr = exactMatch ? exactMatch[1] : dataSource;
-    lines.push(`    ${varName}_raw = ${contextAccessPython(pathStr)} or []`);
-  } else {
-    const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
-    if (upstreamIds.length > 0) {
-      lines.push(`    ${varName}_raw = context.get(${JSON.stringify(upstreamIds[0])}, [])`);
-    } else {
-      lines.push(`    ${varName}_raw = next((v for k, v in reversed(list(context.items())) if k != "start" and isinstance(v, list)), [])`);
-    }
-  }
-
-  lines.push(`    import pandas as _pd`);
-
-  const fileNamePy = templateToPython(rawFileName);
-  const isExcel = format === 'EXCEL' || format === 'XLSX';
-  const ext = isExcel ? '.xlsx' : '.csv';
-
-  lines.push(`    ${varName}_filename = str(${fileNamePy}).rstrip(".xlsx").rstrip(".csv") + "${ext}"`);
-
-  if (exportMode === 'multi' && isExcel) {
-    const multiSheetConfig = (data.multiSheetConfig as Record<string, string>) || {};
-    const nodeIds = Object.keys(multiSheetConfig);
-    lines.push(`    with _pd.ExcelWriter(${varName}_filename, engine="openpyxl") as _writer:`);
-    if (nodeIds.length === 0) {
-      lines.push(`        _pd.DataFrame([{"Mensaje": "Sin datos"}]).to_excel(_writer, sheet_name="Datos Vacio", index=False)`);
-    } else {
-      for (const nid of nodeIds) {
-        const sheetName = (multiSheetConfig[nid] || `Hoja_${nid.substring(0, 5)}`).substring(0, 31);
-        const uVar = pyVarName(nid);
-        lines.push(`        _sheet_raw_${uVar} = context.get(${JSON.stringify(nid)}, [])`);
-        lines.push(`        _sheet_records_${uVar} = flatten_rows(_sheet_raw_${uVar})`);
-        lines.push(`        _sheet_df_${uVar} = _pd.DataFrame(_sheet_records_${uVar}) if _sheet_records_${uVar} else _pd.DataFrame([{"Mensaje": "Sin registros"}])`);
-        lines.push(`        _sheet_df_${uVar}.to_excel(_writer, sheet_name=${JSON.stringify(sheetName)}, index=False)`);
-      }
-    }
-    lines.push(`    format_excel_file(${varName}_filename, header_color=${JSON.stringify(headerColor)})`);
-    lines.push(`    ${varName}_total_records = sum(len(flatten_rows(context.get(nid, []))) for nid in ${JSON.stringify(nodeIds)})`);
-    lines.push(`    context[${JSON.stringify(node.id)}] = {"filePath": ${varName}_filename, "records": ${varName}_total_records, "success": True}`);
-    lines.push(`    logger.info(f"  Archivo guardado: {${varName}_filename} (Multi-hoja)")`);
-  } else {
-    // Single sheet mode
-    lines.push(`    ${varName}_records = process_export_data(${varName}_raw, context, columns=${JSON.stringify(columns)}, joins=${JSON.stringify(joins)})`);
-    if (columns.length > 0) {
-      const colHeaders = columns.map((c: any) => c.header).filter(Boolean);
-      lines.push(`    if len(${varName}_records) == 0:`);
-      lines.push(`        ${varName}_df = _pd.DataFrame(columns=${JSON.stringify(colHeaders)})`);
-      lines.push(`    else:`);
-      lines.push(`        ${varName}_df = _pd.DataFrame(${varName}_records)`);
-      lines.push(`        _cols_order = [c for c in ${JSON.stringify(colHeaders)} if c in ${varName}_df.columns]`);
-      lines.push(`        if _cols_order:`);
-      lines.push(`            ${varName}_df = ${varName}_df[_cols_order]`);
-    } else {
-      lines.push(`    ${varName}_df = _pd.DataFrame(${varName}_records)`);
-    }
-
-    if (isExcel) {
-      lines.push(`    ${varName}_df.to_excel(${varName}_filename, index=False, engine="openpyxl")`);
-      lines.push(`    format_excel_file(${varName}_filename, header_color=${JSON.stringify(headerColor)})`);
-    } else {
-      lines.push(`    ${varName}_df.to_csv(${varName}_filename, index=False, encoding="utf-8-sig")`);
-    }
-
-    lines.push(`    context[${JSON.stringify(node.id)}] = {"filePath": ${varName}_filename, "records": len(${varName}_df), "success": True}`);
-    lines.push(`    logger.info(f"  Archivo guardado: {${varName}_filename} ({len(${varName}_df)} registros)")`);
-  }
-
-  lines.push(`except Exception as e:`);
-  lines.push(`    logger.error(f"  ERROR en export '${label}': {e}")`);
-  lines.push(`    sys.exit(1)`);
-  lines.push('');
-  return lines.join('\n');
-}
-
-function generateDataSourceNode(node: any, stepNum: number, total: number, edges: any[], nodes: any[]): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const varName = pyVarName(node.id);
-  const mode = data.mode || 'file';
-  const nodeIndex = stepNum;
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: dataSource - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Cargando datos: ${label}")`);
-
-  if (mode === 'merge') {
-    const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
-    lines.push(`# Modo merge: unifica datos de nodos upstream por llave comun (id/code)`);
-    lines.push(`${varName}_frames = []`);
-    for (const uid of upstreamIds) {
-      const uVar = pyVarName(uid);
-      lines.push(`_val_${uVar} = context.get(${JSON.stringify(uid)}, [])`);
-      lines.push(`if _val_${uVar}:`);
-      lines.push(`    import pandas as _pd`);
-      lines.push(`    _rows_${uVar} = normalize_for_export(_val_${uVar})`);
-      lines.push(`    if _rows_${uVar}:`);
-      lines.push(`        ${varName}_frames.append(_pd.DataFrame(_rows_${uVar}))`);
-    }
-    lines.push(`if len(${varName}_frames) == 0:`);
-    lines.push(`    context[${JSON.stringify(node.id)}] = []`);
-    lines.push(`else:`);
-    lines.push(`    import pandas as _pd`);
-    lines.push(`    ${varName}_result = ${varName}_frames[0]`);
-    lines.push(`    for _other_df in ${varName}_frames[1:]:`);
-    lines.push(`        _left_cols = set(${varName}_result.columns.str.lower())`);
-    lines.push(`        _right_cols = set(_other_df.columns.str.lower())`);
-    lines.push(`        _common = _left_cols & _right_cols`);
-    lines.push(`        _best_key = next((c for c in _common if 'id' in c or 'code' in c), next(iter(_common), None))`);
-    lines.push(`        if _best_key:`);
-    lines.push(`            _left_key = next(c for c in ${varName}_result.columns if c.lower() == _best_key)`);
-    lines.push(`            _right_key = next(c for c in _other_df.columns if c.lower() == _best_key)`);
-    lines.push(`            ${varName}_result = ${varName}_result.merge(_other_df, left_on=_left_key, right_on=_right_key, how="left")`);
-    lines.push(`        else:`);
-    lines.push(`            ${varName}_result = _pd.concat([${varName}_result, _other_df], axis=1)`);
-    lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_result.to_dict(orient="records")`);
-    lines.push(`    logger.info(f"  OK - {len(${varName}_result)} registros unificados")`);
-  } else {
-    // File mode
-    const rawFilePath = data.filePath || '';
-    const envKey = label.toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_]/g, '');
-    lines.push(`# El archivo puede pasarse como argumento CLI o variable de entorno FILE_PATH_${envKey}`);
-    if (rawFilePath) {
-      lines.push(`${varName}_file = os.getenv("FILE_PATH_${envKey}", sys.argv[${nodeIndex}] if len(sys.argv) > ${nodeIndex} else ${JSON.stringify(rawFilePath)})`);
-    } else {
-      lines.push(`${varName}_file = os.getenv("FILE_PATH_${envKey}", sys.argv[${nodeIndex}] if len(sys.argv) > ${nodeIndex} else None)`);
-      lines.push(`if not ${varName}_file:`);
-      lines.push(`    ${varName}_file = input("Ingrese la ruta del archivo para '${label}': ")`);
-    }
-    lines.push(`try:`);
-    lines.push(`    import pandas as _pd`);
-    lines.push(`    if ${varName}_file.lower().endswith(('.xlsx', '.xls')):`);
-    const sheetName = data.sheetName ? JSON.stringify(data.sheetName) : 'None';
-    lines.push(`        ${varName}_df = _pd.read_excel(${varName}_file, sheet_name=${sheetName})`);
-    lines.push(`    else:`);
-    lines.push(`        ${varName}_df = _pd.read_csv(${varName}_file, encoding="utf-8-sig")`);
-    lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_df.to_dict(orient="records")`);
-    lines.push(`    logger.info(f"  OK - {len(${varName}_df)} registros cargados desde {${varName}_file}")`);
-    lines.push(`except Exception as e:`);
-    lines.push(`    logger.error(f"  ERROR cargando archivo '${label}': {e}")`);
-    lines.push(`    sys.exit(1)`);
-  }
-
-  lines.push('');
-  return lines.join('\n');
-}
-
-function generateDataListNode(node: any, stepNum: number, total: number): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: dataList - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Cargando lista de datos: ${label}")`);
-
-  const itemsStr = data.items || '[]';
-  let itemsPython = '[]';
+function parseJsonMaybe(raw: unknown): { ok: boolean; value: any } {
+  if (raw === undefined || raw === null || raw === '') return { ok: false, value: undefined };
+  if (typeof raw !== 'string') return { ok: true, value: raw };
   try {
-    const parsed = typeof itemsStr === 'string' ? JSON.parse(itemsStr) : itemsStr;
-    itemsPython = JSON.stringify(parsed, null, 2);
+    return { ok: true, value: JSON.parse(raw) };
   } catch {
-    itemsPython = '[]';
+    return { ok: false, value: raw };
   }
-
-  lines.push(`context[${JSON.stringify(node.id)}] = ${itemsPython}`);
-  lines.push('');
-  return lines.join('\n');
 }
 
-function getPythonPresetExpr(val: any): { isDynamic: boolean; pyExpr: string } {
-  if (val === undefined || val === null) {
-    return { isDynamic: false, pyExpr: '""' };
-  }
-  if (typeof val === 'string') {
-    const trimmed = val.trim();
-    const lower = trimmed.toLowerCase();
-    if (lower === '$today' || lower === '$today_ymd' || lower === '$hoy') {
-      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y%m%d")' };
-    }
-    if (lower === '$today_iso' || lower === '$hoy_iso') {
-      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y-%m-%d")' };
-    }
-    if (lower === '$yesterday' || lower === '$yesterday_ymd' || lower === '$ayer') {
-      return { isDynamic: true, pyExpr: '(datetime.now() - timedelta(days=1)).strftime("%Y%m%d")' };
-    }
-    if (lower === '$yesterday_iso' || lower === '$ayer_iso') {
-      return { isDynamic: true, pyExpr: '(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")' };
-    }
-    if (lower === '$month_start' || lower === '$inicio_mes') {
-      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y%m01")' };
-    }
-    if (lower === '$month_start_iso' || lower === '$inicio_mes_iso') {
-      return { isDynamic: true, pyExpr: 'datetime.now().strftime("%Y-%m-01")' };
-    }
-    if (lower === '$now_timestamp' || lower === '$timestamp') {
-      return { isDynamic: true, pyExpr: 'int(time.time() * 1000)' };
-    }
-    if (lower === '$now_iso') {
-      return { isDynamic: true, pyExpr: 'datetime.now().isoformat()' };
-    }
-    if (trimmed.includes('{{')) {
-      return { isDynamic: true, pyExpr: `resolve_template(context, ${JSON.stringify(trimmed)})` };
-    }
-    return { isDynamic: false, pyExpr: JSON.stringify(trimmed) };
-  }
-  if (typeof val === 'number' || typeof val === 'boolean') {
-    return { isDynamic: false, pyExpr: JSON.stringify(val) };
-  }
-  if (typeof val === 'object') {
-    return { isDynamic: false, pyExpr: JSON.stringify(JSON.stringify(val)) };
-  }
-  return { isDynamic: false, pyExpr: JSON.stringify(String(val)) };
+function readSeconds(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function generateVariablesNode(node: any, stepNum: number, total: number): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const varDictName = `_vars_${pyVarName(node.id)}`;
+// ---------------------------------------------------------------------------
+// Code generation
+// ---------------------------------------------------------------------------
 
-  lines.push(`# === [${stepNum}/${total}] Nodo: variables - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Inicializando variables: ${label}")`);
-  lines.push(`${varDictName} = {}`);
+interface EnvEntry {
+  name: string;
+  value?: string;
+  comment?: string;
+}
 
-  let varList: Array<{ key: string; type: string; value: any; description?: string }> = [];
-  if (Array.isArray(data.variables) && data.variables.length > 0) {
-    varList = data.variables.filter((v: any) => v && v.key && String(v.key).trim() !== '');
-  } else if (data.rawJson && typeof data.rawJson === 'string' && data.rawJson.trim() !== '') {
+interface StepInfo {
+  node: any;
+  number: number;
+  fn: string;
+  kind: string;
+}
+
+class Generator {
+  readonly imports = new Set<string>(['node', 'run', 'run_main', 'start_flow', 'finish_flow']);
+  readonly sqlFiles: TranspilerSqlFile[] = [];
+  readonly jsFiles: TranspilerJsFile[] = [];
+  readonly scriptFiles: TranspilerScriptFile[] = [];
+  readonly env = new Map<string, EnvEntry[]>(); // section -> entries
+  readonly databases = new Map<string, { name: string; host: string; database: string; port: number; driver: string }>();
+
+  /** .env key of a connection: its credential key, or its name when it has none */
+  connectionKey(c: TranspilerConnectionInfo): string {
+    const raw = String(c.env_credential_key || '').trim();
+    return (raw && raw.toUpperCase() !== 'NONE' ? raw.toUpperCase().replace(/[^A-Z0-9_]/g, '_') : envKey(c.name)) || 'SQLSERVER';
+  }
+  readonly steps = new Map<string, StepInfo>();
+  readonly requirements = new Set<string>(['python-dotenv>=1.0.0']);
+
+  constructor(readonly flowName: string, readonly g: FlowGraph, readonly ctx: TranspilerContext) {}
+
+  use(...names: string[]) {
+    names.forEach(n => this.imports.add(n));
+  }
+
+  addEnv(section: string, entry: EnvEntry) {
+    const list = this.env.get(section) || [];
+    if (!list.some(e => e.name === entry.name)) list.push(entry);
+    this.env.set(section, list);
+  }
+
+  label(nodeOrId: any): string {
+    const n = typeof nodeOrId === 'string' ? this.g.byId.get(nodeOrId) : nodeOrId;
+    return String(n?.data?.label || n?.id || '');
+  }
+
+  /** Python expression for a secret: never embeds clear-text values in the script */
+  secretExpr(raw: unknown, envName: string, description: string, required = true): string | null {
+    const value = String(raw ?? '').trim();
+    if (!value) return null;
+    if (value.includes('{{')) return pyStr(value);
+    const envMatch = value.match(/^env:([A-Za-z_][A-Za-z0-9_]*)$/);
+    const name = envMatch ? envMatch[1] : envName;
+    this.addEnv('Secretos y credenciales', { name, comment: envMatch ? description : `${description} (el valor original no se exporta por seguridad)` });
+    this.use('secret');
+    return required ? `secret(${pyStr(name)})` : `secret(${pyStr(name)}, required=False)`;
+  }
+
+  /** `ctx.output_of("a", "b")  # Label A` expression for the data a node receives */
+  inputExpr(node: any, fallback: 'item' | 'last' | 'none' = 'item'): { expr: string; comment: string } {
+    const sources = effectiveSources(node.id, this.g);
+    if (sources.length > 0) {
+      return {
+        expr: `ctx.output_of(${sources.map(pyStr).join(', ')})`,
+        comment: sources.map(s => this.label(s)).join(', '),
+      };
+    }
+    if (fallback === 'last') return { expr: 'ctx.last_value()', comment: 'último resultado disponible' };
+    if (fallback === 'item') return { expr: 'ctx.get("_item")', comment: this.g.loopOf.has(node.id) ? 'elemento del bucle' : '' };
+    return { expr: 'None', comment: '' };
+  }
+
+  retryArgs(node: any): Array<[string, string]> {
+    const data = node.data || {};
+    const isHttp = HTTP_TYPES.includes(node.type);
+    const explicit = data.retryCount === undefined || data.retryCount === null || data.retryCount === '' ? null : Number(data.retryCount);
+    const retries = Math.max(0, Math.min(10, explicit ?? (isHttp ? this.ctx.settings?.httpMaxRetries ?? 1 : 0)));
+    if (!retries || !RETRYABLE_TYPES.includes(node.type)) return [];
+    const args: Array<[string, string]> = [['retries', String(retries)]];
+    const delayMs = Number(data.retryDelayMs);
+    if (Number.isFinite(delayMs) && data.retryDelayMs !== undefined && delayMs !== 1000) args.push(['retry_delay', String(Math.max(0, delayMs) / 1000)]);
+    if (data.retryBackoff === 'fixed') args.push(['backoff', '"fixed"']);
+    return args;
+  }
+
+  // ── Per-node bodies (lines inside `def fn(ctx):`, 4-space indented) ──
+
+  body(node: any, step: StepInfo): string[] {
+    switch (node.type) {
+      case 'httpGet': case 'httpPost': case 'httpRequest': return this.httpBody(node);
+      case 'query': return this.queryBody(node, step);
+      case 'export': return this.exportBody(node);
+      case 'dataSource': case 'fileSource': return this.dataSourceBody(node);
+      case 'dataList': return this.dataListBody(node);
+      case 'variables': return this.variablesBody(node);
+      case 'timer': case 'delay': return this.timerBody(node);
+      case 'forEach': return this.forEachBody(node);
+      case 'forEachEnd': {
+        this.use('loop_results');
+        const loopId = this.g.endOf.get(node.id);
+        return loopId ? [`return loop_results(ctx, ${pyStr(loopId)})  # ${pyComment(this.label(loopId))}`] : ['return []'];
+      }
+      case 'conditionalBranch': return this.branchBody(node);
+      case 'jsonTransform': return this.transformBody(node, step);
+      case 'webhookTrigger': return this.webhookBody(node);
+      case 'oauth2Connector': return this.oauthBody(node);
+      case 'aiChatCompletion': return this.aiBody(node);
+      case 'scraping': return this.scrapingBody(node);
+      default:
+        this.use('log');
+        return [
+          `log.warning(${pyStr(`El nodo '${this.label(node)}' (${node.type}) no se puede exportar a Python; configúralo a mano.`)})`,
+          'return {}',
+        ];
+    }
+  }
+
+  askLines(node: any, fields: unknown[]): string[] {
+    const external = externalPlaceholders(fields, node.id, this.g);
+    if (external.length === 0) return [];
+    this.use('ask_into');
+    for (const ph of external) this.addEnv('Valores de entrada', { name: `VAR_${ph.replace(/[^A-Za-z0-9_]/g, '_')}`, comment: `valor para {{${ph}}}` });
+    return [
+      '# Valores que el flujo no produce: se leen de .env (VAR_...) o se piden al ejecutar',
+      ...external.map(ph => `ask_into(ctx, ${pyStr(ph)})`),
+    ];
+  }
+
+  httpBody(node: any): string[] {
+    const data = node.data || {};
+    this.use('http_request');
+    this.requirements.add('requests>=2.31.0');
+    const method = node.type === 'httpPost' ? 'POST' : String(data.method || 'GET').toUpperCase();
+    const hasBody = ['POST', 'PUT', 'PATCH'].includes(method);
+    const args: PyArg[] = ['ctx', pyStr(method), pyStr(String(data.endpoint || ''))];
+
+    const headers = parseJsonMaybe(data.headers);
+    if (headers.ok && headers.value && typeof headers.value === 'object' && Object.keys(headers.value).length) {
+      args.push(['headers', pyLiteral(headers.value, 4)]);
+    } else if (!headers.ok && headers.value) {
+      args.push(['headers', pyStr(headers.value)]);
+    }
+    const params = parseJsonMaybe(data.params);
+    if (params.ok && params.value && typeof params.value === 'object' && Object.keys(params.value).length) {
+      args.push(['params', pyLiteral(params.value, 4)]);
+    }
+    const rawBody = data.body && String(data.body).trim() ? data.body : data.payload;
+    if (hasBody && rawBody) {
+      const body = parseJsonMaybe(rawBody);
+      args.push(['body', body.ok ? pyLiteral(body.value, 4) : pyStr(String(rawBody))]);
+    }
+
+    const key = envKey(this.label(node));
+    if (data.authType === 'bearer') {
+      const token = this.secretExpr(data.authToken, `HTTP_TOKEN_${key}`, `Token Bearer de '${this.label(node)}'`);
+      if (token) args.push(['bearer_token', token]);
+    } else if (data.authType === 'basic') {
+      const user = pyStr(String(data.authUsername || ''));
+      const password = this.secretExpr(data.authPassword, `HTTP_PASSWORD_${key}`, `Contraseña Basic Auth de '${this.label(node)}'`) || '""';
+      args.push(['basic_auth', `(${user}, ${password})`]);
+    }
+    if (data.extractPath) args.push(['extract', pyStr(data.extractPath)]);
+    const timeout = readSeconds(data.timeout) ?? this.ctx.settings?.httpTimeoutSeconds ?? 30;
+    args.push(['timeout', String(timeout)]);
+    args.push(...this.retryArgs(node));
+
+    const iterateOver = String(data.iterateOver || '').trim();
+    if (!this.g.loopOf.has(node.id)) {
+      if (iterateOver && iterateOver !== '{{ID_NODO}}' && !iterateOver.startsWith('{{_item')) args.push(['for_each', pyStr(iterateOver)]);
+      else if (data.iterateMode) args.push(['for_each', '"auto"']);
+    }
+
+    const fields = [data.endpoint, data.headers, data.params, hasBody ? rawBody : ''].filter(Boolean);
+    return [...this.askLines(node, fields), `return ${pyCall('http_request', args, 0, 'return ')}`];
+  }
+
+  queryBody(node: any, step: StepInfo): string[] {
+    const data = node.data || {};
+    const query = this.ctx.queries[data.queryId];
+    if (!query?.sql_text) {
+      this.use('log');
+      return [`log.warning(${pyStr(`La consulta del nodo '${this.label(node)}' no está configurada.`)})`, 'return []'];
+    }
+    this.use('run_sql');
+
+    const fileName = `${String(step.number).padStart(2, '0')}_${slugify(this.label(node) || query.name) || 'consulta'}.sql`;
+    const connections = query.connections?.length
+      ? query.connections
+      : [{ id: 'default', name: 'SQL Server', host: 'localhost', database_name: '', port: 1433, env_credential_key: 'SQLSERVER' }];
+    const keys: string[] = [];
+    for (const c of connections) {
+      const k = this.connectionKey(c);
+      if (c.driver !== 'sqlite') this.requirements.add('pyodbc>=5.0.0');
+      keys.push(k);
+      if (!this.databases.has(k)) {
+        this.databases.set(k, { name: c.name, host: c.host, database: c.database_name, port: Number(c.port || 1433), driver: c.driver || 'ODBC Driver 17 for SQL Server' });
+      }
+    }
+    this.sqlFiles.push({
+      fileName,
+      queryName: query.name || this.label(node),
+      nodeLabel: this.label(node),
+      sql: [
+        `-- Flujo:    ${this.flowName}`,
+        `-- Paso ${step.number}:   ${this.label(node)}`,
+        `-- Consulta: ${query.name}`,
+        `-- Conexión: ${connections.map(c => `${c.name} (${c.database_name} @ ${c.host})`).join(', ')}`,
+        `-- Los #param_nombre se sustituyen por los valores de 'params' en el script.`,
+        '',
+        query.sql_text,
+        '',
+      ].join('\n'),
+    });
+
+    let mapping: Record<string, string> = {};
     try {
-      const parsed = JSON.parse(data.rawJson);
-      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-        varList = Object.entries(parsed).map(([k, val]) => ({
-          key: k,
-          type: typeof val === 'number' ? 'number' : typeof val === 'boolean' ? 'boolean' : typeof val === 'object' ? 'json' : 'string',
-          value: val,
+      mapping = data.queryParams ? JSON.parse(data.queryParams) : {};
+    } catch {}
+    const sqlParams = [...new Set([...query.sql_text.matchAll(/(?:^|[\s(=<>,+\-*/'%])#param_([a-zA-Z_][a-zA-Z0-9_]*)\b/g)].map(m => m[1]))];
+
+    const args: PyArg[] = ['ctx', ['sql_file', pyStr(`queries/${fileName}`)], ['connections', pyLiteral(keys, 4)]];
+    if (sqlParams.length) {
+      const entries = sqlParams.map(p => {
+        if (mapping[p]) return `${pyStr(p)}: ${pyStr(mapping[p])}`;
+        this.use('ask');
+        this.addEnv('Valores de entrada', { name: `VAR_${p}`, comment: `parámetro SQL #param_${p} de '${this.label(node)}'` });
+        return `${pyStr(p)}: ask(${pyStr(p)})`;
+      });
+      const inline = `{${entries.join(', ')}}`;
+      args.push(['params', inline.length <= 72 ? inline : `{\n${entries.map(e => `        ${e},`).join('\n')}\n    }`]);
+    }
+    if (data.extractMode === 'selected_columns') {
+      const cols = String(data.extractColumns || '').split(',').map(c => c.trim()).filter(Boolean);
+      if (cols.length) args.push(['columns', pyLiteral(cols, 4)]);
+    }
+    const mapped = sqlParams.map(p => mapping[p]).filter(Boolean);
+    return [...this.askLines(node, mapped), `return ${pyCall('run_sql', args, 0, 'return ')}`];
+  }
+
+  exportBody(node: any): string[] {
+    const data = node.data || {};
+    const isExcel = ['EXCEL', 'XLSX'].includes(String(data.format || 'CSV').toUpperCase());
+    this.requirements.add('pandas>=2.0.0');
+    if (isExcel) this.requirements.add('openpyxl>=3.1.0');
+    const fileName = pyStr(String(data.fileName || `exportacion_${node.id}`));
+    const color = data.headerColor ? [['header_color', pyStr(data.headerColor)] as [string, string]] : [];
+
+    if (data.exportMode === 'multi' && isExcel) {
+      this.use('export_sheets');
+      const sheets = (data.multiSheetConfig || {}) as Record<string, string>;
+      const lines = Object.entries(sheets).map(([id, sheet]) => `        ${pyStr(id)}: ${pyStr(sheet || `Hoja_${id.slice(0, 5)}`)},  # ${pyComment(this.label(id))}`);
+      const sheetsExpr = lines.length ? `{\n${lines.join('\n')}\n    }` : '{}';
+      return [`return ${pyCall('export_sheets', ['ctx', ['file_name', fileName], ['sheets', sheetsExpr], ...color], 0, 'return ')}`];
+    }
+
+    this.use('export_file');
+    const lines: string[] = [];
+    const dataSource = String(data.dataSource || '').trim();
+    if (dataSource) {
+      this.use('resolve');
+      const template = dataSource.startsWith('{{') ? dataSource : `{{${dataSource}}}`;
+      lines.push(`data = resolve(ctx, ${pyStr(template)})`);
+    } else {
+      const input = this.inputExpr(node, 'last');
+      lines.push(`data = ${input.expr}${input.comment ? `  # ${pyComment(input.comment)}` : ''}`);
+    }
+    const args: PyArg[] = ['ctx', 'data', ['file_name', fileName], ['format', isExcel ? '"excel"' : '"csv"']];
+    const columns = (Array.isArray(data.columns) ? data.columns : []).filter((c: any) => c?.header && c?.key).map((c: any) => ({ header: c.header, key: c.key }));
+    if (columns.length) args.push(['columns', pyLiteral(columns, 4)]);
+    const joins = (Array.isArray(data.joins) ? data.joins : []).filter((j: any) => j?.nodeId && j?.localKey && j?.foreignKey)
+      .map((j: any) => ({ nodeId: j.nodeId, localKey: j.localKey, foreignKey: j.foreignKey }));
+    if (joins.length) args.push(['joins', pyLiteral(joins, 4)]);
+    if (isExcel) args.push(...color);
+    lines.push(`return ${pyCall('export_file', args, 0, 'return ')}`);
+    return [...this.askLines(node, [data.fileName]), ...lines];
+  }
+
+  dataSourceBody(node: any): string[] {
+    const data = node.data || {};
+    this.requirements.add('pandas>=2.0.0');
+    if (data.mode === 'merge') {
+      this.use('merge_sources');
+      const sources = effectiveSources(node.id, this.g);
+      if (sources.length === 0) {
+        return ['return merge_sources(*[v for k, v in ctx.items() if not k.startswith(("start", "_"))])'];
+      }
+      return [`return merge_sources(${sources.map(s => `ctx.get(${pyStr(s)})`).join(', ')})  # ${pyComment(sources.map(s => this.label(s)).join(' + '))}`];
+    }
+    this.use('file_input', 'read_table');
+    this.requirements.add('openpyxl>=3.1.0');
+    const envName = `FILE_PATH_${envKey(this.label(node))}`;
+    const original = String(data.filePath || '');
+    const fileName = original.split(/[/\\]/).pop() || '';
+    this.addEnv('Archivos de entrada', { name: envName, value: fileName, comment: `archivo para '${this.label(node)}'${original ? ` (original: ${original})` : ''}` });
+    const readArgs: PyArg[] = ['path'];
+    if (data.sheetName) readArgs.push(['sheet', pyStr(data.sheetName)]);
+    return [
+      `path = file_input(${pyStr(envName)}, default=${pyStr(fileName)})`,
+      `return ${pyCall('read_table', readArgs, 0, 'return ')}`,
+    ];
+  }
+
+  dataListBody(node: any): string[] {
+    const parsed = parseJsonMaybe(node.data?.items);
+    const items = parsed.ok && Array.isArray(parsed.value) ? parsed.value : [];
+    return [`return ${pyLiteral(items, 0)}`];
+  }
+
+  variablesBody(node: any): string[] {
+    const data = node.data || {};
+    let vars: Array<{ key: string; type?: string; value?: any }> = [];
+    if (Array.isArray(data.variables) && data.variables.length) {
+      vars = data.variables.filter((v: any) => v?.key && String(v.key).trim());
+    } else {
+      const parsed = parseJsonMaybe(data.rawJson);
+      if (parsed.ok && parsed.value && typeof parsed.value === 'object' && !Array.isArray(parsed.value)) {
+        vars = Object.entries(parsed.value).map(([key, value]) => ({
+          key,
+          value,
+          type: typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : typeof value === 'object' ? 'json' : 'string',
         }));
       }
-    } catch {}
-  }
-
-  for (const v of varList) {
-    const key = String(v.key).trim();
-    const safeKey = key.replace(/[^a-zA-Z0-9_]/g, '_');
-    const vVarName = `${varDictName}_${safeKey}`;
-    const { pyExpr } = getPythonPresetExpr(v.value);
-    const type = v.type || 'string';
-
-    lines.push(`# Variable: ${key}`);
-    lines.push(`_def_${vVarName} = ${pyExpr}`);
-    lines.push(`_env_${vVarName} = os.getenv("VAR_${safeKey}") or os.getenv("${safeKey.toUpperCase()}")`);
-    lines.push(`if _env_${vVarName} is not None and str(_env_${vVarName}).strip() != "":`);
-    lines.push(`    _val_${vVarName} = str(_env_${vVarName}).strip()`);
-    lines.push(`else:`);
-    lines.push(`    try:`);
-    lines.push(`        if sys.stdin.isatty():`);
-    lines.push(`            _user_in = input(f"Ingrese valor para '${key}' [{_def_${vVarName}}]: ").strip()`);
-    lines.push(`            _val_${vVarName} = _user_in if _user_in != "" else _def_${vVarName}`);
-    lines.push(`        else:`);
-    lines.push(`            _val_${vVarName} = _def_${vVarName}`);
-    lines.push(`    except Exception:`);
-    lines.push(`        _val_${vVarName} = _def_${vVarName}`);
-
-    if (type === 'number') {
-      lines.push(`try:`);
-      lines.push(`    _val_${vVarName} = float(_val_${vVarName}) if "." in str(_val_${vVarName}) else int(_val_${vVarName})`);
-      lines.push(`except Exception: pass`);
-    } else if (type === 'boolean') {
-      lines.push(`if isinstance(_val_${vVarName}, str):`);
-      lines.push(`    _val_${vVarName} = _val_${vVarName}.lower() in ("true", "1", "yes", "si", "s", "verdadero")`);
-    } else if (type === 'json') {
-      lines.push(`if isinstance(_val_${vVarName}, str) and _val_${vVarName}.strip().startswith(("{", "[")):`);
-      lines.push(`    try: _val_${vVarName} = json.loads(_val_${vVarName})`);
-      lines.push(`    except Exception: pass`);
     }
-
-    lines.push(`logger.info(f"  Variable '${key}' = {_val_${vVarName}}")`);
-    lines.push(`${varDictName}[${JSON.stringify(key)}] = _val_${vVarName}`);
-    lines.push('');
-  }
-
-  lines.push(`context[${JSON.stringify(node.id)}] = ${varDictName}`);
-  if (label && label !== node.id) {
-    lines.push(`context[${JSON.stringify(label)}] = ${varDictName}`);
-  }
-  lines.push(`if "Variables" not in context: context["Variables"] = {}`);
-  lines.push(`if isinstance(context["Variables"], dict): context["Variables"].update(${varDictName})`);
-  for (const v of varList) {
-    const k = String(v.key).trim();
-    lines.push(`context[${JSON.stringify(k)}] = ${varDictName}[${JSON.stringify(k)}]`);
-  }
-  lines.push('');
-  return lines.join('\n');
-}
-
-function generateTimerNode(node: any, stepNum: number, total: number): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const duration = parseFloat(data.duration || '10') || 10;
-  const unit = data.unit || 'seconds';
-
-  let totalSeconds = duration;
-  if (unit === 'minutes') totalSeconds = duration * 60;
-  else if (unit === 'hours') totalSeconds = duration * 3600;
-  totalSeconds = Math.max(1, Math.round(totalSeconds));
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: timer - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Esperando ${totalSeconds} segundos...")`);
-  lines.push(`time.sleep(${totalSeconds})`);
-  lines.push(`logger.info("  Pausa completada")`);
-  lines.push('');
-  return lines.join('\n');
-}
-
-function generateJsonTransformNode(
-  node: any,
-  stepNum: number | string,
-  total: number,
-  edges: any[],
-  nodes: any[],
-  flowName: string,
-  jsFiles: TranspilerJsFile[],
-  isInsideLoop?: boolean
-): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const varName = pyVarName(node.id);
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: jsonTransform - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Transformando datos: ${label}")`);
-  lines.push(`try:`);
-
-  // 1. Resolve input data
-  const inputSource = (data.inputSource || '').trim();
-  if (inputSource) {
-    lines.push(`    ${varName}_input = resolve_template(context, ${JSON.stringify(inputSource)})`);
-  } else {
-    const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
-    if (upstreamIds.length > 0) {
-      lines.push(`    ${varName}_input = context.get(${JSON.stringify(upstreamIds[0])})`);
-    } else if (isInsideLoop) {
-      lines.push(`    ${varName}_input = context.get("_item")`);
-    } else {
-      lines.push(`    ${varName}_input = None`);
-    }
-  }
-
-  // Unwrap _data if present
-  lines.push(`    if isinstance(${varName}_input, dict) and "_data" in ${varName}_input:`);
-  lines.push(`        ${varName}_input = ${varName}_input["_data"]`);
-
-  // 2. Check transformType
-  const transformType = data.transformType || 'javascript';
-  const mappings = Array.isArray(data.mappings) ? data.mappings : [];
-  const isMapMode = (transformType === 'pick' || transformType === 'map') && mappings.length > 0;
-
-  if (isMapMode) {
-    const keepOthers = Boolean(data.keepOthers);
-    lines.push(`    ${varName}_mappings = ${JSON.stringify(mappings)}`);
-    lines.push(`    ${varName}_result = transform_map_data(${varName}_input, ${varName}_mappings, ${keepOthers ? 'True' : 'False'}, context)`);
-  } else {
-    // JavaScript transformation
-    const expr = String(data.expression || '').trim() || 'return data;';
-    const slugLabel = label.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'transform';
-    const stepSlug = String(stepNum).replace(/\./g, '_');
-    const jsFileName = `step_${stepSlug}_${slugLabel}.js`;
-
-    jsFiles.push({
-      fileName: jsFileName,
-      nodeLabel: label,
-      content: expr,
+    this.use('set_variables');
+    if (vars.length === 0) return ['return set_variables(ctx, {})'];
+    this.use('ask');
+    const entries = vars.map(v => {
+      const key = String(v.key).trim();
+      this.addEnv('Variables del flujo', { name: `VAR_${key.replace(/[^A-Za-z0-9_]/g, '_')}`, comment: `por defecto: ${typeof v.value === 'object' ? JSON.stringify(v.value) : v.value ?? ''}` });
+      const kind = v.type && v.type !== 'string' ? `, kind=${pyStr(v.type)}` : '';
+      return `        ${pyStr(key)}: ask(${pyStr(key)}, default=${this.presetExpr(v.value)}${kind}),`;
     });
-
-    lines.push(`    ${varName}_result = run_js_transform(`);
-    lines.push(`        os.path.join("transforms", ${JSON.stringify(jsFileName)}),`);
-    lines.push(`        ${varName}_input,`);
-    lines.push(`        context,`);
-    lines.push(`        inline_code=${JSON.stringify(expr)}`);
-    lines.push(`    )`);
+    return ['return set_variables(ctx, {', ...entries.map(e => e.slice(4)), '})'];
   }
 
-  // Store in context by id and by label
-  lines.push(`    context[${JSON.stringify(node.id)}] = ${varName}_result`);
-  if (label && label !== node.id) {
-    lines.push(`    context[${JSON.stringify(label)}] = ${varName}_result`);
+  /** Dynamic presets of the Variables node ($today, $ayer_iso...) */
+  presetExpr(value: unknown): string {
+    if (typeof value !== 'string') return value !== null && typeof value === 'object' ? pyStr(JSON.stringify(value)) : pyLiteral(value ?? '');
+    const lower = value.trim().toLowerCase();
+    const presets: Record<string, [string, string]> = {
+      $today: ['today', '"%Y%m%d"'], $today_ymd: ['today', '"%Y%m%d"'], $hoy: ['today', '"%Y%m%d"'],
+      $today_iso: ['today', '"%Y-%m-%d"'], $hoy_iso: ['today', '"%Y-%m-%d"'],
+      $yesterday: ['today', '"%Y%m%d", days=-1'], $yesterday_ymd: ['today', '"%Y%m%d", days=-1'], $ayer: ['today', '"%Y%m%d", days=-1'],
+      $yesterday_iso: ['today', '"%Y-%m-%d", days=-1'], $ayer_iso: ['today', '"%Y-%m-%d", days=-1'],
+      $month_start: ['month_start', '"%Y%m%d"'], $inicio_mes: ['month_start', '"%Y%m%d"'],
+      $month_start_iso: ['month_start', '"%Y-%m-%d"'], $inicio_mes_iso: ['month_start', '"%Y-%m-%d"'],
+      $now_timestamp: ['now_ms', ''], $timestamp: ['now_ms', ''], $now_iso: ['now_iso', ''],
+    };
+    const preset = presets[lower];
+    if (preset) {
+      this.use(preset[0]);
+      return `${preset[0]}(${preset[1]})`;
+    }
+    if (value.includes('{{')) {
+      this.use('resolve');
+      return `resolve(ctx, ${pyStr(value.trim())})`;
+    }
+    return pyStr(value.trim());
   }
-  lines.push(`    logger.info(f"  Transformacion completada exitosamente")`);
-  lines.push(`except Exception as e:`);
-  lines.push(`    logger.error(f"  ERROR en transformacion '${label}': {e}")`);
-  lines.push(`    sys.exit(1)`);
-  lines.push('');
 
-  return lines.join('\n');
-}
+  timerBody(node: any): string[] {
+    const data = node.data || {};
+    const duration = parseFloat(data.duration || '10') || 10;
+    const seconds = Math.max(0, data.unit === 'minutes' ? duration * 60 : data.unit === 'hours' ? duration * 3600 : duration);
+    this.use('pause');
+    const sources = effectiveSources(node.id, this.g);
+    if (!sources.length) return [`return pause(${seconds})`];
+    const input = this.inputExpr(node);
+    return [`return pause(${seconds}, ${input.expr})  # deja pasar: ${pyComment(input.comment)}`];
+  }
 
-function generateForEachNode(
-  node: any,
-  stepNum: number,
-  total: number,
-  subgraphNodes: any[],
-  edges: any[],
-  nodes: any[],
-  ctx: TranspilerContext,
-  flowName: string,
-  sqlFiles: TranspilerSqlFile[],
-  jsFiles: TranspilerJsFile[]
-): string {
-  const lines: string[] = [];
-  const data = node.data || {};
-  const label = data.label || node.id;
-  const varName = pyVarName(node.id);
-  const iterateOverExpr = data.iterateOver || '';
+  forEachBody(node: any): string[] {
+    const expr = String(node.data?.iterateOver || '').trim();
+    if (expr) {
+      this.use('as_list', 'resolve');
+      return [`return as_list(resolve(ctx, ${pyStr(expr)}))`];
+    }
+    const input = this.inputExpr(node, 'none');
+    if (input.expr === 'None') return ['return []  # el bucle no tiene una lista conectada'];
+    return [
+      `items = ${input.expr}  # ${pyComment(input.comment)}`,
+      'return items if isinstance(items, list) else []',
+    ];
+  }
 
-  lines.push(`# === [${stepNum}/${total}] Nodo: forEach - ${label} ===`);
-  lines.push(`logger.info("[${stepNum}/${total}] Iniciando bucle forEach: ${label}")`);
+  branchBody(node: any): string[] {
+    const data = node.data || {};
+    if (data.mode === 'switch') {
+      this.use('switch');
+      const cases = Array.isArray(data.cases) ? data.cases : [];
+      const rows = cases.map((c: any, idx: number) => {
+        const item = typeof c === 'string' ? { id: String(idx + 1), value: c } : { id: String(c?.id ?? idx + 1), value: String(c?.value ?? ''), label: c?.label };
+        return `        (${pyStr(item.id)}, ${pyStr(item.value)}, ${item.label ? pyStr(item.label) : 'None'}),`;
+      });
+      return [
+        `return switch(ctx, ${pyStr(String(data.switchField ?? data.switchValue ?? ''))}, [`,
+        ...rows.map((r: string) => r.slice(4)),
+        '])',
+      ];
+    }
+    this.use('condition');
+    const rules = Array.isArray(data.conditions) && data.conditions.length
+      ? data.conditions
+      : [{ left: data.leftOperand ?? '', operator: data.operator || 'equals', right: data.rightOperand ?? '' }];
+    const lines = rules.map((r: any) => `    (${pyStr(String(r.left ?? ''))}, ${pyStr(String(r.operator || 'equals'))}, ${pyStr(String(r.right ?? ''))}),`);
+    const combine = data.combinator === 'or' ? ', combine="or"' : '';
+    return ['return condition(ctx, [', ...lines, `]${combine})`];
+  }
 
-  if (iterateOverExpr && iterateOverExpr.trim()) {
-    lines.push(`${varName}_items = resolve_template(context, ${JSON.stringify(iterateOverExpr)})`);
-    lines.push(`if not isinstance(${varName}_items, list): ${varName}_items = [${varName}_items]`);
-  } else {
-    const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
-    if (upstreamIds.length > 0) {
-      lines.push(`${varName}_items = context.get(${JSON.stringify(upstreamIds[0])}, [])`);
-      lines.push(`if not isinstance(${varName}_items, list): ${varName}_items = [${varName}_items]`);
+  transformBody(node: any, step: StepInfo): string[] {
+    const data = node.data || {};
+    const lines: string[] = [];
+    const inputData = String(data.inputData ?? data.inputDataSource ?? '').trim();
+    if (inputData) {
+      this.use('resolve', 'unwrap');
+      lines.push(`data = unwrap(resolve(ctx, ${pyStr(inputData)}))`);
     } else {
-      lines.push(`${varName}_items = next((v for v in context.values() if isinstance(v, list)), [])`);
+      const input = this.inputExpr(node);
+      lines.push(`data = ${input.expr}${input.comment ? `  # ${pyComment(input.comment)}` : ''}`);
+    }
+
+    const mappings = Array.isArray(data.mappings) ? data.mappings.filter((m: any) => m?.from) : [];
+    if ((data.transformType === 'map' || data.transformType === 'pick') && mappings.length) {
+      this.use('map_fields');
+      const args: PyArg[] = ['ctx', 'data', pyLiteral(mappings.map((m: any) => ({ from: m.from, to: m.to || m.from })), 4)];
+      if (data.keepOthers) args.push(['keep_others', 'True']);
+      lines.push(`return ${pyCall('map_fields', args, 0, 'return ')}`);
+      return lines;
+    }
+
+    const code = String(data.expression || '').trim();
+    if (!code) {
+      lines.push('return data  # sin código JavaScript: los datos pasan sin cambios');
+      return lines;
+    }
+    this.use('run_js');
+    const fileName = `${String(step.number).padStart(2, '0')}_${slugify(this.label(node)) || 'transformacion'}.js`;
+    this.jsFiles.push({
+      fileName,
+      nodeLabel: this.label(node),
+      content: `// ${this.label(node)} (paso ${step.number} de "${this.flowName}")\n// data = entrada del paso, context = resultados de los pasos anteriores\n${code}\n`,
+    });
+    lines.push(`return run_js(ctx, ${pyStr(`transforms/${fileName}`)}, data)`);
+    return lines;
+  }
+
+  webhookBody(node: any): string[] {
+    this.use('webhook_payload');
+    this.addEnv('Webhook', { name: 'WEBHOOK_PAYLOAD_FILE', comment: 'archivo JSON con el cuerpo recibido (también: --payload archivo.json)' });
+    const sample = parseJsonMaybe(node.data?.samplePayload);
+    return [`return webhook_payload(sample=${sample.ok ? pyLiteral(sample.value, 0) : '{}'})`];
+  }
+
+  oauthBody(node: any): string[] {
+    const data = node.data || {};
+    this.use('oauth2_token');
+    this.requirements.add('requests>=2.31.0');
+    const key = envKey(this.label(node));
+    const grant = data.grantType || 'client_credentials';
+    const args: PyArg[] = ['ctx', ['token_url', pyStr(String(data.tokenUrl || ''))], ['grant_type', pyStr(grant)]];
+    if (data.clientId) args.push(['client_id', pyStr(String(data.clientId))]);
+    const clientSecret = this.secretExpr(data.clientSecret, `OAUTH_CLIENT_SECRET_${key}`, `client secret de '${this.label(node)}'`);
+    if (clientSecret) args.push(['client_secret', clientSecret]);
+    if (data.scope) args.push(['scope', pyStr(String(data.scope))]);
+    if (data.authMethod === 'basic') args.push(['auth_method', '"basic"']);
+    if (grant === 'password') {
+      args.push(['username', pyStr(String(data.username || ''))]);
+      const password = this.secretExpr(data.password, `OAUTH_PASSWORD_${key}`, `contraseña OAuth2 de '${this.label(node)}'`);
+      if (password) args.push(['password', password]);
+    }
+    if (grant === 'refresh_token') {
+      const refresh = this.secretExpr(data.refreshToken, `OAUTH_REFRESH_TOKEN_${key}`, `refresh token de '${this.label(node)}'`);
+      if (refresh) args.push(['refresh_token', refresh]);
+    }
+    args.push(['timeout', String(this.ctx.settings?.httpTimeoutSeconds ?? 30)]);
+    return [`return ${pyCall('oauth2_token', args, 0, 'return ')}`];
+  }
+
+  aiBody(node: any): string[] {
+    const data = node.data || {};
+    this.use('ai_chat');
+    this.requirements.add('requests>=2.31.0');
+    const args: PyArg[] = [
+      'ctx',
+      ['endpoint', pyStr(String(data.endpoint || 'https://api.openai.com/v1/chat/completions'))],
+      ['model', pyStr(String(data.model || 'gpt-4o-mini'))],
+    ];
+    const apiKey = this.secretExpr(data.apiKey, `AI_API_KEY_${envKey(this.label(node))}`, `API key del proveedor de IA de '${this.label(node)}'`, false);
+    if (apiKey) args.push(['api_key', apiKey]);
+    if (data.systemPrompt) args.push(['system', pyStr(String(data.systemPrompt))]);
+    args.push(['prompt', pyStr(String(data.userPrompt || ''))]);
+    const temperature = Number(data.temperature ?? 0.7);
+    if (Number.isFinite(temperature) && temperature !== 0.7) args.push(['temperature', String(temperature)]);
+    if (Number(data.maxTokens)) args.push(['max_tokens', String(Number(data.maxTokens))]);
+    if (data.responseFormat === 'json_object') args.push(['json_output', 'True']);
+    args.push(['timeout', String(Math.max(5, Number(data.timeoutSeconds) || 120))]);
+    return [`return ${pyCall('ai_chat', args, 0, 'return ')}`];
+  }
+
+  scrapingBody(node: any): string[] {
+    const name = String(node.data?.script || '').trim();
+    if (!name) {
+      this.use('log');
+      return [`log.warning(${pyStr(`El nodo '${this.label(node)}' no tiene un script de scraping asignado.`)})`, 'return {}'];
+    }
+    this.use('run_script');
+    const found = this.ctx.scripts?.[name];
+    const fileName = found?.fileName || name;
+    if (found && !this.scriptFiles.some(f => f.fileName === found.fileName)) this.scriptFiles.push(found);
+    const args: PyArg[] = ['ctx', pyStr(`scripts/${fileName}`)];
+    if (node.data?.url) args.push(['url', pyStr(String(node.data.url))]);
+    if (node.data?.selector) args.push(['selector', pyStr(String(node.data.selector))]);
+    return [
+      ...(found ? [] : [`# El script '${pyComment(name)}' no estaba en el servidor: cópialo en la carpeta scripts/`]),
+      `return ${pyCall('run_script', args, 0, 'return ')}`,
+    ];
+  }
+
+  kindOf(node: any): string {
+    const data = node.data || {};
+    switch (node.type) {
+      case 'httpGet': return 'HTTP GET';
+      case 'httpPost': return 'HTTP POST';
+      case 'httpRequest': return `HTTP ${String(data.method || 'GET').toUpperCase()}`;
+      case 'query': return 'Consulta SQL';
+      case 'export': return ['EXCEL', 'XLSX'].includes(String(data.format || '').toUpperCase()) ? 'Exportar Excel' : 'Exportar CSV';
+      case 'dataSource': case 'fileSource': return data.mode === 'merge' ? 'Unificar datos' : 'Leer archivo';
+      case 'dataList': return 'Lista de datos';
+      case 'variables': return 'Variables';
+      case 'timer': case 'delay': return 'Pausa';
+      case 'forEach': return 'Bucle';
+      case 'forEachEnd': return 'Fin de bucle';
+      case 'conditionalBranch': return data.mode === 'switch' ? 'Switch' : 'Condición Sí/No';
+      case 'jsonTransform': return 'Transformación JS';
+      case 'webhookTrigger': return 'Webhook';
+      case 'oauth2Connector': return 'OAuth2';
+      case 'aiChatCompletion': return 'IA';
+      case 'scraping': return 'Web scraping';
+      default: return node.type;
     }
   }
 
-  lines.push(`${varName}_results = []`);
-  lines.push(`for _index, _item in enumerate(${varName}_items):`);
-  lines.push(`    context["_item"] = _item`);
-  lines.push(`    context["_index"] = _index`);
-  lines.push(`    context["_total"] = len(${varName}_items)`);
-  lines.push(`    logger.info(f"  Iteracion {_index+1}/{len(${varName}_items)}")`);
+  stepFunction(step: StepInfo): string {
+    const { node } = step;
+    const decoratorArgs: PyArg[] = [String(step.number), pyStr(this.label(node)), ['node_id', pyStr(node.id)], ['kind', pyStr(step.kind)]];
+    if (RETRYABLE_TYPES.includes(node.type) && !HTTP_TYPES.includes(node.type)) decoratorArgs.push(...this.retryArgs(node));
+    if (node.data?.onError === 'continue' && !NO_CONTINUE_TYPES.includes(node.type)) decoratorArgs.push(['on_error', '"continue"']);
 
-  const subOrdered = buildTopologicalOrder(subgraphNodes, edges.filter(
-    e => subgraphNodes.some(n => n.id === e.source) && subgraphNodes.some(n => n.id === e.target)
-  ));
+    const title = `# ── ${step.number} · ${pyComment(this.label(node))} `;
+    return [
+      title.padEnd(79, '─'),
+      `@${pyCall('node', decoratorArgs, 0, '@')}`,
+      `def ${step.fn}(ctx):`,
+      ...this.body(node, step).flatMap(l => l.split('\n')).map(l => (l ? `    ${l}` : l)),
+    ].join('\n');
+  }
 
-  for (let i = 0; i < subOrdered.length; i++) {
-    const subNode = subOrdered[i];
-    let subCode = '';
-    const subStep = `${stepNum}.${i + 1}`;
-    switch (subNode.type) {
-      case 'httpGet': case 'httpPost': case 'httpRequest':
-        subCode = generateHttpNode(subNode, subStep as any, total, edges, nodes);
-        break;
-      case 'query':
-        subCode = generateQueryNode(subNode, subStep as any, total, ctx.queries[subNode.data?.queryId], edges, nodes, flowName, sqlFiles);
-        break;
-      case 'export':
-        subCode = generateExportNode(subNode, subStep as any, total, edges, nodes);
-        break;
-      case 'dataSource': case 'fileSource':
-        subCode = generateDataSourceNode(subNode, subStep as any, total, edges, nodes);
-        break;
-      case 'dataList':
-        subCode = generateDataListNode(subNode, subStep as any, total);
-        break;
-      case 'variables':
-        subCode = generateVariablesNode(subNode, subStep as any, total);
-        break;
-      case 'jsonTransform':
-        subCode = generateJsonTransformNode(subNode, subStep as any, total, edges, nodes, flowName, jsFiles, true);
-        break;
-      case 'timer': case 'delay':
-        subCode = generateTimerNode(subNode, subStep as any, total);
-        break;
-      default:
-        subCode = `# Nodo no soportado dentro de forEach: ${subNode.type} (${subNode.id})\n`;
+  guard(node: any, maybeSkipped: Set<string>): string | null {
+    if (!maybeSkipped.has(node.id)) return null;
+    const incoming = incomingForGuard(node, this.g);
+    const parts: string[] = [];
+    const labels: string[] = [];
+    for (const i of incoming) {
+      const fn = this.steps.get(i.source)?.fn;
+      if (!fn) continue;
+      parts.push(i.handle ? `ctx.took(${fn}, ${pyStr(i.handle)})` : `ctx.took(${fn})`);
+      if (i.handle) labels.push(this.branchLabel(i.source, i.handle));
     }
-    lines.push(indent(subCode, 4));
+    if (!parts.length) return null;
+    const comment = labels.length ? `  # ${pyComment(labels.join(' / '))}` : '';
+    return `if ${[...new Set(parts)].join(' or ')}:${comment}`;
   }
 
-  if (subOrdered.length > 0) {
-    const lastSubNode = subOrdered[subOrdered.length - 1];
-    lines.push(`    _iter_result = context.get(${JSON.stringify(lastSubNode.id)})`);
-    lines.push(`    if isinstance(_iter_result, list):`);
-    lines.push(`        ${varName}_results.extend([{**(_item if isinstance(_item, dict) else {}), **r} for r in _iter_result])`);
-    lines.push(`    elif _iter_result is not None:`);
-    lines.push(`        ${varName}_results.append({**(_item if isinstance(_item, dict) else {}), **((_iter_result if isinstance(_iter_result, dict) else {"resultado": _iter_result}))})`);
-    lines.push(`    else:`);
-    lines.push(`        ${varName}_results.append(_item)`);
+  branchLabel(branchId: string, handle: string): string {
+    const data = this.g.byId.get(branchId)?.data || {};
+    if (handle === 'true') return 'Sí';
+    if (handle === 'false') return 'No';
+    if (handle === 'default') return 'Por defecto';
+    const caseId = handle.replace(/^case_/, '');
+    const cases = Array.isArray(data.cases) ? data.cases : [];
+    const found = cases.find((c: any, idx: number) => String(typeof c === 'string' ? idx + 1 : c?.id ?? idx + 1) === caseId);
+    const text = typeof found === 'string' ? found : found?.label || found?.value || caseId;
+    return String(text);
   }
-
-  lines.push(`context[${JSON.stringify(node.id)}] = ${varName}_results`);
-  lines.push('');
-  return lines.join('\n');
-}
-
-function generateForEachEndNode(node: any, stepNum: number, total: number, forEachNode: any): string {
-  const lines: string[] = [];
-  const label = node.data?.label || node.id;
-
-  lines.push(`# === [${stepNum}/${total}] Nodo: forEachEnd - ${label} ===`);
-  if (forEachNode) {
-    lines.push(`context[${JSON.stringify(node.id)}] = context.get(${JSON.stringify(forEachNode.id)}, [])`);
-    lines.push(`logger.info(f"  Bucle completado - {len(context.get(${JSON.stringify(forEachNode.id)}, []))} registros totales")`);
-  } else {
-    lines.push(`context[${JSON.stringify(node.id)}] = []`);
-  }
-  lines.push('');
-  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
-// Main transpiler entry point
+// Entry point
 // ---------------------------------------------------------------------------
 
 export function transpileFlowToPython(
@@ -1224,825 +850,292 @@ export function transpileFlowToPython(
   definition: { nodes: any[]; edges: any[] },
   ctx: TranspilerContext
 ): TranspilerOutput {
-  const nodes: any[] = definition.nodes || [];
-  const edges: any[] = definition.edges || [];
-  const sqlFiles: TranspilerSqlFile[] = [];
-  const jsFiles: TranspilerJsFile[] = [];
-
-  const slug = flowName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+  const notes = (definition.nodes || []).filter((n: any) => n.type === 'note' && String(n.data?.text || '').trim());
+  const nodes: any[] = (definition.nodes || []).filter((n: any) => n.type !== 'note');
+  const slug = slugify(flowName) || 'flujo';
 
   if (nodes.length === 0) {
-    const emptyScript = `#!/usr/bin/env python3\n# Flujo sin nodos: ${flowName}\nprint("El flujo no tiene nodos configurados.")\n`;
     return {
-      script: emptyScript,
+      script: `#!/usr/bin/env python3\n"""${flowName}: el flujo no tiene nodos configurados."""\nprint("El flujo no tiene nodos configurados.")\n`,
+      runtimePy: PYTHON_RUNTIME,
+      scriptFiles: [],
       requirementsTxt: 'python-dotenv>=1.0.0\n',
       envExample: '# Sin variables requeridas\n',
-      readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.`,
+      readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.\n`,
       sqlFiles: [],
-      jsFiles: []
+      jsFiles: [],
     };
   }
 
-  const orderedNodes = buildTopologicalOrder(nodes, edges);
+  const g = analyzeGraph(nodes, definition.edges || []);
+  const gen = new Generator(flowName, g, ctx);
 
-  const inDegree: Record<string, number> = {};
-  const adjList: Record<string, string[]> = {};
-  nodes.forEach(n => { inDegree[n.id] = 0; adjList[n.id] = []; });
-  const normalizedEdges = edges.map(edge => {
-    const srcNode = nodes.find(n => n.id === edge.source);
-    const tgtNode = nodes.find(n => n.id === edge.target);
-    if (srcNode && tgtNode && JSON.stringify(srcNode.data || {}).includes(tgtNode.id)) {
-      return { ...edge, source: tgtNode.id, target: srcNode.id };
-    }
-    return edge;
-  });
-  normalizedEdges.forEach(edge => {
-    if (adjList[edge.source] !== undefined) {
-      adjList[edge.source].push(edge.target);
-    }
-  });
+  // Number the steps in execution order (loop bodies right after their loop); start nodes are implicit
+  const ordered: any[] = g.mainOrder.flatMap(n => (n.type === 'forEach' ? [n, ...(g.loops.get(n.id)?.body || [])] : [n]));
+  const usedNames = new Set<string>();
+  let number = 0;
+  for (const n of ordered) {
+    if (n.type === 'start') continue;
+    number++;
+    gen.steps.set(n.id, { node: n, number, fn: pyIdentifier(gen.label(n), usedNames), kind: gen.kindOf(n) });
+  }
+  const steps = [...gen.steps.values()];
+  const functions = steps.map(s => gen.stepFunction(s));
 
-  const forEachEndMap: Record<string, string> = {};
-  const forEachNodeForEnd: Record<string, any> = {};
-  const forEachSubgraphMap: Record<string, any[]> = {};
-  for (const feNode of nodes.filter(n => n.type === 'forEach')) {
-    const endId = findForEachEndNode(feNode.id, adjList, nodes);
-    if (endId) {
-      forEachEndMap[feNode.id] = endId;
-      forEachNodeForEnd[endId] = feNode;
-      const subIds = getForEachSubgraphNodes(feNode.id, endId, adjList, nodes);
-      forEachSubgraphMap[feNode.id] = nodes.filter(n => subIds.includes(n.id));
+  // main(): the flow read top to bottom
+  const maybeSkipped = computeMaybeSkipped(g);
+  const mainLines: string[] = [];
+  const emitRun = (n: any, indent: string) => {
+    const step = gen.steps.get(n.id);
+    if (!step) return;
+    const guard = gen.guard(n, maybeSkipped);
+    if (guard) {
+      mainLines.push(`${indent}${guard}`);
+      mainLines.push(`${indent}    run(ctx, ${step.fn})`);
+    } else {
+      mainLines.push(`${indent}run(ctx, ${step.fn})`);
+    }
+  };
+
+  for (const n of g.mainOrder) {
+    if (n.type === 'start') continue;
+    const loop = n.type === 'forEach' ? g.loops.get(n.id) : undefined;
+    if (!loop || !loop.endId) {
+      emitRun(n, '    ');
+      continue;
+    }
+    gen.use('loop');
+    const step = gen.steps.get(n.id)!;
+    const collect = loop.terminalEdges
+      .map(e => {
+        const fn = gen.steps.get(e.source)?.fn;
+        if (!fn) return null;
+        const src = g.byId.get(e.source);
+        return src?.type === 'conditionalBranch' && isBranchHandle(e.sourceHandle) ? `(${fn}, ${pyStr(e.sourceHandle)})` : fn;
+      })
+      .filter(Boolean);
+    const guard = gen.guard(n, maybeSkipped);
+    const indent = guard ? '        ' : '    ';
+    if (guard) mainLines.push(`    ${guard}`);
+    const alias = String(n.data?.itemAlias || '').trim();
+    const loopArgs = [
+      ...(collect.length ? [`collect=[${[...new Set(collect)].join(', ')}]`] : []),
+      ...(alias ? [`alias=${pyStr(alias)}`] : []),
+    ];
+    mainLines.push(`${indent.slice(4)}    for _ in loop(ctx, ${[step.fn, ...loopArgs].join(', ')}):`);
+    if (loop.body.length === 0) mainLines.push(`${indent}    pass`);
+    for (const b of loop.body) {
+      if (b.type === 'forEach') {
+        mainLines.push(`${indent}    # Bucle anidado '${pyComment(gen.label(b))}': no soportado en la exportación`);
+      }
+      emitRun(b, `${indent}    `);
     }
   }
 
-  const needsRequests = nodes.some(n => ['httpGet', 'httpPost', 'httpRequest'].includes(n.type));
-  const needsPyodbc = nodes.some(n => n.type === 'query');
-  const needsPandas = nodes.some(n => ['export', 'dataSource', 'fileSource'].includes(n.type));
+  const startIds = nodes.filter(n => n.type === 'start').map(n => n.id);
+  const startArgs: PyArg[] = [pyStr(flowName), ['total_steps', String(steps.length)]];
+  if (gen.databases.size) startArgs.push(['databases', 'DATABASES']);
+  if (startIds.length && !(startIds.length === 1 && startIds[0] === 'start')) startArgs.push(['start_ids', pyLiteral(startIds, 8)]);
 
-  const now = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' });
+  // ── Assemble the script ──
+  const now = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+  const indentOf = (s: StepInfo) => (g.loopOf.has(s.node.id) ? '   ' : '');
+  const width = Math.min(48, Math.max(...steps.map(s => (indentOf(s) + gen.label(s.node)).length), 10) + 2);
+  const stepList = steps.map(s => {
+    return `    ${String(s.number).padStart(2)}. ${(indentOf(s) + gen.label(s.node) + ' ').padEnd(width, '.')} ${s.kind}`;
+  });
 
-  // 1. Build requirements.txt
-  const reqs: string[] = ['python-dotenv>=1.0.0'];
-  if (needsRequests) reqs.push('requests>=2.31.0');
-  if (needsPyodbc) reqs.push('pyodbc>=5.0.0');
-  if (needsPandas) {
-    reqs.push('pandas>=2.0.0');
-    reqs.push('openpyxl>=3.1.0');
-  }
-  const requirementsTxt = reqs.join('\n') + '\n';
-
-  // 2. Build .env.example with complete connection settings
-  const envLines: string[] = [
-    `# ==============================================================================`,
-    `# Variables de Entorno para el Flujo: ${flowName}`,
-    `# Copie este archivo como '.env' antes de ejecutar el script.`,
-    `# ==============================================================================`,
-    ''
+  const script: string[] = [
+    '#!/usr/bin/env python3',
+    '"""',
+    flowName,
+    '='.repeat(Math.min(79, Math.max(flowName.length, 3))),
+    `Generado por OrquestaFlow: ${now}`,
+    '',
+    'Pasos:',
+    ...stepList,
+    '',
+    'Ejecución:',
+    '    pip install -r requirements.txt',
+    '    cp .env.example .env        # (Windows: copy .env.example .env) y completa los valores',
+    `    python ${slug}_flow.py`,
+    '',
+    'Cada paso es una función decorada con @node; main() los ejecuta en orden.',
+    'La lógica común (plantillas {{...}}, HTTP con reintentos, SQL, exportación)',
+    'está en orquesta_runtime.py.',
+    '"""',
+    '',
+    `from orquesta_runtime import (\n${[...gen.imports].sort().map(i => `    ${i},`).join('\n')}\n)`,
+    '',
   ];
 
-  if (needsPyodbc) {
-    envLines.push('# ==============================================================================');
-    envLines.push('# Configuracion de Bases de Datos (SQL Server)');
-    envLines.push('# ==============================================================================');
-    const seenKeys = new Set<string>();
-
-    for (const q of Object.values(ctx.queries)) {
-      for (const c of (q.connections || [])) {
-        const key = (c.env_credential_key || 'SQLSERVER').toUpperCase();
-        if (!seenKeys.has(key)) {
-          seenKeys.add(key);
-          const driver = c.driver || 'ODBC Driver 17 for SQL Server';
-          const port = c.port || 1433;
-          envLines.push(`# Conexion: ${c.name} (Clave: ${key})`);
-          envLines.push(`DB_HOST_${key}=${c.host}`);
-          envLines.push(`DB_NAME_${key}=${c.database_name}`);
-          envLines.push(`DB_PORT_${key}=${port}`);
-          envLines.push(`DB_DRIVER_${key}=${driver}`);
-          envLines.push(`DB_USER_${key}=`);
-          envLines.push(`DB_PASSWORD_${key}=`);
-          envLines.push(`# Cadena de conexion completa opcional (descomentar solo si se desea usar en lugar de las variables individuales):`);
-          envLines.push(`# DB_CONN_STR_${key}=DRIVER={${driver}};SERVER=${c.host},${port};DATABASE=${c.database_name};UID=tu_usuario;PWD=tu_contrasena`);
-          envLines.push('');
-        }
-      }
-    }
-
-    if (seenKeys.size === 0) {
-      envLines.push('# Conexion SQL Server por defecto');
-      envLines.push('DB_HOST_SQLSERVER=localhost');
-      envLines.push('DB_NAME_SQLSERVER=');
-      envLines.push('DB_PORT_SQLSERVER=1433');
-      envLines.push('DB_DRIVER_SQLSERVER=ODBC Driver 17 for SQL Server');
-      envLines.push('DB_USER_SQLSERVER=');
-      envLines.push('DB_PASSWORD_SQLSERVER=');
-      envLines.push('DB_CONN_STR_SQLSERVER=');
-      envLines.push('');
-    }
-
-    envLines.push('# Credenciales genericas de respaldo:');
-    envLines.push('DB_USER_DEFAULT=');
-    envLines.push('DB_PASSWORD_DEFAULT=');
-    envLines.push('');
+  if (gen.databases.size) {
+    script.push(
+      '# Conexiones de base de datos. Son valores por defecto: el archivo .env',
+      '# (DB_HOST_<CLAVE>, DB_NAME_<CLAVE>, DB_PATH_<CLAVE>, ...) tiene prioridad.',
+      'DATABASES = {',
+      ...[...gen.databases.entries()].map(([key, db]) =>
+        db.driver === 'sqlite'
+          ? `    ${pyStr(key)}: {"driver": "sqlite", "host": ${pyStr(db.host)}},  # ${pyComment(db.name)}`
+          : `    ${pyStr(key)}: {"host": ${pyStr(db.host)}, "database": ${pyStr(db.database)}, "port": ${db.port}, "driver": ${pyStr(db.driver)}},  # ${pyComment(db.name)}`),
+      '}',
+      '',
+    );
   }
 
-  if (needsRequests) {
-    envLines.push('# ==============================================================================');
-    envLines.push('# Autenticacion HTTP (Tokens / Basic Auth)');
-    envLines.push('# ==============================================================================');
-    envLines.push('HTTP_BEARER_TOKEN=');
-    envLines.push('HTTP_BASIC_USER=');
-    envLines.push('HTTP_BASIC_PASSWORD=');
-    envLines.push('');
-  }
-
-  const fileSourceNodes = nodes.filter(n => ['dataSource', 'fileSource'].includes(n.type) && n.data?.mode !== 'merge');
-  if (fileSourceNodes.length > 0) {
-    envLines.push('# ==============================================================================');
-    envLines.push('# Rutas de archivos locales para nodos de datos');
-    envLines.push('# ==============================================================================');
-    for (const fsNode of fileSourceNodes) {
-      const label = fsNode.data?.label || fsNode.id;
-      const envKey = label.toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_]/g, '');
-      envLines.push(`FILE_PATH_${envKey}=`);
-    }
-    envLines.push('');
-  }
-
-  const variableNodes = nodes.filter(n => n.type === 'variables');
-  if (variableNodes.length > 0) {
-    envLines.push('# ==============================================================================');
-    envLines.push('# Variables del Flujo (Opcional: sobrescribir valores sin solicitar por consola)');
-    envLines.push('# ==============================================================================');
-    for (const vNode of variableNodes) {
-      const vars = vNode.data?.variables || [];
-      if (Array.isArray(vars) && vars.length > 0) {
-        for (const v of vars) {
-          if (!v || !v.key) continue;
-          const k = String(v.key).trim().replace(/[^a-zA-Z0-9_]/g, '_');
-          const hint = v.value !== undefined ? ` (Por defecto: ${v.value})` : '';
-          envLines.push(`# VAR_${k}=${v.value ?? ''}${hint ? ' ' + hint : ''}`);
-        }
-      }
-    }
-    envLines.push('');
-  }
-  const envExample = envLines.join('\n');
-
-  // 3. Build Script code (collects sqlFiles along the way)
-  const parts: string[] = [];
-
-  parts.push(`#!/usr/bin/env python3`);
-  parts.push(`"""
-Script auto-generado por OrquestaFlow
-Flujo: ${flowName}
-Generado: ${now}
-
-Dependencias necesarias:
-    pip install -r requirements.txt
-
-Variables de entorno requeridas:
-    Consulte el archivo .env.example generado con este paquete.
-
-Uso:
-    python ${slug}_flow.py [ruta_archivo_1] [ruta_archivo_2] ...
-"""
-
-import os
-import sys
-import json
-import time
-import logging
-import re
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
-
-load_dotenv()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(levelname)s] %(message)s"
-)
-logger = logging.getLogger(__name__)
-`);
-
-  if (needsRequests) {
-    parts.push(`try:
-    import requests
-except ImportError:
-    logger.error("Instale requests: pip install requests")
-    sys.exit(1)
-`);
-  }
-
-  // Helper functions
-  parts.push(`def resolve_path(context, path_str):
-    """Obtiene un valor anidado dentro de un contexto usando notacion de puntos."""
-    if not path_str or not isinstance(path_str, str):
-        return None
-    keys = path_str.strip().split(".")
-    val = context
-    for k in keys:
-        if isinstance(val, dict):
-            val = val.get(k)
-        elif isinstance(val, list) and k.isdigit():
-            idx = int(k)
-            val = val[idx] if 0 <= idx < len(val) else None
-        else:
-            return None
-    return val
-
-
-def resolve_template(context, template_str):
-    """Resuelve expresiones {{nodeId.field}} usando el contexto del flujo."""
-    if not isinstance(template_str, str):
-        return template_str
-
-    m_exact = re.fullmatch(r'\\{\\{([^}]+)\\}\\}', template_str.strip())
-    if m_exact:
-        val = resolve_path(context, m_exact.group(1))
-        if val is not None:
-            return val
-
-    def replacer(match):
-        val = resolve_path(context, match.group(1))
-        if val is None:
-            return ""
-        return json.dumps(val) if isinstance(val, (dict, list)) else str(val)
-
-    return re.sub(r'\\{\\{([^}]+)\\}\\}', replacer, template_str)
-
-
-def flatten_rows(data):
-    """Aplana estructuras anidadas de respuestas (data, rows, items) replicando el motor de OrquestaFlow."""
-    if data is None:
-        return []
-    if not isinstance(data, list):
-        if isinstance(data, dict):
-            for key in ['rows', 'data', 'items', 'records', 'result', 'results']:
-                if key in data and isinstance(data[key], list):
-                    return flatten_rows(data[key])
-            if 'data' in data and isinstance(data['data'], dict) and data['data']:
-                return [data['data']]
-            for val in data.values():
-                if isinstance(val, list):
-                    return flatten_rows(val)
-            return [data]
-        return [{"valor": data}]
-
-    result = []
-    for item in data:
-        if item is None:
-            continue
-        if isinstance(item, list):
-            result.extend(flatten_rows(item))
-        elif isinstance(item, dict):
-            found_inner = False
-            for key in ['data', 'rows', 'items', 'records', 'result', 'results']:
-                if key in item and isinstance(item[key], list):
-                    result.extend(flatten_rows(item[key]))
-                    found_inner = True
-                    break
-            if not found_inner:
-                if 'data' in item and isinstance(item['data'], dict) and item['data']:
-                    result.append(dict(item['data']))
-                else:
-                    result.append(item)
-        else:
-            result.append({"valor": item})
-    return result
-
-
-normalize_for_export = flatten_rows
-
-
-def process_export_data(raw_data, context, columns=None, joins=None):
-    """Procesa, une (joins) y mapea columnas para exportacion identico al motor OrquestaFlow."""
-    base_data_wrapped = []
-    if isinstance(raw_data, list):
-        for idx, root_item in enumerate(raw_data):
-            flat = flatten_rows(root_item)
-            for it in flat:
-                base_data_wrapped.append({"item": it, "rootIndex": idx})
-    else:
-        flat = flatten_rows(raw_data)
-        for it in flat:
-            base_data_wrapped.append({"item": it, "rootIndex": 0})
-
-    base_data = [w["item"] for w in base_data_wrapped]
-
-    # Pre-calcular indices de joins O(1)
-    join_lookups = {}
-    if joins and isinstance(joins, list):
-        for j in joins:
-            node_id = j.get("nodeId")
-            local_key = j.get("localKey")
-            foreign_key = j.get("foreignKey")
-            if node_id and local_key and foreign_key:
-                target_data = context.get(node_id)
-                flat_target = flatten_rows(target_data)
-                if flat_target:
-                    lookup = {}
-                    fk_lower = foreign_key.lower()
-                    for r in flat_target:
-                        if isinstance(r, dict):
-                            actual_key = next((k for k in r.keys() if k.lower() == fk_lower), foreign_key)
-                            val = r.get(actual_key)
-                            if val is not None:
-                                lookup[str(val)] = r
-                    join_lookups[node_id] = {
-                        "lookup": lookup,
-                        "localKey": local_key,
-                        "foreignKey": foreign_key
-                    }
-
-    export_data = base_data
-    if columns and isinstance(columns, list) and len(columns) > 0 and isinstance(base_data, list):
-        export_data = []
-        for item_idx, wrapped in enumerate(base_data_wrapped):
-            item = wrapped["item"]
-            row = {}
-            # Coincidencias de joins para este item
-            joined_matches = {}
-            for j_node_id, j_info in join_lookups.items():
-                lk_lower = j_info["localKey"].lower()
-                actual_lk = next((k for k in item.keys() if k.lower() == lk_lower), j_info["localKey"]) if isinstance(item, dict) else None
-                local_val = item.get(actual_lk) if actual_lk and isinstance(item, dict) else None
-                if local_val is not None:
-                    matched = j_info["lookup"].get(str(local_val))
-                    if matched:
-                        joined_matches[j_node_id] = matched
-
-            for col in columns:
-                c_header = col.get("header")
-                c_key = col.get("key")
-                if not c_header or not c_key:
-                    continue
-                if "{{" in c_key and "}}" in c_key:
-                    iter_ctx = {**context, "_item": item, "_index": item_idx}
-                    val = resolve_template(iter_ctx, c_key)
-                else:
-                    # 1. Resolver clave por puntos en item
-                    val = None
-                    if isinstance(item, dict):
-                        val = item.get(c_key)
-                        if val is None:
-                            ck_lower = c_key.lower()
-                            actual_k = next((k for k in item.keys() if k.lower() == ck_lower), None)
-                            if actual_k:
-                                val = item.get(actual_k)
-                        if val is None and "." in c_key:
-                            curr = item
-                            for part in c_key.split("."):
-                                if not isinstance(curr, dict):
-                                    curr = None
-                                    break
-                                curr = curr.get(part)
-                            val = curr
-
-                    # 2. Buscar en filas coincidentes por joins
-                    if val is None:
-                        for m_row in joined_matches.values():
-                            if isinstance(m_row, dict):
-                                if c_key in m_row:
-                                    val = m_row[c_key]
-                                    break
-                                ck_lower = c_key.lower()
-                                actual_k = next((k for k in m_row.keys() if k.lower() == ck_lower), None)
-                                if actual_k:
-                                    val = m_row[actual_k]
-                                    break
-
-                    # 3. Fallback: resolver en contexto global
-                    if val is None:
-                        val = resolve_path(context, c_key)
-
-                row[c_header] = val if val is not None else ""
-            export_data.append(row)
-
-    elif join_lookups and isinstance(base_data, list):
-        export_data = []
-        for item in base_data:
-            merged = dict(item) if isinstance(item, dict) else {"valor": item}
-            for j_node_id, j_info in join_lookups.items():
-                lk_lower = j_info["localKey"].lower()
-                actual_lk = next((k for k in item.keys() if k.lower() == lk_lower), j_info["localKey"]) if isinstance(item, dict) else None
-                local_val = item.get(actual_lk) if actual_lk and isinstance(item, dict) else None
-                if local_val is not None:
-                    matched = j_info["lookup"].get(str(local_val))
-                    if matched and isinstance(matched, dict):
-                        merged.update(matched)
-            export_data.append(merged)
-
-    return export_data
-
-
-def format_excel_file(file_path, header_color=None):
-    """Aplica formato visual profesional (colores de cabecera, fuentes, alturas y anchos) identico a OrquestaFlow."""
-    try:
-        import openpyxl
-        from openpyxl.styles import PatternFill, Font, Alignment
-        from openpyxl.utils import get_column_letter
-
-        wb = openpyxl.load_workbook(file_path)
-        raw_color = (header_color or "1E293B").lstrip("#").upper()
-        if len(raw_color) == 3:
-            raw_color = "".join(c + c for c in raw_color)
-        if not re.match(r'^[0-9A-F]{6}$', raw_color):
-            raw_color = "1E293B"
-
-        fill = PatternFill(start_color=raw_color, end_color=raw_color, fill_type="solid")
-        font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-        alignment = Alignment(vertical="center", horizontal="left")
-
-        for ws in wb.worksheets:
-            if ws.max_row >= 1:
-                ws.row_dimensions[1].height = 24
-                for col_idx, cell in enumerate(ws[1], start=1):
-                    cell.fill = fill
-                    cell.font = font
-                    cell.alignment = alignment
-                    col_letter = get_column_letter(col_idx)
-                    header_val = str(cell.value or "")
-                    ws.column_dimensions[col_letter].width = max(len(header_val) + 4, 16)
-
-                for row_idx in range(2, ws.max_row + 1):
-                    ws.row_dimensions[row_idx].height = 18
-
-        wb.save(file_path)
-    except Exception as e:
-        logger.warning(f"No se pudo aplicar formato visual al Excel: {e}")
-`);
-
-  parts.push(`def transform_map_record(row, mappings, keep_others, context):
-    """Mapea los campos de un registro individual segun la configuracion del nodo."""
-    if not isinstance(row, dict):
-        return row
-    out = dict(row) if keep_others else {}
-    for m in mappings:
-        from_k = m.get("from", "")
-        to_k = m.get("to") or from_k
-        if not from_k:
-            continue
-        if "{{" in from_k:
-            out[to_k] = resolve_template({**context, "_item": row, "item": row}, from_k)
-            continue
-        val = row.get(from_k)
-        if val is None:
-            fk_lower = from_k.lower()
-            k = next((k for k in row.keys() if k.lower() == fk_lower), None)
-            if k:
-                val = row.get(k)
-        if keep_others and from_k != to_k and "." not in from_k and from_k in out:
-            del out[from_k]
-        out[to_k] = val
-    return out
-
-
-def transform_map_data(input_data, mappings, keep_others, context):
-    """Aplica transformacion de mapeo/seleccion de campos sobre datos (lista u objeto)."""
-    if isinstance(input_data, list):
-        return [transform_map_record(r, mappings, keep_others, context) for r in input_data]
-    if isinstance(input_data, dict):
-        for k in ["rows", "data", "items"]:
-            if isinstance(input_data.get(k), list):
-                return [transform_map_record(r, mappings, keep_others, context) for r in input_data[k]]
-        return transform_map_record(input_data, mappings, keep_others, context)
-    return input_data
-
-
-def run_js_transform(js_filename_or_path, input_data, context, inline_code=None):
-    """
-    Ejecuta un script de transformacion JavaScript usando Node.js.
-    Emula fielmente el sandbox de ejecucion de OrquestaFlow (data, context, item, index, console).
-    """
-    import shutil
-    import subprocess
-    import json
-    import os
-
-    # 1. Localizar archivo .js o usar codigo inline de respaldo
-    possible_paths = [
-        js_filename_or_path,
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), js_filename_or_path),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "transforms", os.path.basename(js_filename_or_path)),
-    ]
-    script_path = next((p for p in possible_paths if os.path.isfile(p)), None)
-
-    script_code = inline_code or ""
-    if script_path:
-        try:
-            with open(script_path, "r", encoding="utf-8") as f:
-                script_code = f.read()
-        except Exception as e:
-            logger.warning(f"No se pudo leer {script_path}, utilizando codigo inline: {e}")
-
-    if not script_code.strip():
-        logger.warning(f"No hay codigo JavaScript para ejecutar en {js_filename_or_path}")
-        return input_data
-
-    # 2. Verificar que Node.js este instalado en el sistema
-    node_bin = shutil.which("node")
-    if not node_bin:
-        logger.error("=" * 60)
-        logger.error("ERROR: Node.js no esta instalado o no se encuentra en el PATH.")
-        logger.error("Para ejecutar nodos de transformacion JavaScript ('jsonTransform')")
-        logger.error("es necesario tener Node.js instalado (version 18 o superior).")
-        logger.error("Descargalo gratis en: https://nodejs.org")
-        logger.error("=" * 60)
-        raise RuntimeError(f"Node.js requerido para ejecutar la transformacion: {js_filename_or_path}")
-
-    # 3. Payload para el runner en Node.js
-    payload = {
-        "inlineCode": script_code,
-        "data": input_data,
-        "context": context,
-        "item": context.get("_item"),
-        "index": context.get("_index"),
-    }
-
-    runner_script = r'''
-const fs = require('fs');
-
-let rawInput = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => { rawInput += chunk; });
-process.stdin.on('end', () => {
-    try {
-        const payload = JSON.parse(rawInput);
-        const { inlineCode, data, context, item, index } = payload;
-        const scriptCode = inlineCode || '';
-
-        // Reemplazar templates {{path}} en el codigo si los hay
-        const body = scriptCode.replace(/\\{\\{([^}]+)\\}\\}/g, (_m, pathStr) => {
-            const parts = pathStr.trim().split('.');
-            let cur = context;
-            for (const p of parts) {
-                if (cur == null) break;
-                cur = cur[p];
-            }
-            return JSON.stringify(cur ?? null);
-        });
-
-        const fnMatch = body.match(/(?:^|\\n)\\s*function\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\(/);
-        const declaredFnName = fnMatch ? fnMatch[1] : null;
-
-        const hasReturn = /\\breturn\\b/.test(body);
-        const fnBody = hasReturn ? body : ('return (' + body + '\\n);');
-
-        const consoleMock = {
-            log: (...args) => console.error('[JS Log]', ...args),
-            info: (...args) => console.error('[JS Info]', ...args),
-            warn: (...args) => console.error('[JS Warn]', ...args),
-            error: (...args) => console.error('[JS Error]', ...args),
-            debug: (...args) => console.error('[JS Debug]', ...args),
-            table: (t) => console.error('[JS Table]', JSON.stringify(t)),
-            checkpoint: (lbl, val) => console.error('[JS Checkpoint] ' + (lbl || '') + ':', val !== undefined ? JSON.stringify(val) : '')
-        };
-
-        const fnCode = '"use strict";\\n' + fnBody + '\\n' + (declaredFnName ? ('try { if (typeof ' + declaredFnName + ' === "function") return ' + declaredFnName + '(data, context); } catch(e) { return ' + declaredFnName + '(data); }') : '');
-        const fn = new Function('data', 'context', 'item', 'index', 'console', fnCode);
-
-        const result = fn(data, context, item, index, consoleMock);
-        process.stdout.write(JSON.stringify({ success: true, result: result === undefined ? null : result }));
-    } catch (err) {
-        process.stdout.write(JSON.stringify({ success: false, error: err ? (err.message || String(err)) : 'Error desconocido' }));
-    }
-});
-'''
-
-    try:
-        proc = subprocess.run(
-            [node_bin, "-e", runner_script],
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=60
-        )
-    except subprocess.TimeoutExpired:
-        raise TimeoutError(f"La transformacion JavaScript '{js_filename_or_path}' excedio el tiempo limite de 60 segundos.")
-    except Exception as e:
-        raise RuntimeError(f"Error invocando Node.js para '{js_filename_or_path}': {e}")
-
-    if proc.stderr:
-        for err_line in proc.stderr.strip().splitlines():
-            logger.info(f"  {err_line}")
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"Node.js termino con codigo de error {proc.returncode}: {proc.stderr}")
-
-    try:
-        out_json = json.loads(proc.stdout)
-    except Exception as e:
-        raise ValueError(f"Respuesta no valida de la transformacion JS: {proc.stdout[:300]}") from e
-
-    if not out_json.get("success"):
-        raise RuntimeError(f"Error en script JS '{js_filename_or_path}': {out_json.get('error')}")
-
-    return out_json.get("result")
-`);
-
-  // Main function
-  parts.push(`def run_flow():`);
-  parts.push(`    context = {}`);
-  parts.push(`    logger.info("=" * 50)`);
-  parts.push(`    logger.info(f"Iniciando flujo: ${flowName}")`);
-  parts.push(`    logger.info("=" * 50)`);
-  parts.push(``);
-
-  const total = orderedNodes.length;
-  for (let stepNum = 0; stepNum < orderedNodes.length; stepNum++) {
-    const node = orderedNodes[stepNum];
-    let code = '';
-    const step = stepNum + 1;
-
-    switch (node.type) {
-      case 'start':
-        code = generateStartNode(node, step, total);
-        break;
-      case 'httpGet': case 'httpPost': case 'httpRequest':
-        code = generateHttpNode(node, step, total, edges, nodes);
-        break;
-      case 'query':
-        code = generateQueryNode(node, step, total, ctx.queries[node.data?.queryId], edges, nodes, flowName, sqlFiles);
-        break;
-      case 'export':
-        code = generateExportNode(node, step, total, edges, nodes);
-        break;
-      case 'dataSource': case 'fileSource':
-        code = generateDataSourceNode(node, step, total, edges, nodes);
-        break;
-      case 'dataList':
-        code = generateDataListNode(node, step, total);
-        break;
-      case 'variables':
-        code = generateVariablesNode(node, step, total);
-        break;
-      case 'jsonTransform':
-        code = generateJsonTransformNode(node, step, total, edges, nodes, flowName, jsFiles, false);
-        break;
-      case 'timer': case 'delay':
-        code = generateTimerNode(node, step, total);
-        break;
-      case 'forEach':
-        code = generateForEachNode(
-          node, step, total,
-          forEachSubgraphMap[node.id] || [],
-          edges, nodes, ctx,
-          flowName, sqlFiles, jsFiles
-        );
-        break;
-      case 'forEachEnd':
-        code = generateForEachEndNode(node, step, total, forEachNodeForEnd[node.id]);
-        break;
-      case 'scraping':
-        code = `# === [${step}/${total}] Nodo: scraping (OMITIDO - no soportado en exportacion Python) ===\n# El nodo de scraping '${node.data?.label || node.id}' requiere configuracion manual.\ncontext[${JSON.stringify(node.id)}] = {}\n\n`;
-        break;
-      default:
-        code = `# === [${step}/${total}] Nodo tipo '${node.type}' no reconocido: ${node.data?.label || node.id} ===\ncontext[${JSON.stringify(node.id)}] = {}\n\n`;
-    }
-
-    parts.push(indent(code, 4));
-  }
-
-  parts.push(`    logger.info("=" * 50)`);
-  parts.push(`    logger.info("Flujo completado exitosamente.")`);
-  parts.push(`    logger.info("=" * 50)`);
-  parts.push(`    return context`);
-  parts.push(``);
-  parts.push(`if __name__ == "__main__":`);
-  parts.push(`    run_flow()`);
-  parts.push(``);
-
-  // 4. Build README.md
-  const readmeLines: string[] = [
-    `# Flujo: ${flowName}`,
+  script.push('', ...functions.flatMap(f => [f, '', '']));
+  script.push(
+    'def main():',
+    `    ctx = ${pyCall('start_flow', startArgs, 4, 'ctx = ')}`,
+    ...mainLines,
+    '    finish_flow(ctx)',
     '',
-    `Script en Python generado automaticamente por **OrquestaFlow** el ${now}.`,
     '',
-    `## Contenido del Paquete`,
-    `- \`${slug}_flow.py\`: Script principal ejecutable que corre el flujo de forma autonoma.`,
-    `- \`flow.json\`: Definicion completa del flujo (nodos, conexiones y metadatos).`,
-    `- \`requirements.txt\`: Lista de dependencias necesarias.`,
-    `- \`.env.example\`: Plantilla con variables de entorno, hosts y cadenas de conexion de base de datos.`,
+    'if __name__ == "__main__":',
+    '    run_main(main)',
+    '',
+  );
+
+  // Imports may have grown while generating the functions: rebuild the import block
+  const importIdx = script.findIndex(l => l.startsWith('from orquesta_runtime import'));
+  script[importIdx] = `from orquesta_runtime import (\n${[...gen.imports].sort().map(i => `    ${i},`).join('\n')}\n)`;
+
+  return {
+    script: script.join('\n'),
+    runtimePy: PYTHON_RUNTIME,
+    scriptFiles: gen.scriptFiles,
+    requirementsTxt: [...gen.requirements].sort().join('\n') + '\n',
+    envExample: buildEnvExample(flowName, gen),
+    readmeMd: buildReadme(flowName, slug, now, gen, steps, stepList, notes.map((n: any) => String(n.data.text).trim())),
+    sqlFiles: gen.sqlFiles,
+    jsFiles: gen.jsFiles,
+  };
+}
+
+function buildEnvExample(flowName: string, gen: Generator): string {
+  const lines = [
+    '# =============================================================================',
+    `# Variables de entorno del flujo: ${flowName}`,
+    "# Copia este archivo como '.env' y completa los valores antes de ejecutar.",
+    '# =============================================================================',
+    '',
+    '# Carpeta donde se guardan los archivos exportados (por defecto: ./exports)',
+    '# OUTPUT_DIR=',
+    '',
   ];
 
-  if (sqlFiles.length > 0) {
-    readmeLines.push(`- \`queries/\`: Carpeta con los archivos \`.sql\` de cada consulta a base de datos ejecutada por el flujo.`);
-  }
-  if (jsFiles.length > 0) {
-    readmeLines.push(`- \`transforms/\`: Carpeta con los scripts JavaScript (\`.js\`) de transformacion de datos ejecutados por el flujo.`);
+  if (gen.databases.size) {
+    lines.push('# -- Bases de datos -----------------------------------------------------------');
+    for (const [key, db] of gen.databases) {
+      if (db.driver === 'sqlite') {
+        lines.push(`# ${db.name} (SQLite, clave ${key})`, `DB_PATH_${key}=${db.host}`, '');
+        continue;
+      }
+      lines.push(
+        `# ${db.name} (clave ${key})`,
+        `DB_HOST_${key}=${db.host}`,
+        `DB_NAME_${key}=${db.database}`,
+        `DB_PORT_${key}=${db.port}`,
+        `DB_DRIVER_${key}=${db.driver}`,
+        `DB_USER_${key}=`,
+        `DB_PASSWORD_${key}=`,
+        `# O una cadena completa: DB_CONN_STR_${key}=DRIVER={${db.driver}};SERVER=${db.host},${db.port};DATABASE=${db.database};UID=...;PWD=...`,
+        '',
+      );
+    }
+    if ([...gen.databases.values()].some(db => db.driver !== 'sqlite')) {
+      lines.push('# Credenciales comunes a todas las conexiones SQL Server (opcional)', 'DB_USER_DEFAULT=', 'DB_PASSWORD_DEFAULT=', '');
+    }
   }
 
-  readmeLines.push(
+  for (const [section, entries] of gen.env) {
+    lines.push(`# -- ${section} ${'-'.repeat(Math.max(3, 74 - section.length))}`);
+    for (const e of entries) {
+      if (e.comment) lines.push(`# ${e.comment}`);
+      const optional = section === 'Variables del flujo' || section === 'Valores de entrada' || section === 'Webhook';
+      lines.push(`${optional ? '# ' : ''}${e.name}=${e.value ?? ''}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+function buildReadme(flowName: string, slug: string, now: string, gen: Generator, steps: StepInfo[], stepList: string[], notes: string[] = []): string {
+  const needsNode = gen.jsFiles.length > 0;
+  const needsOdbc = [...gen.databases.values()].some(db => db.driver !== 'sqlite');
+  const lines = [
+    `# ${flowName}`,
     '',
-    `## Requisitos Previos`,
-    `- Python 3.9 o superior`,
-    needsPyodbc ? `- [ODBC Driver 17 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) (o superior) instalado en el sistema` : '',
-    jsFiles.length > 0 ? `- [Node.js](https://nodejs.org) (version 18 o superior) instalado en el sistema (requerido para ejecutar transformaciones JavaScript en nodos 'jsonTransform')` : '',
+    `Script de Python generado por **OrquestaFlow** (${now}).`,
     '',
-    `## Instalacion y Configuracion`,
+    '## Contenido',
     '',
-    `1. **Crear y activar un entorno virtual (recomendado):**`,
-    '   ```bash',
-    '   # En Windows:',
-    '   python -m venv venv',
-    '   .\\venv\\Scripts\\activate',
+    `- \`${slug}_flow.py\` — el flujo: una función por paso y \`main()\`, que los ejecuta en orden.`,
+    '- `orquesta_runtime.py` — funciones comunes (plantillas `{{...}}`, HTTP con reintentos, SQL, exportación, bucles y bifurcaciones). No necesitas modificarlo.',
+    '- `requirements.txt` — dependencias de Python.',
+    '- `.env.example` — plantilla de configuración (conexiones, secretos, archivos de entrada).',
+    '- `flow.json` — definición original del flujo.',
+  ];
+  if (gen.sqlFiles.length) lines.push('- `queries/` — una consulta `.sql` por cada nodo de base de datos.');
+  if (gen.jsFiles.length) lines.push('- `transforms/` — el código JavaScript de cada transformación.');
+  if (gen.imports.has('run_script')) lines.push('- `scripts/` — los scripts de Python de los nodos de web scraping (deben imprimir JSON por consola).');
+
+  lines.push(
     '',
-    '   # En Linux / macOS:',
-    '   python3 -m venv venv',
-    '   source venv/bin/activate',
-    '   ```',
+    '## Requisitos',
     '',
-    `2. **Instalar dependencias:**`,
-    '   ```bash',
-    '   pip install -r requirements.txt',
-    '   ```',
+    '- Python 3.9 o superior',
+    ...(needsOdbc ? ['- [ODBC Driver 17 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) o superior'] : []),
+    ...(needsNode ? ['- [Node.js](https://nodejs.org) 18 o superior (ejecuta las transformaciones JavaScript)'] : []),
     '',
-    `3. **Configurar variables de entorno y base de datos:**`,
-    '   Copia el archivo `.env.example` a `.env`:',
-    '   ```bash',
-    '   # En Windows:',
-    '   copy .env.example .env',
+    '## Instalación',
     '',
-    '   # En Linux / macOS:',
-    '   cp .env.example .env',
-    '   ```',
-    '   Abre el archivo `.env` para ajustar los servidores (`DB_HOST_*`), nombres de BD (`DB_NAME_*`), usuarios y contrasenas.',
+    '```bash',
+    'python -m venv venv',
+    'venv\\Scripts\\activate          # Linux / macOS: source venv/bin/activate',
+    'pip install -r requirements.txt',
+    'copy .env.example .env          # Linux / macOS: cp .env.example .env',
+    '```',
     '',
-    `## Ejecucion`,
+    'Completa `.env` con los servidores, usuarios, contraseñas y tokens. Los secretos nunca se incluyen en el script.',
+    '',
+    '## Ejecución',
     '',
     '```bash',
     `python ${slug}_flow.py`,
     '```',
-    ''
+    '',
+    'Si falta un valor de entrada (variables del flujo, parámetros SQL, archivos), el script lo pide por consola; para ejecuciones programadas defínelos en `.env` (`VAR_<nombre>`, `FILE_PATH_<NODO>`).',
+    '',
+    '## Cómo leer el script',
+    '',
+    '- Cada nodo es una función con el decorador `@node(número, "Nombre", ...)`; el número coincide con la lista de pasos.',
+    '- `main()` muestra el recorrido: los bucles son un `for _ in loop(...)` y las bifurcaciones un `if ctx.took(paso, "salida")`.',
+    '- `ctx` guarda el resultado de cada paso por id y por nombre, igual que `{{nodo.campo}}` en OrquestaFlow.',
+    '- Los reintentos (`retries=`) y la opción de continuar ante errores (`on_error="continue"`) se configuran en cada nodo de OrquestaFlow y se exportan tal cual.',
+    '',
+    '## Pasos',
+    '',
+    '```',
+    ...stepList.map(l => l.trimStart()),
+    '```',
+    '',
   );
 
-  if (sqlFiles.length > 0) {
-    readmeLines.push(
-      '## Consultas SQL del Flujo',
-      '',
-      'Las consultas ejecutadas por los nodos SQL se encuentran desacopladas en la carpeta `queries/`:',
-      '',
-      '| Archivo | Consulta | Nodo del Flujo |',
-      '|---|---|---|'
-    );
-    sqlFiles.forEach(sf => {
-      readmeLines.push(`| \`queries/${sf.fileName}\` | ${sf.queryName} | ${sf.nodeLabel} |`);
-    });
-    readmeLines.push('');
-  } else {
-    readmeLines.push(
-      '## Origen de los Datos',
-      '',
-      'Este flujo no contiene nodos de tipo consulta SQL directa (obtiene o procesa datos a traves de peticiones HTTP, APIs externas o listas de datos estaticas).',
-      ''
-    );
+  if (notes.length) {
+    lines.push('## Notas del flujo', '');
+    notes.forEach(note => lines.push(...note.split('\n').map(l => `> ${l}`), ''));
   }
 
-  if (jsFiles.length > 0) {
-    readmeLines.push(
-      '## Transformaciones JavaScript',
-      '',
-      'Las transformaciones de datos definidas en codigo JavaScript se exportan desacopladas en la carpeta `transforms/`:',
-      '',
-      '| Archivo | Nodo del Flujo |',
-      '|---|---|'
-    );
-    jsFiles.forEach(jf => {
-      readmeLines.push(`| \`transforms/${jf.fileName}\` | ${jf.nodeLabel} |`);
-    });
-    readmeLines.push('');
+  if (gen.sqlFiles.length) {
+    lines.push('## Consultas SQL', '', '| Archivo | Consulta | Paso |', '|---|---|---|');
+    gen.sqlFiles.forEach(f => lines.push(`| \`queries/${f.fileName}\` | ${f.queryName} | ${f.nodeLabel} |`));
+    lines.push('');
   }
-
-  if (fileSourceNodes.length > 0) {
-    readmeLines.push(
-      '## Carga de Archivos Locales',
-      '',
-      'Puedes pasar las rutas de archivos como argumentos de linea de comandos:',
-      '```bash',
-      `python ${slug}_flow.py "C:\\ruta\\al\\archivo_1.xlsx"`,
-      '```',
-      ''
-    );
+  if (gen.jsFiles.length) {
+    lines.push('## Transformaciones JavaScript', '', '| Archivo | Paso |', '|---|---|');
+    gen.jsFiles.forEach(f => lines.push(`| \`transforms/${f.fileName}\` | ${f.nodeLabel} |`));
+    lines.push('');
   }
-
-  readmeLines.push('## Estructura de Pasos del Flujo', '');
-  readmeLines.push('| Paso | Tipo de Nodo | Etiqueta |');
-  readmeLines.push('|---|---|---|');
-  orderedNodes.forEach((n, idx) => {
-    readmeLines.push(`| ${idx + 1} | \`${n.type}\` | ${n.data?.label || n.id} |`);
-  });
-  readmeLines.push('');
-
-  const readmeMd = readmeLines.filter(line => line !== undefined).join('\n');
-
-  return {
-    script: parts.join('\n'),
-    requirementsTxt,
-    envExample,
-    readmeMd,
-    sqlFiles,
-    jsFiles
-  };
+  return lines.join('\n');
 }

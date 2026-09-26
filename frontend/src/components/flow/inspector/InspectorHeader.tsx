@@ -4,7 +4,7 @@ import { TYPE_LABELS, TYPE_COLORS, TYPE_BG_COLORS } from './types';
 import {
   Play, Globe, Code, FileOutput, Database, Clock,
   FileSpreadsheet, List, Repeat, Square, Check, Loader2, X,
-  Pause, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal
+  Pause, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal, Copy, StickyNote
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -31,7 +31,10 @@ export const TYPE_ICONS: Record<string, React.ElementType> = {
   webhookTrigger: Radio,
   oauth2Connector: KeyRound,
   aiChatCompletion: Bot,
+  note: StickyNote,
 };
+
+const hasErrorContinued = (result: any) => Boolean(result && typeof result === 'object' && result.continued);
 
 interface InspectorHeaderProps {
   node: Node;
@@ -50,9 +53,17 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
   const completed = useAppSelector(state => state.flows.completedNodeIds.includes(node.id));
   const hasError = useAppSelector(state => state.flows.errorNodeIds.includes(node.id));
   const paused = useAppSelector(state => state.flows.pausedNodeIds.includes(node.id));
+  const continuedAfterError = useAppSelector(state => hasErrorContinued(state.flows.nodeResults[node.id]));
 
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const copyId = () => {
+    navigator.clipboard?.writeText(node.id).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
 
   const startEdit = () => {
     setEditValue((node.data?.label as string) || '');
@@ -123,18 +134,29 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
             </div>
           )}
           {hasError && !executing && (
-            <div className="w-7 h-7 bg-danger text-white rounded-full flex items-center justify-center shadow-sm">
+            <div
+              className={cn('w-7 h-7 text-white rounded-full flex items-center justify-center shadow-sm', continuedAfterError ? 'bg-amber-500' : 'bg-danger')}
+              title={continuedAfterError ? 'Falló, pero el flujo continuó' : 'Error'}
+            >
               <X size={13} strokeWidth={3} />
             </div>
           )}
 
-          {/* Node ID tooltip */}
-          <span
-            className="text-[9px] text-muted-light font-mono bg-bg px-2 py-1 rounded border border-border-light cursor-default select-all shadow-sm"
-            title={`ID: ${node.id}`}
+          {/* Node ID: used in expressions like {{id.campo}} */}
+          <button
+            type="button"
+            onClick={copyId}
+            className={cn(
+              'flex items-center gap-1 text-[9px] font-mono px-2 py-1 rounded border shadow-sm transition-colors',
+              copied
+                ? 'text-emerald-600 border-emerald-500/40 bg-emerald-500/5'
+                : 'text-muted-light bg-bg border-border-light hover:text-accent hover:border-accent/40'
+            )}
+            title={`ID del nodo: ${node.id}\nÚsalo en expresiones como {{${node.id}.campo}}. Clic para copiar.`}
           >
-            {node.id.length > 12 ? node.id.slice(0, 12) + '...' : node.id}
-          </span>
+            {copied ? <Check size={10} strokeWidth={2.5} /> : <Copy size={10} />}
+            {copied ? 'Copiado' : node.id.length > 12 ? node.id.slice(0, 12) + '…' : node.id}
+          </button>
 
           {onClose && (
             <button

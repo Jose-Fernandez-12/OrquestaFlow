@@ -2,6 +2,14 @@ import { FastifyInstance } from 'fastify';
 import crypto from 'crypto';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
+import {
+  ExecutionTracer,
+  startExecutionLog,
+  finishExecutionLog,
+  summarizeContext,
+  isCancellationError,
+  type ExecutionStatus,
+} from '../engine/executionLog.js';
 
 export async function flowRoutes(app: FastifyInstance): Promise<void> {
   // List all flows
@@ -414,16 +422,37 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  // Get execution logs for flow
-  app.get<{ Params: { id: string } }>('/:id/logs', async (request) => {
+  // Execution history for a flow (newest first). Query: limit (max 100), offset, status
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string; status?: string } }>('/:id/logs', async (request) => {
     const db = getDb();
+    const limit = Math.min(100, Math.max(1, Number(request.query.limit) || 30));
+    const offset = Math.max(0, Number(request.query.offset) || 0);
+    const status = ['running', 'completed', 'error', 'cancelled'].includes(String(request.query.status)) ? String(request.query.status) : null;
+
+    const where = `target_type = 'flow' AND target_id = ?${status ? ' AND status = ?' : ''}`;
+    const params: any[] = status ? [request.params.id, status] : [request.params.id];
+
     const logs = db.prepare(`
-      SELECT * FROM execution_logs
-      WHERE target_type = 'flow' AND target_id = ?
-      ORDER BY started_at DESC
-      LIMIT 30
+      SELECT * FROM execution_logs WHERE ${where}
+      ORDER BY started_at DESC, rowid DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+    const total = (db.prepare(`SELECT COUNT(*) AS count FROM execution_logs WHERE ${where}`).get(...params) as any)?.count ?? 0;
+
+    const stats = db.prepare(`
+      SELECT status, COUNT(*) AS count, AVG(duration_ms) AS avg_ms
+      FROM execution_logs WHERE target_type = 'flow' AND target_id = ?
+      GROUP BY status
     `).all(request.params.id);
-    return { data: logs };
+
+    return { data: logs, total, limit, offset, stats };
+  });
+
+  // Delete the execution history of a flow
+  app.delete<{ Params: { id: string } }>('/:id/logs', async (request) => {
+    const db = getDb();
+    db.prepare("DELETE FROM execution_logs WHERE target_type = 'flow' AND target_id = ? AND status != 'running'").run(request.params.id);
+    return { data: { cleared: true } };
   });
 
   // Stop flow execution
@@ -461,31 +490,28 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   // Execute flow (using DAG engine)
   app.post<{ Params: { id: string }, Body: { mode?: 'normal' | 'debug' } }>('/:id/execute', async (request, reply) => {
     const db = getDb();
-    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
+    const flowId = request.params.id;
+    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as Record<string, unknown> | undefined;
     if (!flow) return reply.status(404).send({ error: 'Flow not found' });
     const mode = request.body?.mode || 'normal';
 
-    const logId = uuid();
-    db.prepare(`
-      INSERT INTO execution_logs (id, target_type, target_id, status)
-      VALUES (?, 'flow', ?, 'running')
-    `).run(logId, request.params.id);
-
+    const logId = startExecutionLog(flowId, mode === 'debug' ? 'debug' : 'manual');
+    const tracer = new ExecutionTracer();
     const startTime = Date.now();
+    const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
+    const { getIo } = await import('../engine/socket.js');
+    const io = getIo();
+
     try {
-      const { executeFlowEngine } = await import('../engine/executor.js');
-      const { getIo } = await import('../engine/socket.js');
-      const io = getIo();
-      
       // Track exported files emitted in real-time so we also include them in the final DB log
       const realtimeExportedFiles: any[] = [];
 
       // Execute the DAG with real-time socket callbacks
-      const context = await executeFlowEngine(request.params.id, (nodeId, status, result) => {
-        io.emit('flow-progress', { 
-          flowId: request.params.id, 
-          nodeId, 
-          status, 
+      const context = await executeFlowEngine(flowId, (nodeId, status, result) => {
+        io.emit('flow-progress', {
+          flowId,
+          nodeId,
+          status,
           result,
           current: result?.current,
           total: result?.total,
@@ -508,70 +534,32 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
             headers: result.headers
           };
           realtimeExportedFiles.push(info);
-          io.emit('flow-export-ready', {
-            flowId: request.params.id,
-            ...info
-          });
+          io.emit('flow-export-ready', { flowId, ...info });
         }
-      }, { mode });
+      }, { mode, tracer });
       const duration = Date.now() - startTime;
 
-      // Ensure exportedFiles are collected for the execution logs and completion payload
-      const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
-      const exportedFiles = realtimeExportedFiles.length > 0 ? realtimeExportedFiles : exportResults.map((exportResult: any) => {
-        const fileName = exportResult.filePath.split(/[/\\]/).pop();
-        return {
-          fileName,
-          downloadUrl: `/api/files/${fileName}`,
-          records: exportResult.records,
-          format: exportResult.format,
-          filePath: exportResult.filePath,
-          previewRows: exportResult.previewRows,
-          headers: exportResult.headers
-        };
-      });
+      const summary = summarizeContext(context);
+      const exportedFiles = realtimeExportedFiles.length > 0 ? realtimeExportedFiles : summary.exportedFiles;
+      const { recordCount } = summary;
+      const trace = tracer.toJSON('completed');
+      const warnings = trace.filter(t => t.status === 'continued').length;
 
-      let recordCount = 0;
-      if (exportResults.length > 0) {
-        recordCount = exportResults.reduce((acc, curr: any) => acc + (curr.records || 0), 0);
-      } else {
-        // Fallback: sum of items processed by nodes if no export node is present
-        for (const val of Object.values(context)) {
-          if (val && typeof val === 'object') {
-            if (Array.isArray((val as any).data?.items)) {
-              recordCount += (val as any).data.items.length;
-            } else if (Array.isArray((val as any).data)) {
-              recordCount += (val as any).data.length;
-            }
-          }
-        }
-      }
-
-      const resultPayload = {
-        exportedFiles,
+      finishExecutionLog(logId, {
+        status: 'completed',
+        durationMs: duration,
         recordCount,
-        duration,
-        nodeCount: Object.keys(context).length
-      };
-
-      db.prepare(`
-        UPDATE execution_logs
-        SET status = 'completed', duration_ms = ?, record_count = ?, result = ?, completed_at = datetime('now')
-        WHERE id = ?
-      `).run(duration, recordCount, JSON.stringify(resultPayload), logId);
+        result: { exportedFiles, recordCount, duration, nodeCount: Object.keys(context).length, warnings },
+        trace
+      });
 
       db.prepare(`
         UPDATE flows
         SET last_run_at = datetime('now'), last_run_duration_ms = ?, last_run_record_count = ?, status = 'saved'
         WHERE id = ?
-      `).run(duration, recordCount, request.params.id);
+      `).run(duration, recordCount, flowId);
 
-      io.emit('flow-completed', {
-        flowId: request.params.id,
-        duration,
-        recordCount,
-        exportedFiles
-      });
+      io.emit('flow-completed', { flowId, duration, recordCount, exportedFiles, warnings });
 
       return {
         data: {
@@ -580,88 +568,68 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
           duration,
           recordCount,
           exportedFiles,
+          warnings,
           context
         }
       };
 
     } catch (err: any) {
       const duration = Date.now() - startTime;
-      const { activeFlowExecutions } = await import('../engine/executor.js');
-      const activeState = activeFlowExecutions.get(request.params.id);
-      const isCancelled = activeState?.status === 'cancelled' || err.message?.toLowerCase().includes('detenid') || err.message?.toLowerCase().includes('cancelad');
-
-      const targetStatus = isCancelled ? 'cancelled' : 'error';
+      const isCancelled = isCancellationError(err, activeFlowExecutions.get(flowId)?.status);
+      const status: ExecutionStatus = isCancelled ? 'cancelled' : 'error';
       const errorMessage = isCancelled ? 'Ejecución detenida por el usuario' : err.message;
 
-      try {
-        db.prepare(`
-          UPDATE execution_logs
-          SET status = ?, duration_ms = ?, error_message = ?, completed_at = datetime('now')
-          WHERE id = ?
-        `).run(targetStatus, duration, errorMessage, logId);
-      } catch {
-        db.prepare(`
-          UPDATE execution_logs
-          SET status = 'error', duration_ms = ?, error_message = ?, completed_at = datetime('now')
-          WHERE id = ?
-        `).run(duration, errorMessage, logId);
-      }
-
-      db.prepare(`
-        UPDATE flows
-        SET status = 'saved'
-        WHERE id = ?
-      `).run(request.params.id);
-
-      try {
-        const { getIo } = await import('../engine/socket.js');
-        const io = getIo();
-        if (isCancelled) {
-          io.emit('flow-stopped', {
-            flowId: request.params.id,
-            duration
-          });
-        } else {
-          io.emit('flow-failed', {
-            flowId: request.params.id,
-            error: err.message,
-            duration
-          });
-        }
-      } catch {}
+      finishExecutionLog(logId, { status, durationMs: duration, errorMessage, trace: tracer.toJSON(status) });
+      db.prepare("UPDATE flows SET status = 'saved' WHERE id = ?").run(flowId);
 
       if (isCancelled) {
+        io.emit('flow-stopped', { flowId, duration });
         return { data: { logId, status: 'cancelled', duration } };
       }
 
+      io.emit('flow-failed', { flowId, error: err.message, duration });
       return reply.status(500).send({ error: 'Flow execution failed', message: err.message });
     }
   });
 
-  // Execute individual node
-  app.post<{ Params: { id: string; nodeId: string } }>('/:id/nodes/:nodeId/execute', async (request, reply) => {
-    const db = getDb();
-    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
-    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+  // Test a single node: runs only that node, reading the upstream results sent by the editor
+  // (the last run's results). The saved definition is used, so the editor saves before calling.
+  app.post<{ Params: { id: string; nodeId: string }; Body: { context?: Record<string, any> } }>(
+    '/:id/nodes/:nodeId/execute',
+    // The upstream results travel in the body and can be large
+    { bodyLimit: 50 * 1024 * 1024 },
+    async (request, reply) => {
+      const db = getDb();
+      const flowId = request.params.id;
+      const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
+      if (!flow) return reply.status(404).send({ error: 'Flow not found' });
 
-    const logId = uuid();
-    db.prepare(`
-      INSERT INTO execution_logs (id, target_type, target_id, status)
-      VALUES (?, 'node', ?, 'running')
-    `).run(logId, request.params.nodeId);
+      const definition = JSON.parse(flow.definition || '{"nodes":[]}');
+      const node = (definition.nodes || []).find((n: any) => n.id === request.params.nodeId);
+      if (!node) return reply.status(404).send({ error: 'El nodo no existe en la versión guardada del flujo' });
 
-    // Simulate node execution
-    await new Promise(resolve => setTimeout(resolve, 650));
-    const duration = 650;
+      const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
+      if (activeFlowExecutions.get(flowId)?.status === 'running') {
+        return reply.status(409).send({ error: 'El flujo se está ejecutando; espera a que termine para probar un nodo' });
+      }
 
-    db.prepare(`
-      UPDATE execution_logs
-      SET status = 'completed', duration_ms = ?, completed_at = datetime('now')
-      WHERE id = ?
-    `).run(duration, logId);
-
-    return { data: { logId, nodeId: request.params.nodeId, status: 'completed', duration } };
-  });
+      const { getIo } = await import('../engine/socket.js');
+      const io = getIo();
+      const startTime = Date.now();
+      try {
+        const context = await executeFlowEngine(
+          flowId,
+          (nodeId, status, result) => {
+            io.emit('flow-progress', { flowId, nodeId, status, result, current: result?.current, total: result?.total });
+          },
+          { mode: 'normal', initialContext: request.body?.context || {}, onlyNodeIds: [node.id] }
+        );
+        return { data: { nodeId: node.id, status: 'completed', duration: Date.now() - startTime, output: context[node.id] } };
+      } catch (err: any) {
+        return reply.status(422).send({ error: err.message, nodeId: node.id, duration: Date.now() - startTime });
+      }
+    }
+  );
 
 
   // ── Flow versions ──
@@ -789,11 +757,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
         timestamp: new Date().toISOString()
       };
 
-      const logId = uuid();
-      db.prepare(`
-        INSERT INTO execution_logs (id, target_type, target_id, status)
-        VALUES (?, 'flow', ?, 'running')
-      `).run(logId, targetFlow.id);
+      const logId = startExecutionLog(targetFlow.id, 'webhook');
+      const tracer = new ExecutionTracer();
       const startTime = Date.now();
 
       executeFlowEngine(
@@ -801,23 +766,23 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
         (nodeId, status, result) => {
           io.emit('flow-progress', { flowId: targetFlow.id, nodeId, status, result, current: result?.current, total: result?.total });
         },
-        { mode: 'normal', initialContext: { _webhookPayload: payload } }
-      ).then(() => {
+        { mode: 'normal', initialContext: { _webhookPayload: payload }, tracer }
+      ).then(context => {
         const duration = Date.now() - startTime;
-        db.prepare(`
-          UPDATE execution_logs
-          SET status = 'completed', duration_ms = ?, result = ?, completed_at = datetime('now')
-          WHERE id = ?
-        `).run(duration, JSON.stringify({ trigger: 'webhook', webhookId }), logId);
+        const { exportedFiles, recordCount } = summarizeContext(context);
+        finishExecutionLog(logId, {
+          status: 'completed',
+          durationMs: duration,
+          recordCount,
+          result: { trigger: 'webhook', webhookId, exportedFiles, recordCount },
+          trace: tracer.toJSON('completed')
+        });
         db.prepare("UPDATE flows SET last_run_at = datetime('now'), last_run_duration_ms = ? WHERE id = ?").run(duration, targetFlow.id);
         io.emit('flow-completed', { flowId: targetFlow.id, duration, source: 'webhook' });
       }).catch(err => {
         const duration = Date.now() - startTime;
-        db.prepare(`
-          UPDATE execution_logs
-          SET status = 'error', duration_ms = ?, error_message = ?, completed_at = datetime('now')
-          WHERE id = ?
-        `).run(duration, err.message, logId);
+        const status: ExecutionStatus = isCancellationError(err, activeFlowExecutions.get(targetFlow.id)?.status) ? 'cancelled' : 'error';
+        finishExecutionLog(logId, { status, durationMs: duration, errorMessage: err.message, trace: tracer.toJSON(status) });
         io.emit('flow-failed', { flowId: targetFlow.id, error: err.message, duration });
         app.log.error(err, 'Error executing flow via webhook');
       });
