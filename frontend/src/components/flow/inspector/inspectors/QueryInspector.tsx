@@ -9,6 +9,7 @@ import { format as formatSql } from 'sql-formatter';
 import { useAppSelector } from '../../../../store/hooks';
 import { InspectorTabs } from '../InspectorTabs';
 import { JsonSelectorModal } from '../editors/JsonSelectorModal';
+import { MapSourceButton } from '../editors/MapSourceButton';
 import { getUpstreamNodes } from '../utils';
 import type { InspectorProps, TabDefinition } from '../types';
 
@@ -147,17 +148,10 @@ export function QueryInspector({ node, nodes, edges, updateNodeData }: QueryInsp
                           #param_{param}
                         </label>
                         <div className="flex gap-1">
-                          {upstreamDataNodes.map(upNode => (
-                            <JsonSelectorModal
-                              key={upNode.id}
-                              node={upNode}
-                              customLabel={`Mapear`}
-                              onSelectValue={(val) => {
+                          <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) => {
                                 const newParams = { ...currentParamsObj, [param]: val };
                                 updateNodeData('queryParams', JSON.stringify(newParams, null, 2));
-                              }}
-                            />
-                          ))}
+                              }} />
                         </div>
                       </div>
                       <Input

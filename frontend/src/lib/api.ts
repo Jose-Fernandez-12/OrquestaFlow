@@ -1,4 +1,5 @@
-const RAW_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const defaultHost = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost';
+const RAW_URL = import.meta.env.VITE_API_URL || `http://${defaultHost}:3001`;
 const BASE_URL = RAW_URL.replace(/\/+$/, '');
 
 export const API_BASE_URL = BASE_URL;

@@ -51,4 +51,8 @@ Thumbs.db
 # Project specific
 Automatización-visual-de-flujos/
 test.xls
-test_xml.cjs
+test_xml.cjs
+temp_*
+test_*
+scratch_*
+*.xlsx

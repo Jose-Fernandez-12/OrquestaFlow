@@ -44,13 +44,20 @@ import {
   Loader2,
   Pause,
   Eye,
-  Upload
+  Upload,
+  FileCode2,
+  GitCommitVertical,
+  Check,
+  Terminal
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
+import { FlowVersionsModal } from './FlowVersionsModal';
 import { ImportFlowModal } from './ImportFlowModal';
+import { NodeResultModal } from './NodeResultModal';
+import { getBranchOutputs, isBranchHandle } from './nodeDefinitions';
 import { 
   fetchFlows, 
   fetchFlow,
@@ -88,6 +95,20 @@ import { DataSourcePreviewModal } from './DataSourcePreviewModal';
 import { cn } from '../../lib/utils';
 import { downloadAsXMLSpreadsheet, downloadAsCSV, resolveExportData, triggerBrowserDownload } from '../../lib/exportUtils';
 
+// Drops edges whose nodes no longer exist or whose conditional output (deleted switch case,
+// changed mode) is gone, since those would never be followed.
+function pruneEdges(nodes: Node[], edges: Edge[]): Edge[] {
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  return edges.filter(edge => {
+    const source = byId.get(edge.source);
+    if (!source || !byId.has(edge.target)) return false;
+    if (source.type === 'conditionalBranch' && isBranchHandle(edge.sourceHandle)) {
+      return getBranchOutputs(source.data).some(o => o.handle === edge.sourceHandle);
+    }
+    return true;
+  });
+}
+
 function FlowCanvas() {
   const dispatch = useAppDispatch();
   const flows = useAppSelector(state => state.flows.flows);
@@ -98,6 +119,7 @@ function FlowCanvas() {
   const selectedNodeId = useAppSelector(state => state.flows.selectedNodeId);
   const completedNodeIds = useAppSelector(state => state.flows.completedNodeIds);
   const errorNodeIds = useAppSelector(state => state.flows.errorNodeIds);
+  const skippedNodeIds = useAppSelector(state => state.flows.skippedNodeIds);
   const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
   const executionMode = useAppSelector(state => state.flows.executionMode);
   const nodeResults = useAppSelector(state => state.flows.nodeResults);
@@ -211,7 +233,15 @@ function FlowCanvas() {
       setIsPausing(false);
     }
   }, [pausedNodeIds.length, isLiveExecuting]);
+
+  const debugSessionLostAt = useAppSelector(state => state.flows.debugSessionLostAt);
+  useEffect(() => {
+    if (!debugSessionLostAt) return;
+    setIsLiveExecuting(false);
+    dispatch(showToast('La depuración ya no está activa en el servidor. Vuelve a ejecutar el flujo.'));
+  }, [debugSessionLostAt, dispatch]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [showVersionsModal, setShowVersionsModal] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const downloadedUrlsRef = useRef(new Set<string>());
 
@@ -338,6 +368,7 @@ function FlowCanvas() {
             context: data.context || data.result?.context,
             requestPreview: data.result?.requestPreview,
             responsePreview: data.result?.responsePreview,
+            nodePreview: data.result?.nodePreview,
             debugType: data.result?.debugType
           }));
           dispatch(selectNode(data.nodeId));
@@ -412,18 +443,22 @@ function FlowCanvas() {
       let changed = false;
       const newEds = eds.map(edge => {
         let expectedStroke = '#3b82f6'; // default blue
-        if (errorNodeIds.includes(edge.source)) {
+        const isSkipped = skippedNodeIds.includes(edge.target);
+        if (isSkipped) {
+          expectedStroke = '#94a3b8'; // slate: branch not taken
+        } else if (errorNodeIds.includes(edge.source)) {
           expectedStroke = '#ef4444'; // red
         } else if (completedNodeIds.includes(edge.source)) {
           expectedStroke = '#22c55e'; // green
         }
-        
-        if (!edge.style || edge.style.stroke !== expectedStroke || !edge.markerEnd) {
+        const expectedDash = isSkipped ? '6 4' : undefined;
+
+        if (!edge.style || edge.style.stroke !== expectedStroke || edge.style.strokeDasharray !== expectedDash || !edge.markerEnd) {
           changed = true;
           return {
             ...edge,
             markerEnd: { type: MarkerType.ArrowClosed, color: expectedStroke },
-            style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2 },
+            style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2, strokeDasharray: expectedDash },
             interactionWidth: 20
           };
         }
@@ -431,7 +466,7 @@ function FlowCanvas() {
       });
       return changed ? newEds : eds;
     });
-  }, [completedNodeIds, errorNodeIds, setEdges]);
+  }, [completedNodeIds, errorNodeIds, skippedNodeIds, setEdges]);
 
 
 
@@ -585,13 +620,7 @@ function FlowCanvas() {
   const handleSave = () => {
     if (!currentFlow || isLocked) return;
     
-    // Purge zombie edges that point to non-existent nodes
-    const validEdges = edges.filter(edge => 
-      nodes.some(n => n.id === edge.source) && 
-      nodes.some(n => n.id === edge.target)
-    );
-    
-    const definition = JSON.stringify({ nodes, edges: validEdges });
+    const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
     dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
     
     setShowSaveNotification(true);
@@ -628,6 +657,36 @@ function FlowCanvas() {
     downloadAnchor.click();
     downloadAnchor.remove();
     setShowOptionsMenu(false);
+  };
+
+  const handleExportPython = async () => {
+    if (!currentFlow) return;
+    setShowOptionsMenu(false);
+    try {
+      const res = await fetch(`${getApiUrl(`/flows/${currentFlow.id}/export-python`)}`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Error desconocido' }));
+        dispatch(showToast(err.error || 'Error al exportar el paquete'));
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const slug = currentFlow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+      a.download = `${slug}_bundle.zip`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      }, 1000);
+      dispatch(showToast('Paquete ZIP exportado correctamente'));
+    } catch (e) {
+      dispatch(showToast('Error al exportar el paquete ZIP'));
+    }
   };
 
   const handleDeleteCurrentFlowConfirm = async () => {
@@ -681,7 +740,7 @@ function FlowCanvas() {
 
   const performExecution = async (nodesToExecute: Node[], mode: 'normal' | 'debug' = 'normal') => {
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
-    const definition = JSON.stringify({ nodes: nodesToExecute, edges });
+    const definition = JSON.stringify({ nodes: nodesToExecute, edges: pruneEdges(nodesToExecute, edges) });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
     
     try {
@@ -917,6 +976,18 @@ function FlowCanvas() {
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowOptionsMenu(false);
+                      setShowVersionsModal(true);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <GitCommitVertical size={14} className="text-muted" />
+                    <span>Versiones del flujo</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowOptionsMenu(false);
                       handleDuplicateCurrentFlow();
                     }}
                     className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
@@ -949,6 +1020,17 @@ function FlowCanvas() {
                     <span>Importar JSON</span>
                   </button>
 
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleExportPython();
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-bg flex items-center gap-2 text-fg transition-colors"
+                  >
+                    <FileCode2 size={14} className="text-muted" />
+                    <span>Exportar a Python (ZIP)</span>
+                  </button>
+
                   <div className="h-px bg-border my-1"></div>
 
                   <button
@@ -976,7 +1058,7 @@ function FlowCanvas() {
           
           <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
             {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-2 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
                 <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-1">
                   <Bug size={16} className={isLiveExecuting && pausedNodeIds.length === 0 ? "animate-spin" : "animate-pulse"} />
                   <span>Debugging</span>
@@ -987,7 +1069,7 @@ function FlowCanvas() {
                       variant="outline"
                       size="sm"
                       onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
-                      className="h-7 text-xs border-amber-200 hover:bg-amber-50"
+                      className="h-7 min-h-0 shrink-0 text-xs border-amber-200 hover:bg-amber-50"
                       title="Ejecutar el paso actual e ir al siguiente (paso a paso)"
                     >
                       <StepForward size={14} className="mr-1" /> Paso a paso
@@ -996,7 +1078,7 @@ function FlowCanvas() {
                       variant="primary"
                       size="sm"
                       onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
-                      className="h-7 text-xs bg-amber-600 hover:bg-amber-700"
+                      className="h-7 min-h-0 shrink-0 text-xs bg-amber-600 hover:bg-amber-700"
                       title="Continuar ejecución sin pausas"
                     >
                       <PlayCircle size={14} className="mr-1" /> Continuar Todo
@@ -1005,7 +1087,7 @@ function FlowCanvas() {
                       variant="outline"
                       size="sm"
                       onClick={() => dispatch(setDebugModalOpen(true))}
-                      className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                      className="h-7 min-h-0 shrink-0 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
                       title="Abrir ventana modal de inspección de depuración"
                     >
                       <Eye size={13} className="mr-1" /> Inspeccionar
@@ -1025,7 +1107,7 @@ function FlowCanvas() {
                         setIsPausing(true);
                         await dispatch(pauseDebugExecution(currentFlow!.id));
                       }}
-                      className="h-7 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
+                      className="h-7 min-h-0 shrink-0 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
                       title="Pausar en el siguiente paso para retomar el control paso a paso"
                     >
                       {isPausing ? (
@@ -1044,7 +1126,7 @@ function FlowCanvas() {
                   variant="default"
                   size="sm"
                   onClick={handleStopExecution}
-                  className="h-7 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
+                  className="h-7 min-h-0 shrink-0 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
                   title="Detener ejecución del flujo"
                 >
                   <Square size={11} className="mr-1 fill-white" /> Detener
@@ -1219,33 +1301,27 @@ function FlowCanvas() {
       )}
 
       {/* Node Result Modal */}
-      {inspectNodeData && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-2xl max-h-[80vh] flex flex-col">
-            <div className="p-4 border-b border-border flex items-center justify-between">
-              <div>
-                <h2 className="text-lg font-semibold flex items-center gap-2">
-                  Resultados del nodo: <span className="font-mono text-sm bg-muted px-2 py-1 rounded">{inspectNodeData.label}</span>
-                </h2>
-                <div className={cn("text-xs mt-1", inspectNodeData.hasError ? "text-red-500" : "text-success")}>
-                  {inspectNodeData.hasError ? "Error en ejecución" : "Ejecución exitosa"}
-                </div>
-              </div>
-              <button onClick={() => setInspectNodeData(null)} className="p-2 hover:bg-muted rounded-md text-muted-foreground">
-                <X size={20} />
-              </button>
-            </div>
-            <div className="p-4 overflow-auto flex-1 bg-bg/50">
-              <pre className="text-xs font-mono p-4 bg-black/80 text-green-400 rounded-md overflow-auto h-full">
-                {JSON.stringify(inspectNodeData.result, null, 2)}
-              </pre>
-            </div>
-            <div className="p-4 border-t border-border flex justify-end">
-              <Button onClick={() => setInspectNodeData(null)}>Cerrar</Button>
-            </div>
-          </div>
-        </div>
-      )}
+      {inspectNodeData && (() => {
+        const rawResult = inspectNodeData.result;
+        const hasLogs = rawResult && typeof rawResult === 'object' && Array.isArray(rawResult._logs) && rawResult._logs.length > 0;
+        const logs: Array<{ level: string; args: string[]; ts: number }> = hasLogs ? rawResult._logs : [];
+        // Strip _logs and unwrap _data for display
+        const displayResult = hasLogs
+          ? (rawResult._data !== undefined ? rawResult._data : Object.fromEntries(Object.entries(rawResult).filter(([k]) => k !== '_logs')))
+          : rawResult;
+        const jsonStr = JSON.stringify(displayResult, null, 2);
+
+        return (
+          <NodeResultModal
+            inspectNodeData={{ ...inspectNodeData, result: displayResult }}
+            jsonStr={jsonStr}
+            logs={logs}
+            hasLogs={hasLogs}
+            onClose={() => setInspectNodeData(null)}
+          />
+        );
+      })()}
+
 
       {/* Delete Confirmation Modal */}
       {isDeleteModalOpen && currentFlow && (
@@ -1341,6 +1417,26 @@ function FlowCanvas() {
         isOpen={showHistoryModal}
         onClose={() => setShowHistoryModal(false)}
       />
+
+      {currentFlow && (
+        <FlowVersionsModal
+          flow={currentFlow}
+          isOpen={showVersionsModal}
+          isLocked={isLocked}
+          currentDefinition={showVersionsModal ? JSON.stringify({ nodes, edges }) : ''}
+          onClose={() => setShowVersionsModal(false)}
+          saveCurrent={async () => {
+            if (isLocked) return;
+            const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
+            await dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName })).unwrap();
+          }}
+          onRestored={(restored) => {
+            dispatch(resetNodeStates());
+            dispatch(setCurrentFlow(restored));
+            dispatch(showToast('Versión restaurada'));
+          }}
+        />
+      )}
 
       {/* Import Flow Modal */}
       <ImportFlowModal

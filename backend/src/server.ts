@@ -16,6 +16,7 @@ import { scheduleRoutes } from './routes/schedules.js';
 import { exportRoutes } from './routes/export.js';
 import { fileManagerRoutes } from './routes/files.js';
 import { settingsRoutes } from './routes/settings.js';
+import { pythonExportRoutes } from './routes/pythonExport.js';
 
 config();
 
@@ -37,7 +38,7 @@ async function start(): Promise<void> {
 
   // Plugins
   await app.register(cors, {
-    origin: ['http://localhost:5173', 'http://localhost:3000'],
+    origin: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
   });
 
@@ -77,6 +78,7 @@ async function start(): Promise<void> {
   await app.register(exportRoutes, { prefix: '/api/export' });
   await app.register(fileManagerRoutes, { prefix: '/api/file-manager' });
   await app.register(settingsRoutes, { prefix: '/api/settings' });
+  await app.register(pythonExportRoutes, { prefix: '/api/flows' });
 
   // Health check
   app.get('/api/health', async () => {

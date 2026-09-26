@@ -4,13 +4,13 @@ import { TYPE_LABELS, TYPE_COLORS, TYPE_BG_COLORS } from './types';
 import {
   Play, Globe, Code, FileOutput, Database, Clock,
   FileSpreadsheet, List, Repeat, Square, Check, Loader2, X,
-  Pause
+  Pause, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
 import type { Node } from '@xyflow/react';
 
-const TYPE_ICONS: Record<string, React.ElementType> = {
+export const TYPE_ICONS: Record<string, React.ElementType> = {
   start: Play,
   httpGet: Globe,
   httpPost: Globe,
@@ -23,8 +23,14 @@ const TYPE_ICONS: Record<string, React.ElementType> = {
   dataSource: FileSpreadsheet,
   fileSource: FileSpreadsheet,
   dataList: List,
+  variables: SlidersHorizontal,
   forEach: Repeat,
   forEachEnd: Square,
+  conditionalBranch: GitFork,
+  jsonTransform: Braces,
+  webhookTrigger: Radio,
+  oauth2Connector: KeyRound,
+  aiChatCompletion: Bot,
 };
 
 interface InspectorHeaderProps {
@@ -62,15 +68,15 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
   };
 
   return (
-    <div className="p-4 border-b border-border flex flex-col gap-2">
+    <div className="p-5 border-b border-border flex flex-col gap-3 bg-gradient-to-b from-surface to-bg/20">
       {/* Top row: icon + type badge + status + close */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className={cn('p-2 rounded-md shrink-0', bgClass, colorClass)}>
+        <div className="flex items-center gap-3">
+          <div className={cn('p-2.5 rounded-lg shrink-0 shadow-sm', bgClass, colorClass)}>
             <Icon size={18} />
           </div>
-          <div className="flex flex-col min-w-0">
-            <span className="text-[10px] font-medium text-muted uppercase tracking-wider">
+          <div className="flex flex-col min-w-0 gap-0.5">
+            <span className="text-[10px] font-semibold text-muted uppercase tracking-wide">
               {typeLabel}
             </span>
             {/* Editable label */}
@@ -90,7 +96,7 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
               <button
                 type="button"
                 onClick={startEdit}
-                className="text-sm font-semibold text-fg text-left truncate max-w-[220px] hover:text-accent transition-colors cursor-text"
+                className="text-sm font-semibold text-fg text-left truncate max-w-[220px] hover:text-accent transition-colors cursor-text leading-tight"
                 title="Clic para editar nombre"
               >
                 {(node.data?.label as string) || 'Sin nombre'}
@@ -102,29 +108,29 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
         <div className="flex items-center gap-2 shrink-0">
           {/* Status indicator */}
           {paused && (
-            <div className="w-6 h-6 bg-amber-100 border border-amber-400 text-amber-600 rounded-full flex items-center justify-center">
-              <Pause size={11} className="fill-amber-600" />
+            <div className="w-7 h-7 bg-state-paused-bg border-2 border-state-paused text-state-paused rounded-full flex items-center justify-center shadow-sm">
+              <Pause size={12} strokeWidth={2.5} className="fill-current" />
             </div>
           )}
           {executing && !paused && (
-            <div className="w-6 h-6 bg-surface border border-blue-500 text-blue-500 rounded-full flex items-center justify-center">
-              <Loader2 size={11} className="animate-spin" />
+            <div className="w-7 h-7 bg-state-executing-bg border-2 border-state-executing text-state-executing rounded-full flex items-center justify-center shadow-sm">
+              <Loader2 size={13} strokeWidth={2.5} className="animate-spin" />
             </div>
           )}
           {completed && !executing && !hasError && (
-            <div className="w-6 h-6 bg-success text-white rounded-full flex items-center justify-center">
-              <Check size={11} strokeWidth={3} />
+            <div className="w-7 h-7 bg-success text-white rounded-full flex items-center justify-center shadow-sm">
+              <Check size={13} strokeWidth={3} />
             </div>
           )}
           {hasError && !executing && (
-            <div className="w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center">
-              <X size={11} strokeWidth={3} />
+            <div className="w-7 h-7 bg-danger text-white rounded-full flex items-center justify-center shadow-sm">
+              <X size={13} strokeWidth={3} />
             </div>
           )}
 
           {/* Node ID tooltip */}
           <span
-            className="text-[9px] text-muted font-mono bg-bg px-1.5 py-0.5 rounded border border-border cursor-default select-all"
+            className="text-[9px] text-muted-light font-mono bg-bg px-2 py-1 rounded border border-border-light cursor-default select-all shadow-sm"
             title={`ID: ${node.id}`}
           >
             {node.id.length > 12 ? node.id.slice(0, 12) + '...' : node.id}
@@ -134,10 +140,10 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
             <button
               type="button"
               onClick={onClose}
-              className="p-1 rounded-md text-muted hover:text-fg hover:bg-bg transition-colors cursor-pointer"
+              className="p-1.5 rounded-md text-muted hover:text-fg hover:bg-bg transition-colors cursor-pointer"
               title="Cerrar panel de propiedades"
             >
-              <X size={15} />
+              <X size={16} />
             </button>
           )}
         </div>
