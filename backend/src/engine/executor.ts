@@ -568,7 +568,10 @@ async function executeHttpNode(
 
   if (!isInsideForEach) {
     if (iterateOver && iterateOver.trim() !== '' && iterateOver.trim() !== '{{ID_NODO}}') {
-      const resolved = resolveTemplate(context, iterateOver);
+      let resolved = resolveTemplate(context, iterateOver);
+      if (resolved && typeof resolved === 'object' && Array.isArray(resolved._data)) {
+        resolved = resolved._data;
+      }
       if (Array.isArray(resolved)) {
         itemsToIterate = resolved;
       }
@@ -579,6 +582,9 @@ async function executeHttpNode(
       for (const ctxVal of Object.values(context)) {
         if (Array.isArray(ctxVal) && ctxVal.length > 0) {
           itemsToIterate = ctxVal;
+          break;
+        } else if (ctxVal && typeof ctxVal === 'object' && Array.isArray(ctxVal._data) && ctxVal._data.length > 0) {
+          itemsToIterate = ctxVal._data;
           break;
         }
       }
@@ -960,7 +966,14 @@ function evaluatePathOnObject(obj: any, pathStr: string): any {
     if (bracketMatch) {
       const key = bracketMatch[1];
       const idxOrStar = bracketMatch[2];
-      if (key) val = val[key];
+      if (key) {
+        if (!(key in val) && val && typeof val === 'object' && val._data !== undefined && !Array.isArray(val)) {
+          val = val._data;
+        }
+        val = val[key];
+      } else if (!key && val && typeof val === 'object' && val._data !== undefined && !Array.isArray(val)) {
+        val = val._data;
+      }
       if (val === undefined || val === null) return undefined;
 
       if (idxOrStar === '*') {
@@ -978,7 +991,17 @@ function evaluatePathOnObject(obj: any, pathStr: string): any {
       const first = val[0];
       val = first !== null && typeof first === 'object' ? first[token] : undefined;
     } else {
-      val = val[token];
+      if (val && typeof val === 'object' && !(token in val)) {
+        if (val._data !== undefined && !Array.isArray(val)) {
+          val = evaluatePathOnObject(val._data, tokens.slice(i).join('.'));
+          break;
+        }
+        const lower = token.toLowerCase();
+        const found = Object.keys(val).find(k => k.toLowerCase() === lower);
+        val = found ? val[found] : undefined;
+      } else {
+        val = val[token];
+      }
     }
   }
   return val;
