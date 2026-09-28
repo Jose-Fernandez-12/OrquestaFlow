@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import type { Node, Edge } from '@xyflow/react';
-import { ArrowRight, Plus, Trash2, Bug, ListPlus, Terminal, Pencil, Code2, FileCode2, AlertTriangle } from 'lucide-react';
+import { ArrowRight, Plus, Trash2, Bug, ListPlus, Pencil, Code2, FileCode2, AlertTriangle } from 'lucide-react';
 import { JsonTreeViewer } from '../../JsonTreeViewer';
 import { cn } from '../../../../lib/utils';
 import { useAppSelector } from '../../../../store/hooks';
@@ -28,13 +28,6 @@ const JS_TEMPLATES: Array<{ label: string; code: string }> = [
   { label: 'Agrupar y sumar', code: 'const totales = {};\nfor (const row of data) {\n  totales[row.categoria] = (totales[row.categoria] || 0) + Number(row.total || 0);\n}\nreturn Object.entries(totales).map(([categoria, total]) => ({ categoria, total }));' },
   { label: 'Resumen', code: 'return {\n  registros: data.length,\n  procesadoEn: new Date().toISOString()\n};' },
 ];
-
-const LOG_LEVEL_STYLES: Record<string, { color: string; badge: string; badgeBg: string }> = {
-  log:   { color: 'text-emerald-400', badge: 'LOG',   badgeBg: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' },
-  info:  { color: 'text-sky-400',     badge: 'INFO',  badgeBg: 'bg-sky-500/20 text-sky-400 border border-sky-500/30' },
-  warn:  { color: 'text-amber-400',   badge: 'WARN',  badgeBg: 'bg-amber-500/20 text-amber-400 border border-amber-500/30' },
-  error: { color: 'text-rose-400',    badge: 'ERROR', badgeBg: 'bg-rose-500/20 text-rose-400 border border-rose-500/30' },
-};
 
 function getMappings(data: Record<string, any>): FieldMapping[] {
   if (Array.isArray(data.mappings)) return data.mappings.map((m: any) => ({ from: String(m?.from ?? ''), to: String(m?.to ?? '') }));
@@ -110,13 +103,18 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
   const hasCode = code.trim().length > 0;
   const codeLines = code.replace(/\s+$/, '').split('\n');
   const usesConsole = /console\.(log|info|warn|error)\s*\(/.test(code);
+  const rawBreakpoints = data.breakpoints;
+  const breakpoints = useMemo<number[]>(
+    () => (Array.isArray(rawBreakpoints) ? rawBreakpoints.map(Number).filter(n => n >= 1 && n <= codeLines.length) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [JSON.stringify(rawBreakpoints), codeLines.length]
+  );
 
   const inputPreview = debugPreview?.kind === 'transform' ? debugPreview.input : null;
   const datalistId = `fields-${node.id}`;
 
   // Check for logs in node result
   const hasLogs = nodeResult && typeof nodeResult === 'object' && Array.isArray(nodeResult._logs) && nodeResult._logs.length > 0;
-  const logs: Array<{ level: string; args: string[]; ts: number }> = hasLogs ? nodeResult._logs : [];
   const cleanResult = hasLogs
     ? (nodeResult._data !== undefined ? nodeResult._data : Object.fromEntries(Object.entries(nodeResult).filter(([k]) => k !== '_logs')))
     : nodeResult;
@@ -275,15 +273,21 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
           {hasCode ? (
             <div className="border border-border rounded-sm bg-surface overflow-hidden">
               <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border bg-bg/60">
-                <span className="flex items-center gap-1.5 text-[11px] text-fg font-medium">
+                <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0 text-[11px] text-fg font-medium whitespace-nowrap">
                   <FileCode2 size={13} className="text-teal-600" />
                   {codeLines.length} {codeLines.length === 1 ? 'línea' : 'líneas'}
-                  {usesConsole && <span className="text-[10px] text-muted font-normal">· con console.log</span>}
+                  {usesConsole && <span className="text-[10px] text-muted font-normal">· console.log</span>}
+                  {breakpoints.length > 0 && (
+                    <span className="flex items-center gap-1 text-[10px] text-danger font-normal" title={`Líneas ${breakpoints.join(', ')}`}>
+                      · <span className="w-1.5 h-1.5 rounded-full bg-danger inline-block" />
+                      {breakpoints.length} breakpoint{breakpoints.length === 1 ? '' : 's'}
+                    </span>
+                  )}
                 </span>
                 <button
                   type="button"
                   onClick={() => setShowCodeModal(true)}
-                  className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent-hover font-medium px-2 py-1 rounded bg-accent/5 hover:bg-accent/10 border border-accent/20 transition-colors"
+                  className="shrink-0 whitespace-nowrap inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent-hover font-medium px-2 py-1 rounded bg-accent/5 hover:bg-accent/10 border border-accent/20 transition-colors"
                 >
                   <Pencil size={11} />
                   Editar código
@@ -296,7 +300,10 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
                 title="Abrir el editor de código"
               >
                 {codeLines.slice(0, 3).map((l, i) => (
-                  <div key={i} className="truncate whitespace-pre">{l || ' '}</div>
+                  <div key={i} className="flex items-center gap-1.5">
+                    <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', breakpoints.includes(i + 1) ? 'bg-danger' : 'bg-transparent')} />
+                    <span className="truncate whitespace-pre">{l || ' '}</span>
+                  </div>
                 ))}
                 {codeLines.length > 3 && <div className="text-[10px] text-muted-light">… {codeLines.length - 3} líneas más</div>}
               </button>
@@ -352,35 +359,6 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
         </div>
       )}
 
-      {/* Console output from console.log calls */}
-      {hasLogs && (
-        <div className="bg-gray-950 rounded-md border border-gray-800 overflow-hidden shadow-xs">
-          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-800 bg-gray-900/80">
-            <Terminal size={12} className="text-emerald-400" />
-            <span className="text-[11px] font-mono text-gray-300 font-medium">Consola de depuración</span>
-            <span className="text-[10px] text-gray-500 ml-auto font-mono">{logs.length} {logs.length === 1 ? 'mensaje' : 'mensajes'}</span>
-          </div>
-          <div className="max-h-48 overflow-auto p-1 font-mono text-xs">
-            {logs.map((log, i) => {
-              const style = LOG_LEVEL_STYLES[log.level] || LOG_LEVEL_STYLES.log;
-              return (
-                <div
-                  key={i}
-                  className="flex items-start gap-2 px-2.5 py-1 text-xs border-b border-gray-800/40 last:border-0 hover:bg-gray-900/50 transition-colors"
-                >
-                  <span className={cn('text-[9px] px-1.5 py-0.2 rounded font-semibold shrink-0 mt-0.5', style.badgeBg)}>
-                    {style.badge}
-                  </span>
-                  <span className={cn('flex-1 break-all whitespace-pre-wrap leading-relaxed', style.color)}>
-                    {log.args.join(' ')}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {/* Node execution result */}
       {cleanResult !== undefined && !cleanResult?.skipped && !cleanResult?.error && (
         <div className="space-y-1.5">
@@ -399,9 +377,11 @@ export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nod
         isOpen={showCodeModal}
         onClose={() => setShowCodeModal(false)}
         code={String(data.expression ?? '')}
-        onChange={newCode => {
+        breakpoints={breakpoints}
+        onChange={(newCode, nextBreakpoints) => {
           updateNodeData('expression', newCode);
           updateNodeData('transformType', 'javascript');
+          updateNodeData('breakpoints', nextBreakpoints);
         }}
         node={node}
         nodes={nodes}

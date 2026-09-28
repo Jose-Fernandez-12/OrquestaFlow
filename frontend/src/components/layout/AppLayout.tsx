@@ -1,5 +1,5 @@
 import React from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useMatch } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
 import { hideToast } from '../../store/uiSlice';
@@ -13,6 +13,8 @@ import { fetchSettings } from '../../store/settingsSlice';
 export function AppLayout() {
   const dispatch = useAppDispatch();
   const { toastVisible, toastMessage } = useAppSelector((state: any) => state.ui);
+  // The flow editor uses the whole width; it has its own way back to the flow list
+  const inFlowEditor = useMatch('/flujos/:id') !== null;
 
   useEffect(() => {
     dispatch(fetchSettings());
@@ -29,7 +31,7 @@ export function AppLayout() {
 
   return (
     <div className="flex h-screen w-full bg-bg overflow-hidden relative">
-      <Sidebar />
+      {!inFlowEditor && <Sidebar />}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <Outlet />
       </main>

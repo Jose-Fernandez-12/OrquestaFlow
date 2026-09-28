@@ -11,6 +11,7 @@ import { getSystemSettingsFromDb } from '../routes/settings.js';
 import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes } from './graph.js';
 import { getRetryPolicy, runWithRetry, isAbortError, isRetryableStatus, HTTP_NODE_TYPES, RETRYABLE_NODE_TYPES, type RetryPolicy } from './retry.js';
 import type { ExecutionTracer } from './executionLog.js';
+import { instrumentTransformCode, type BreakpointResolution } from './transformDebug.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -378,18 +379,21 @@ export async function executeFlowEngine(
                     case 'conditionalBranch':
                       output = executeConditionalBranchNode(node, context);
                       break;
-                    case 'jsonTransform':
+                    case 'jsonTransform': {
+                      const stepping = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id];
+                      let trace: TransformDebugTrace | undefined;
                       try {
-                        output = await executeJsonTransformNode(node, context, normalizedEdges, nodes);
+                        ({ output, trace } = await executeJsonTransformNode(node, context, normalizedEdges, nodes, { debug: stepping }));
                       } catch (err: any) {
-                        if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id]) {
+                        if (stepping) {
                           notifyProgress(node.id, 'paused', {
                             debugType: 'transform_error',
                             context: { ...context },
                             nodePreview: {
                               kind: 'transform_error',
                               error: err.message || String(err),
-                              logs: Array.isArray(err._logs) ? err._logs : []
+                              logs: Array.isArray(err._logs) ? err._logs : [],
+                              trace: err._trace
                             }
                           });
                           await new Promise<void>((resolve) => {
@@ -400,7 +404,7 @@ export async function executeFlowEngine(
                         }
                         throw err;
                       }
-                      if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id]) {
+                      if (stepping) {
                         const unwrapData = output && typeof output === 'object' && output._data !== undefined ? output._data : output;
                         const logs = output && typeof output === 'object' && Array.isArray(output._logs) ? output._logs : [];
                         notifyProgress(node.id, 'paused', {
@@ -409,7 +413,8 @@ export async function executeFlowEngine(
                           nodePreview: {
                             kind: 'transform_result',
                             output: unwrapData,
-                            logs
+                            logs,
+                            trace
                           }
                         });
                         const resumeAction = await new Promise<string>((resolve) => {
@@ -423,6 +428,7 @@ export async function executeFlowEngine(
                         }
                       }
                       break;
+                    }
                     case 'webhookTrigger':
                       output = executeWebhookTriggerNode(node, context);
                       break;
@@ -2157,9 +2163,11 @@ async function executeForEachNode(
                         output = executeConditionalBranchNode(subNode, localContext);
                         break;
                       case 'jsonTransform': {
-                        output = await executeJsonTransformNode(subNode, localContext, edges, nodes);
                         const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
-                        if (currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[subNode.id]) {
+                        const stepping = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[subNode.id];
+                        let trace: TransformDebugTrace | undefined;
+                        ({ output, trace } = await executeJsonTransformNode(subNode, localContext, edges, nodes, { debug: stepping }));
+                        if (stepping && currentExec) {
                           const unwrapData = output && typeof output === 'object' && output._data !== undefined ? output._data : output;
                           const logs = output && typeof output === 'object' && Array.isArray(output._logs) ? output._logs : [];
                           onNodeProgress(subNode.id, 'paused', {
@@ -2168,7 +2176,8 @@ async function executeForEachNode(
                             nodePreview: {
                               kind: 'transform_result',
                               output: unwrapData,
-                              logs
+                              logs,
+                              trace
                             }
                           });
                           const resumeAction = await new Promise<string>((resolve) => {
@@ -2614,14 +2623,50 @@ function compilesAsExpression(code: string): boolean {
   }
 }
 
-function runTransformScript(code: string, data: any, context: Record<string, any>): { result: any; _logs: Array<{ level: string; args: string[]; ts: number; tableData?: any }> } {
+interface TransformLog { level: string; args: string[]; ts: number; tableData?: any; line?: number | null }
+
+interface TransformDebugTrace {
+  // Console calls and breakpoint hits in execution order, with the variables in scope
+  stops: Array<{ kind: 'console' | 'breakpoint'; level?: string; args?: string[]; tableData?: any; line: number | null; hit?: number; vars?: Record<string, any>; ts: number }>;
+  breakpoints: BreakpointResolution[];
+  dropped: number;
+  errorLine: number | null;
+  code: string;
+}
+
+const MAX_DEBUG_STOPS = 200;
+
+// Line of the user's code a stack trace points at (the script is wrapped, hence the offset)
+function userLineFromStack(stack: string, offset: number, lineCount: number): number | null {
+  for (const m of String(stack || '').matchAll(/transformacion\.js:(\d+)/g)) {
+    const line = Number(m[1]) - offset;
+    if (line >= 1 && line <= lineCount) return line;
+  }
+  return null;
+}
+
+export function runTransformScript(
+  code: string,
+  data: any,
+  context: Record<string, any>,
+  debug?: { breakpoints: number[] }
+): { result: any; _logs: TransformLog[]; trace?: TransformDebugTrace } {
   // {{ruta}} inside the script is replaced by a correctly quoted JSON literal
   const body = code.replace(/\{\{([^}]+)\}\}/g, (_m, pathStr: string) => JSON.stringify(resolvePath(context, pathStr) ?? null));
-  const fnBody = /\breturn\b/.test(body) || !compilesAsExpression(body) ? body : `return (${body}\n);`;
-  
+  let fnBody = /\breturn\b/.test(body) || !compilesAsExpression(body) ? body : `return (${body}\n);`;
+
   // Check if user declared a function by name at top-level e.g. function miTransformacion(...)
   const fnMatch = body.match(/(?:^|\n)\s*function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/);
   const declaredFnName = fnMatch ? fnMatch[1] : null;
+
+  // In debug sessions breakpoints and console calls record the variables in scope
+  let breakpoints: BreakpointResolution[] = [];
+  if (debug) {
+    const instrumented = instrumentTransformCode(fnBody, debug.breakpoints);
+    fnBody = instrumented.code;
+    breakpoints = instrumented.breakpoints;
+  }
+  const lineCount = code.split('\n').length;
 
   const payload = JSON.stringify({
     data: data ?? null,
@@ -2631,25 +2676,73 @@ function runTransformScript(code: string, data: any, context: Record<string, any
   });
 
   // Data is re-created inside the isolated context so the script never touches host objects.
-  // A safe console object captures log/info/warn/error/table/debug/checkpoint calls into __logs.
-  const script = `
+  // A safe console object captures log/info/warn/error/table/debug/checkpoint calls into __logs,
+  // each with the line it came from. In debug sessions they are also recorded as stops.
+  const prefix = `
     const __logs = [];
+    const __stops = [];
+    const __hits = {};
+    let __dropped = 0;
+    let __pending = null;
+    let __errorLine = null;
     function __fmt(v) { try { return typeof v === 'object' ? JSON.stringify(v) : String(v); } catch { return String(v); } }
+    function __clone(v, depth) {
+      if (typeof v === 'function') return '[Función]';
+      if (v === undefined) return '[undefined]';
+      if (v === null || typeof v !== 'object') return typeof v === 'bigint' ? String(v) : v;
+      if (v instanceof Date) return v.toISOString();
+      if (depth > 6) return Array.isArray(v) ? '[Lista]' : '[Objeto]';
+      if (Array.isArray(v)) {
+        const out = v.slice(0, 100).map(x => __clone(x, depth + 1));
+        if (v.length > 100) out.push('… ' + (v.length - 100) + ' elementos más');
+        return out;
+      }
+      const out = {};
+      for (const k of Object.keys(v)) out[k] = __clone(v[k], depth + 1);
+      return out;
+    }
+    function __line(stack) {
+      const re = /transformacion\\.js:(\\d+)/g; let m;
+      while ((m = re.exec(String(stack || '')))) { const l = Number(m[1]) - __OFFSET; if (l >= 1 && l <= __LINES) return l; }
+      return null;
+    }
+    function __snap(fn) {
+      try { const s = fn(); const o = {}; for (const k in s) { if (typeof s[k] !== 'function') o[k] = __clone(s[k], 0); } return o; } catch (e) { return {}; }
+    }
+    function __vars(line, fn) { __pending = { line: line, fn: fn }; }
+    function __bp(line, fn) {
+      __hits[line] = (__hits[line] || 0) + 1;
+      if (__stops.length >= ${MAX_DEBUG_STOPS}) { __dropped++; return; }
+      __stops.push({ kind: 'breakpoint', line: line, hit: __hits[line], vars: __snap(fn), ts: Date.now() });
+    }
+    function __emit(level, args, tableData) {
+      const line = __line(new Error().stack);
+      const entry = { level: level, args: args, ts: Date.now(), line: line };
+      if (tableData !== undefined) entry.tableData = __clone(tableData, 0);
+      __logs.push(entry);
+      if (__DEBUG) {
+        const vars = __pending && __pending.line === line ? __snap(__pending.fn) : undefined;
+        if (__stops.length >= ${MAX_DEBUG_STOPS}) __dropped++;
+        else __stops.push({ kind: 'console', level: level, args: args, tableData: entry.tableData, line: line, vars: vars, ts: entry.ts });
+      }
+      __pending = null;
+    }
+    function __args(list) { const a = []; for (let i = 0; i < list.length; i++) a.push(__fmt(list[i])); return a; }
     const console = {
-      log:   function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'log',   args:a, ts:Date.now()}); },
-      info:  function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'info',  args:a, ts:Date.now()}); },
-      warn:  function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'warn',  args:a, ts:Date.now()}); },
-      error: function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'error', args:a, ts:Date.now()}); },
-      debug: function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'debug', args:a, ts:Date.now()}); },
-      dir:   function() { const a=[]; for(let i=0;i<arguments.length;i++) a.push(__fmt(arguments[i])); __logs.push({level:'log',   args:a, ts:Date.now()}); },
+      log:   function() { __emit('log',   __args(arguments)); },
+      info:  function() { __emit('info',  __args(arguments)); },
+      warn:  function() { __emit('warn',  __args(arguments)); },
+      error: function() { __emit('error', __args(arguments)); },
+      debug: function() { __emit('debug', __args(arguments)); },
+      dir:   function() { __emit('log',   __args(arguments)); },
       table: function(t) {
         let s = ''; try { s = typeof t === 'object' ? JSON.stringify(t) : String(t); } catch(e) { s = String(t); }
-        __logs.push({level:'table', args:[s], ts:Date.now(), tableData: t});
+        __emit('table', [s], t);
       },
       checkpoint: function(label, v) {
         const a = [String(label || 'Punto de control')];
         if (arguments.length > 1) a.push(__fmt(v));
-        __logs.push({level:'checkpoint', args:a, ts:Date.now()});
+        __emit('checkpoint', a);
       }
     };
     const __in = JSON.parse(__payload);
@@ -2658,36 +2751,60 @@ function runTransformScript(code: string, data: any, context: Record<string, any
     try {
       __result = (function (data, context, item, index) {
         "use strict";
-        ${fnBody}
+`;
+  const offset = prefix.split('\n').length - 1;
+  const script = `${prefix}${fnBody}
         ${declaredFnName ? `\ntry { if (typeof ${declaredFnName} === 'function') return ${declaredFnName}(data, context); } catch(e) { return ${declaredFnName}(data); }` : ''}
       })(__in.data, __in.context, __in.item, __in.index);
     } catch(err) {
       __error = err ? (err.message || String(err)) : 'Error en la ejecución';
+      __errorLine = __line(err && err.stack);
     }
-    JSON.stringify({ result: __result === undefined ? null : __result, _logs: __logs, error: __error });
+    JSON.stringify({ result: __result === undefined ? null : __result, _logs: __logs, error: __error, stops: __stops, dropped: __dropped, errorLine: __errorLine });
   `;
 
+  const buildTrace = (parsed: any, errorLine: number | null = parsed?.errorLine ?? null): TransformDebugTrace | undefined => debug && {
+    stops: Array.isArray(parsed?.stops) ? parsed.stops : [],
+    breakpoints,
+    dropped: Number(parsed?.dropped) || 0,
+    errorLine,
+    code,
+  };
+
   try {
-    const serialized = vm.runInNewContext(script, { __payload: payload }, { timeout: TRANSFORM_TIMEOUT_MS, filename: 'transformacion.js' });
+    const serialized = vm.runInNewContext(
+      script,
+      { __payload: payload, __DEBUG: Boolean(debug), __OFFSET: offset, __LINES: lineCount },
+      { timeout: TRANSFORM_TIMEOUT_MS, filename: 'transformacion.js' }
+    );
     const parsed = JSON.parse(serialized);
     if (parsed.error) {
       const err = new Error(`Error en la transformación JavaScript: ${parsed.error}`) as any;
       err._logs = Array.isArray(parsed._logs) ? parsed._logs : [];
+      err._trace = buildTrace(parsed);
       throw err;
     }
-    return { result: parsed.result, _logs: Array.isArray(parsed._logs) ? parsed._logs : [] };
+    return { result: parsed.result, _logs: Array.isArray(parsed._logs) ? parsed._logs : [], trace: buildTrace(parsed) };
   } catch (e: any) {
     if (e?._logs) {
       throw e;
     }
-    if (e?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
-      throw new Error(`La transformación superó el límite de ${TRANSFORM_TIMEOUT_MS / 1000}s (¿bucle infinito?)`);
-    }
-    throw new Error(`Error en la transformación JavaScript: ${e?.message || e}`);
+    const wrapped: any = e?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'
+      ? new Error(`La transformación superó el límite de ${TRANSFORM_TIMEOUT_MS / 1000}s (¿bucle infinito?)`)
+      : new Error(`Error en la transformación JavaScript: ${e?.message || e}`);
+    // Syntax errors carry the line in their stack
+    wrapped._trace = buildTrace(null, userLineFromStack(e?.stack, offset, lineCount));
+    throw wrapped;
   }
 }
 
-async function executeJsonTransformNode(node: any, context: Record<string, any>, edges: any[], nodes: any[]): Promise<any> {
+async function executeJsonTransformNode(
+  node: any,
+  context: Record<string, any>,
+  edges: any[],
+  nodes: any[],
+  options: { debug?: boolean } = {}
+): Promise<{ output: any; trace?: TransformDebugTrace }> {
   const data = node.data || {};
   const input = resolveTransformInput(node, context, edges, nodes);
   const mappings = getTransformMappings(data);
@@ -2697,21 +2814,26 @@ async function executeJsonTransformNode(node: any, context: Record<string, any>,
   if (isMapMode) {
     const keepOthers = Boolean(data.keepOthers);
     const rows = extractRowSet(input);
-    if (rows) return rows.map(row => mapRecord(row, mappings, keepOthers, context));
-    return mapRecord(input, mappings, keepOthers, context);
+    if (rows) return { output: rows.map(row => mapRecord(row, mappings, keepOthers, context)) };
+    return { output: mapRecord(input, mappings, keepOthers, context) };
   }
 
-  const code = String(data.expression || '').trim() || 'return data;';
-  const { result, _logs } = runTransformScript(code, input, context);
+  // Not trimmed: recorded line numbers must match the editor
+  const raw = String(data.expression || '');
+  const code = raw.trim() ? raw : 'return data;';
+  const debug = options.debug
+    ? { breakpoints: Array.isArray(data.breakpoints) ? data.breakpoints.map(Number) : [] }
+    : undefined;
+  const { result, _logs, trace } = runTransformScript(code, input, context, debug);
   // Attach _logs to the output so the frontend can display the console panel
   if (_logs.length > 0) {
     if (result && typeof result === 'object' && !Array.isArray(result)) {
-      return { ...result, _logs };
+      return { output: { ...result, _logs }, trace };
     }
     // For arrays or primitives, wrap in a container
-    return { _data: result, _logs };
+    return { output: { _data: result, _logs }, trace };
   }
-  return result;
+  return { output: result, trace };
 }
 
 // ── Webhook trigger ──

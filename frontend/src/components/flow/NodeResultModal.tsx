@@ -63,7 +63,7 @@ export function NodeResultModal({ inspectNodeData, jsonStr, logs, hasLogs, onClo
         <div className="p-4 border-b border-border flex items-center justify-between shrink-0">
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-semibold flex items-center gap-2 flex-wrap">
-              Resultados del nodo: <span className="font-mono text-sm bg-muted px-2 py-1 rounded">{inspectNodeData.label}</span>
+              Resultados del nodo: <span className="font-mono text-xs font-normal bg-bg border border-border text-muted px-2 py-0.5 rounded-sm">{inspectNodeData.label}</span>
             </h2>
             <div className={cn("text-xs mt-1", inspectNodeData.hasError ? "text-red-500" : "text-success")}>
               {inspectNodeData.hasError ? "Error en ejecucion" : "Ejecucion exitosa"}
@@ -90,7 +90,7 @@ export function NodeResultModal({ inspectNodeData, jsonStr, logs, hasLogs, onClo
               <Download size={14} />
               <span className="hidden sm:inline">Descargar JSON</span>
             </Button>
-            <button onClick={onClose} className="p-2 hover:bg-muted rounded-md text-muted-foreground ml-1">
+            <button onClick={onClose} className="p-2 hover:bg-bg rounded-md text-muted hover:text-fg ml-1">
               <X size={20} />
             </button>
           </div>

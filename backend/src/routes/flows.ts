@@ -416,6 +416,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       data: {
         isRunning: state.status === 'running',
         status: state.status,
+        mode: state.mode === 'debug' ? 'debug' : 'normal',
         startTime: state.startTime,
         nodes: state.nodes
       }

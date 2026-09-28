@@ -349,7 +349,7 @@ export function JsonSelectorModal({
                           if (e.target.checked) setExtractIterate(false);
                         }}
                       />
-                      <label htmlFor="extractArray" className="text-xs font-medium text-muted-foreground select-none cursor-pointer">
+                      <label htmlFor="extractArray" className="text-xs font-medium text-muted select-none cursor-pointer">
                         Extraer como lista completa (Array map [*])
                       </label>
                     </div>
@@ -364,7 +364,7 @@ export function JsonSelectorModal({
                           if (e.target.checked) setExtractArray(false);
                         }}
                       />
-                      <label htmlFor="extractIterate" className="text-xs font-medium text-muted-foreground select-none cursor-pointer">
+                      <label htmlFor="extractIterate" className="text-xs font-medium text-muted select-none cursor-pointer">
                         Extraer para Modo Iteracion (usa _item)
                       </label>
                     </div>

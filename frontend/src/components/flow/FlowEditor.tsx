@@ -260,6 +260,21 @@ function FlowCanvas() {
     }
   }, [pausedNodeIds.length, isLiveExecuting]);
 
+  // While a run is live the canvas takes the space: the node library always hides, and the
+  // inspector only stays in debug mode, where it shows what is paused. Both come back at the end.
+  // Runs shorter than the delay leave the layout alone instead of flickering.
+  const [runFocus, setRunFocus] = useState(false);
+  useEffect(() => {
+    if (!isLiveExecuting) {
+      const reset = setTimeout(() => setRunFocus(false), 0);
+      return () => clearTimeout(reset);
+    }
+    const timer = setTimeout(() => setRunFocus(true), 300);
+    return () => clearTimeout(timer);
+  }, [isLiveExecuting]);
+  const showNodeLibrary = !canvasExpanded && nodeLibraryExpanded && !runFocus;
+  const showInspector = !canvasExpanded && (!runFocus || executionMode === 'debug');
+
   const debugSessionLostAt = useAppSelector(state => state.flows.debugSessionLostAt);
   useEffect(() => {
     if (!debugSessionLostAt) return;
@@ -349,6 +364,7 @@ function FlowCanvas() {
         if (data?.data) {
           const state = data.data;
           const isRunning = state.isRunning || state.status === 'running';
+          if (isRunning && (state.mode === 'debug' || state.mode === 'normal')) dispatch(setExecutionMode(state.mode));
           setIsLiveExecuting(isRunning);
 
           if (state.nodes) {
@@ -1367,7 +1383,7 @@ function FlowCanvas() {
       {/* Editor Body */}
       <div className="flex-1 flex flex-col min-h-0 relative">
         <div className="flex-1 flex min-h-0 relative">
-          {!canvasExpanded && nodeLibraryExpanded && <NodeLibrary />}
+          {showNodeLibrary && <NodeLibrary />}
           
           <div
             className="flex-1 h-full relative"
@@ -1389,78 +1405,79 @@ function FlowCanvas() {
               <kbd className="text-[10px] border border-border rounded px-1">Ctrl K</kbd>
             </button>
             {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-2 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
-                <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-1">
-                  <Bug size={16} className={isLiveExecuting && pausedNodeIds.length === 0 ? "animate-spin" : "animate-pulse"} />
-                  <span>Debugging</span>
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-1.5 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-border shadow-raised rounded-full pl-4 pr-1.5 py-1.5">
+                {/* Amber only marks the state; actions follow the app's buttons */}
+                <div className="flex items-center gap-2 text-xs font-semibold text-fg mr-2">
+                  {pausedNodeIds.length > 0 ? (
+                    <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 text-amber-600">
+                      <Pause size={10} className="fill-amber-600" />
+                    </span>
+                  ) : (
+                    <Loader2 size={14} className="animate-spin text-amber-600" />
+                  )}
+                  <span>{pausedNodeIds.length > 0 ? 'En pausa' : 'Ejecutando…'}</span>
                 </div>
                 {pausedNodeIds.length > 0 ? (
                   <>
                     <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
-                      className="h-7 min-h-0 shrink-0 text-xs border-amber-200 hover:bg-amber-50"
-                      title="Ejecutar el paso actual e ir al siguiente (paso a paso)"
-                    >
-                      <StepForward size={14} className="mr-1" /> Paso a paso
-                    </Button>
-                    <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
-                      className="h-7 min-h-0 shrink-0 text-xs bg-amber-600 hover:bg-amber-700"
-                      title="Continuar ejecución sin pausas"
+                      onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
+                      className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                      title="Ejecutar el paso actual y pausar en el siguiente"
                     >
-                      <PlayCircle size={14} className="mr-1" /> Continuar Todo
+                      <StepForward size={13} /> Siguiente paso
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
+                      className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                      title="Continuar la ejecución sin pausas"
+                    >
+                      <PlayCircle size={13} /> Continuar todo
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => dispatch(setDebugModalOpen(true))}
-                      className="h-7 min-h-0 shrink-0 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
-                      title="Abrir ventana modal de inspección de depuración"
+                      className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                      title="Abrir la ventana de inspección"
                     >
-                      <Eye size={13} className="mr-1" /> Inspeccionar
+                      <Eye size={13} /> Inspeccionar
                     </Button>
                   </>
                 ) : (
-                  <>
-                    <div className="flex items-center gap-1.5 text-xs text-muted font-medium px-1">
-                      <Loader2 size={13} className="animate-spin text-amber-600" />
-                      <span>Ejecutando...</span>
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={isPausing}
-                      onClick={async () => {
-                        setIsPausing(true);
-                        await dispatch(pauseDebugExecution(currentFlow!.id));
-                      }}
-                      className="h-7 min-h-0 shrink-0 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
-                      title="Pausar en el siguiente paso para retomar el control paso a paso"
-                    >
-                      {isPausing ? (
-                        <>
-                          <Loader2 size={13} className="mr-1 animate-spin text-amber-600" /> Pausando...
-                        </>
-                      ) : (
-                        <>
-                          <Pause size={13} className="mr-1 fill-amber-600" /> Pausar
-                        </>
-                      )}
-                    </Button>
-                  </>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isPausing}
+                    onClick={async () => {
+                      setIsPausing(true);
+                      await dispatch(pauseDebugExecution(currentFlow!.id));
+                    }}
+                    className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                    title="Pausar en el siguiente paso para retomar el control"
+                  >
+                    {isPausing ? (
+                      <>
+                        <Loader2 size={13} className="animate-spin" /> Pausando…
+                      </>
+                    ) : (
+                      <>
+                        <Pause size={12} /> Pausar
+                      </>
+                    )}
+                  </Button>
                 )}
                 <Button
-                  variant="default"
+                  variant="outline"
                   size="sm"
                   onClick={handleStopExecution}
-                  className="h-7 min-h-0 shrink-0 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
-                  title="Detener ejecución del flujo"
+                  className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1 text-danger border-danger/30 hover:bg-danger/5 hover:border-danger/50"
+                  title="Detener la ejecución del flujo"
                 >
-                  <Square size={11} className="mr-1 fill-white" /> Detener
+                  <Square size={10} className="fill-danger" /> Detener
                 </Button>
               </div>
             )}
@@ -1498,7 +1515,7 @@ function FlowCanvas() {
             </ReactFlow>
           </div>
 
-          {!canvasExpanded && selectedNodeId && (
+          {showInspector && selectedNodeId && (
             <NodeInspector
               nodes={nodes}
               setNodes={setNodes}
@@ -1507,6 +1524,7 @@ function FlowCanvas() {
               onTestNode={isLocked ? undefined : handleTestNode}
               testing={testingNodeId === selectedNodeId}
               testDisabled={isLiveExecuting || testingNodeId !== null}
+              layout={isLiveExecuting && executionMode === 'debug' ? 'debug' : 'edit'}
             />
           )}
 
@@ -1572,7 +1590,7 @@ function FlowCanvas() {
           <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-lg flex flex-col">
             <div className="p-4 border-b border-border flex items-center justify-between">
               <h2 className="text-lg font-semibold text-danger">Faltan parámetros requeridos</h2>
-              <button onClick={() => setMissingParamsContext(null)} className="p-2 hover:bg-muted rounded-md text-muted-foreground">
+              <button onClick={() => setMissingParamsContext(null)} className="p-2 hover:bg-bg rounded-md text-muted hover:text-fg">
                 <X size={20} />
               </button>
             </div>

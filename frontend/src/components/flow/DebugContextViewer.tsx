@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
 import {
@@ -34,6 +34,9 @@ import { Input } from '../ui/input';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { resumeDebugNode, setDebugModalOpen, type IterationDebugRecord, type NodeDebugPreview } from '../../store/flowSlice';
 import { cn } from '../../lib/utils';
+import { TransformStepper } from './debug/TransformStepper';
+import { ConsoleLogList, type ConsoleLogEntry } from './debug/ConsoleLogList';
+import { buildTransformSteps, type TransformTrace } from './debug/transformTrace';
 
 export interface HttpRequestPreview {
   method: string;
@@ -73,131 +76,6 @@ interface DebugContextViewerProps {
   allNodePreviews?: Record<string, NodeDebugPreview>;
   modalOnly?: boolean;
   bannerOnly?: boolean;
-}
-
-function renderConsoleTable(tableData: any) {
-  if (!tableData || typeof tableData !== 'object') {
-    return <pre className="p-2 text-xs text-gray-300 font-mono">{String(tableData)}</pre>;
-  }
-
-  // Case 1: Array of objects
-  if (Array.isArray(tableData)) {
-    if (tableData.length === 0) return <div className="p-2 text-xs text-gray-500 italic">Tabla vacía [ ]</div>;
-    const first = tableData[0];
-    if (typeof first !== 'object' || first === null) {
-      return (
-        <table className="w-full text-left text-xs border-collapse">
-          <thead>
-            <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
-              <th className="p-1.5 border-r border-gray-800 w-12 text-center">(Index)</th>
-              <th className="p-1.5">Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tableData.map((v, idx) => (
-              <tr key={idx} className="border-b border-gray-800/50 hover:bg-gray-900/50">
-                <td className="p-1.5 border-r border-gray-800 text-gray-500 text-center">{idx}</td>
-                <td className="p-1.5 text-gray-200">{String(v)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      );
-    }
-    const cols = Array.from(new Set(tableData.flatMap(row => (row && typeof row === 'object' ? Object.keys(row) : []))));
-    return (
-      <table className="w-full text-left text-xs border-collapse">
-        <thead>
-          <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
-            <th className="p-1.5 border-r border-gray-800 w-12 text-center font-semibold">(Index)</th>
-            {cols.map(c => (
-              <th key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 font-semibold">{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {tableData.slice(0, 100).map((row, idx) => (
-            <tr key={idx} className="border-b border-gray-800/50 hover:bg-gray-900/50">
-              <td className="p-1.5 border-r border-gray-800 text-gray-500 text-center">{idx}</td>
-              {cols.map(c => {
-                const val = row?.[c];
-                return (
-                  <td key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 text-gray-200 whitespace-nowrap">
-                    {val === null ? <span className="text-rose-400">null</span> :
-                     val === undefined ? <span className="text-gray-500">undefined</span> :
-                     typeof val === 'object' ? JSON.stringify(val) : String(val)}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    );
-  }
-
-  // Case 2: Object of objects (e.g. dictionary grouped by ID)
-  const rowKeys = Object.keys(tableData);
-  if (rowKeys.length === 0) return <div className="p-2 text-xs text-gray-500 italic">Objeto vacío {'{ }'}</div>;
-  const firstVal = tableData[rowKeys[0]];
-  if (typeof firstVal === 'object' && firstVal !== null && !Array.isArray(firstVal)) {
-    const cols = Array.from(new Set(rowKeys.flatMap(k => {
-      const v = tableData[k];
-      return v && typeof v === 'object' ? Object.keys(v) : [];
-    })));
-    return (
-      <table className="w-full text-left text-xs border-collapse">
-        <thead>
-          <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
-            <th className="p-1.5 border-r border-gray-800 w-24 font-semibold text-center">(Index)</th>
-            {cols.map(c => (
-              <th key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 font-semibold">{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rowKeys.map(rKey => {
-            const rowObj = tableData[rKey] || {};
-            return (
-              <tr key={rKey} className="border-b border-gray-800/50 hover:bg-gray-900/50">
-                <td className="p-1.5 border-r border-gray-800 text-accent font-semibold text-center">{rKey}</td>
-                {cols.map(c => {
-                  const val = rowObj[c];
-                  return (
-                    <td key={c} className="p-1.5 border-r border-gray-800 last:border-r-0 text-gray-200 whitespace-nowrap">
-                      {val === null ? <span className="text-rose-400">null</span> :
-                       val === undefined ? <span className="text-gray-500">undefined</span> :
-                       typeof val === 'object' ? JSON.stringify(val) : String(val)}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    );
-  }
-
-  // Fallback: simple key-value table
-  return (
-    <table className="w-full text-left text-xs border-collapse">
-      <thead>
-        <tr className="bg-gray-900 border-b border-gray-800 text-gray-400">
-          <th className="p-1.5 border-r border-gray-800 w-1/3 font-semibold">(Index)</th>
-          <th className="p-1.5 font-semibold">Valor</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rowKeys.map(k => (
-          <tr key={k} className="border-b border-gray-800/50 hover:bg-gray-900/50">
-            <td className="p-1.5 border-r border-gray-800 text-accent font-medium">{k}</td>
-            <td className="p-1.5 text-gray-200">{typeof tableData[k] === 'object' ? JSON.stringify(tableData[k]) : String(tableData[k])}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
 }
 
 type ModalTab = 'request' | 'response' | 'input' | 'console' | 'output';
@@ -278,15 +156,15 @@ export function DebugContextViewer({
 
   // Console logs captured from execution
   const nodeLogs = useMemo(() => {
-    const list: Array<{ level: string; args: string[]; ts: number; nodeLabel?: string; tableData?: any }> = [];
+    const list: ConsoleLogEntry[] = [];
     if (currentNodePreview?.logs && Array.isArray(currentNodePreview.logs)) {
-      currentNodePreview.logs.forEach((l: any) => list.push({ ...l, nodeLabel: (node.data?.label as string) || node.id }));
+      currentNodePreview.logs.forEach((l: any) => list.push({ ...l, nodeId: node.id, nodeLabel: (node.data?.label as string) || node.id }));
     }
     const direct = context[node.id];
     if (direct && typeof direct === 'object' && Array.isArray(direct._logs)) {
       direct._logs.forEach((l: any) => {
         if (!list.some(existing => existing.ts === l.ts && existing.args[0] === l.args[0])) {
-          list.push({ ...l, nodeLabel: (node.data?.label as string) || node.id });
+          list.push({ ...l, nodeId: node.id, nodeLabel: (node.data?.label as string) || node.id });
         }
       });
     }
@@ -294,17 +172,32 @@ export function DebugContextViewer({
     for (const [k, v] of Object.entries(context)) {
       if (k === node.id) continue;
       if (v && typeof v === 'object' && Array.isArray(v._logs) && v._logs.length > 0) {
+        // The context also holds each output under the node's label; only take the id entries
         const targetNode = nodes.find(n => n.id === k);
-        const nodeLabel = (targetNode?.data?.label as string) || k;
+        if (!targetNode) continue;
+        const nodeLabel = (targetNode.data?.label as string) || k;
         v._logs.forEach((l: any) => {
           if (!list.some(existing => existing.ts === l.ts && existing.args[0] === l.args[0])) {
-            list.push({ ...l, nodeLabel });
+            list.push({ ...l, nodeId: k, nodeLabel });
           }
         });
       }
     }
     return list;
   }, [context, node.id, node.data?.label, nodes, currentNodePreview]);
+
+  // Breakpoints and console calls of a transform node, walked one stop at a time
+  const transformTrace: TransformTrace | null = currentNodePreview?.trace ?? null;
+  const transformSteps = useMemo(
+    () => buildTransformSteps(transformTrace, currentNodePreview?.kind === 'transform_error' ? currentNodePreview.error : null),
+    [transformTrace, currentNodePreview]
+  );
+  // The index belongs to one trace: a new pause starts again at the first stop
+  const [stepState, setStepState] = useState<{ trace: TransformTrace | null; index: number }>({ trace: null, index: 0 });
+  const stepIndex = stepState.trace === transformTrace ? stepState.index : 0;
+  const setStepIndex = useCallback((index: number) => setStepState({ trace: transformTrace, index }), [transformTrace]);
+  const hasStepper = transformSteps.length > 0;
+  const hasNextStop = hasStepper && stepIndex < transformSteps.length - 1;
 
   const currentHistRecord = useMemo(() => {
     return iterationHistory.find(h => h.iterationIndex === viewingIterNum) || null;
@@ -330,14 +223,14 @@ export function DebugContextViewer({
       setActiveTab('response');
     } else if (requestPreview) {
       setActiveTab('request');
-    } else if (currentNodePreview?.kind === 'transform_result' || currentNodePreview?.kind === 'transform_error' || nodeLogs.length > 0) {
+    } else if (hasStepper || nodeLogs.length > 0) {
       setActiveTab('console');
     } else if (effectiveOutput !== undefined) {
       setActiveTab('output');
     } else {
       setActiveTab('input');
     }
-  }, [responsePreview, requestPreview, currentNodePreview, nodeLogs.length, effectiveOutput]);
+  }, [responsePreview, requestPreview, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
 
   // STRICT GRAPH ISOLATION:
   // Traverse backwards along incoming edges to find ONLY real ancestor nodes that lead into this node
@@ -674,14 +567,14 @@ export function DebugContextViewer({
             <>
               <Button
                 type="button"
-                variant="default"
+                variant="primary"
                 size="sm"
                 onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }))}
-                className="flex-1 text-xs h-7 gap-1 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
-                title="Continuar al paso siguiente"
+                className="flex-1 text-xs h-7 min-h-0 gap-1"
+                title="Ejecutar el paso actual y pausar en el siguiente"
               >
-                <StepForward size={12} className="text-accent" />
-                <span>Paso siguiente</span>
+                <StepForward size={12} />
+                <span>Siguiente paso</span>
               </Button>
 
               {responsePreview.iteration && responsePreview.iteration.total > responsePreview.iteration.current && (
@@ -690,48 +583,48 @@ export function DebugContextViewer({
                   variant="default"
                   size="sm"
                   onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }))}
-                  className="text-xs h-7 px-2 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
+                  className="text-xs h-7 min-h-0 px-2 gap-1"
                   title="Enviar todas las peticiones restantes de este bucle sin pausar"
                 >
-                  <FastForward size={12} className="text-accent" />
+                  <FastForward size={12} />
                   <span>Restantes ({responsePreview.iteration.total - responsePreview.iteration.current})</span>
                 </Button>
               )}
 
               <Button
                 type="button"
-                variant="primary"
+                variant="default"
                 size="sm"
                 onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className="text-xs h-7 px-3 gap-1 font-medium bg-accent text-white hover:bg-accent-hover shadow-2xs"
+                className="text-xs h-7 min-h-0 px-3 gap-1"
                 title="Continuar ejecución completa del flujo"
               >
                 <PlayCircle size={12} />
-                <span>Continuar</span>
+                <span>Continuar todo</span>
               </Button>
             </>
           ) : requestPreview ? (
             <>
               <Button
                 type="button"
-                variant="default"
+                variant="primary"
                 size="sm"
                 disabled={isSending}
                 onClick={() => {
                   setIsSending(true);
                   dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }));
                 }}
-                className="flex-1 text-xs h-7 gap-1 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
+                className="flex-1 text-xs h-7 min-h-0 gap-1"
                 title="Enviar esta petición y pausar al recibir respuesta"
               >
                 {isSending ? (
                   <>
-                    <Loader2 size={12} className="animate-spin text-accent" />
+                    <Loader2 size={12} className="animate-spin" />
                     <span>Enviando...</span>
                   </>
                 ) : (
                   <>
-                    <Send size={12} className="text-accent" />
+                    <Send size={12} />
                     <span>Enviar petición</span>
                   </>
                 )}
@@ -743,49 +636,49 @@ export function DebugContextViewer({
                   variant="default"
                   size="sm"
                   onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'continue_node' }))}
-                  className="text-xs h-7 px-2 font-medium bg-surface border-border hover:bg-bg text-fg shadow-2xs"
+                  className="text-xs h-7 min-h-0 px-2 gap-1"
                   title="Enviar todas las peticiones restantes sin pausar"
                 >
-                  <FastForward size={12} className="text-accent" />
+                  <FastForward size={12} />
                   <span>Restantes ({requestPreview.iteration.total - requestPreview.iteration.current + 1})</span>
                 </Button>
               )}
 
               <Button
                 type="button"
-                variant="primary"
+                variant="default"
                 size="sm"
                 onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className="text-xs h-7 px-3 gap-1 font-medium bg-accent text-white hover:bg-accent-hover shadow-2xs"
+                className="text-xs h-7 min-h-0 px-3 gap-1"
                 title="Continuar ejecución completa"
               >
                 <PlayCircle size={12} />
-                <span>Continuar</span>
+                <span>Continuar todo</span>
               </Button>
             </>
           ) : (
             <div className="flex items-center gap-1.5 w-full">
               <Button
                 type="button"
-                variant="default"
+                variant="primary"
                 size="sm"
                 onClick={() => dispatch(resumeDebugNode({ id: flowId, nodeId: node.id, action: 'step_over' }))}
-                className="flex-1 text-xs h-7 gap-1.5 font-medium border-border hover:bg-bg text-fg"
-                title="Ejecutar solo este nodo"
+                className="flex-1 text-xs h-7 min-h-0 gap-1.5"
+                title="Ejecutar este nodo y pausar en el siguiente"
               >
-                <StepForward size={12} className="text-accent" />
-                <span>Paso siguiente</span>
+                <StepForward size={12} />
+                <span>Siguiente paso</span>
               </Button>
               <Button
                 type="button"
-                variant="primary"
+                variant="default"
                 size="sm"
                 onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className="flex-1 text-xs h-7 gap-1.5 font-medium bg-accent text-white hover:bg-accent-hover"
+                className="flex-1 text-xs h-7 min-h-0 gap-1.5"
                 title="Continuar ejecución completa del flujo"
               >
                 <PlayCircle size={12} />
-                <span>Continuar</span>
+                <span>Continuar todo</span>
               </Button>
             </div>
           )}
@@ -837,18 +730,20 @@ export function DebugContextViewer({
               <span className="truncate text-fg/80 flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
                 <span>Transformación ejecutada</span>
-                {nodeLogs.length > 0 && (
-                  <span className="font-mono text-[10px] text-emerald-400">({nodeLogs.length} logs)</span>
+                {(hasStepper || nodeLogs.length > 0) && (
+                  <span className="font-mono text-[10px] text-muted">
+                    ({hasStepper ? `${transformSteps.length} paradas` : `${nodeLogs.length} logs`})
+                  </span>
                 )}
               </span>
               <button
                 type="button"
-                onClick={() => openModalWithTab(nodeLogs.length > 0 ? 'console' : 'output')}
+                onClick={() => openModalWithTab(hasStepper || nodeLogs.length > 0 ? 'console' : 'output')}
                 className="text-accent hover:underline text-[10px] shrink-0 font-medium cursor-pointer flex items-center gap-1"
-                title="Ver consola y salida de la transformación"
+                title="Recorrer las paradas del script y ver su salida"
               >
                 <Terminal size={11} />
-                <span>Ver consola</span>
+                <span>{hasStepper ? 'Paso a paso' : 'Ver consola'}</span>
               </button>
             </div>
           )}
@@ -875,7 +770,7 @@ export function DebugContextViewer({
       if (!isModalOpen) return null;
       return createPortal(
         <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
-          <div className="bg-surface rounded-lg shadow-raised border border-border w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden">
+          <div className="bg-surface rounded-lg shadow-raised border border-border w-full max-w-7xl h-[88vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
             <div className="p-4 bg-bg border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -901,13 +796,13 @@ export function DebugContextViewer({
                       </span>
                     )}
                     {currentNodePreview?.kind === 'transform_result' && (
-                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded border font-mono bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
-                        Transformación Completada
+                      <span className="text-[11px] font-medium px-2 py-0.5 rounded-sm border bg-emerald-500/10 text-emerald-700 border-emerald-500/20">
+                        Completada
                       </span>
                     )}
                     {currentNodePreview?.kind === 'transform_error' && (
-                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded border font-mono bg-rose-500/10 text-rose-600 border-rose-500/20">
-                        Error en Script
+                      <span className="text-[11px] font-medium px-2 py-0.5 rounded-sm border bg-rose-500/10 text-rose-700 border-rose-500/20">
+                        Error en el script
                       </span>
                     )}
                     {totalIterations > 1 && (
@@ -917,9 +812,13 @@ export function DebugContextViewer({
                     )}
                   </div>
                   <p className="text-xs text-muted mt-0.5">
-                    {effectiveResponse
-                      ? 'Inspecciona la petición enviada, la respuesta del servicio y los datos de entrada'
-                      : 'Inspecciona la petición configurada y los datos recibidos de los nodos anteriores'}
+                    {hasStepper
+                      ? 'Recorre el script parada a parada: breakpoints y console.* en el orden en que se ejecutaron'
+                      : effectiveResponse
+                        ? 'Inspecciona la petición enviada, la respuesta del servicio y los datos de entrada'
+                        : effectiveRequest
+                          ? 'Inspecciona la petición configurada y los datos recibidos de los nodos anteriores'
+                          : 'Inspecciona los datos recibidos de los nodos anteriores y el resultado del nodo'}
                   </p>
                 </div>
               </div>
@@ -945,7 +844,7 @@ export function DebugContextViewer({
                 <button
                   type="button"
                   onClick={() => dispatch(setDebugModalOpen(false))}
-                  className="p-1.5 hover:bg-muted rounded-md text-muted hover:text-fg transition-colors cursor-pointer"
+                  className="p-1.5 hover:bg-bg rounded-md text-muted hover:text-fg transition-colors cursor-pointer"
                   title="Cerrar modal de inspección"
                 >
                   <X size={18} />
@@ -1169,7 +1068,7 @@ export function DebugContextViewer({
                 </button>
               )}
 
-              {nodeLogs.length > 0 && (
+              {(hasStepper || nodeLogs.length > 0) && (
                 <button
                   type="button"
                   onClick={() => setActiveTab('console')}
@@ -1181,9 +1080,9 @@ export function DebugContextViewer({
                   )}
                 >
                   <Terminal size={14} />
-                  <span>Consola / Puntos de Control</span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-400 font-semibold">
-                    {nodeLogs.length}
+                  <span>{hasStepper ? 'Paso a paso' : 'Consola'}</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-accent/10 text-accent font-semibold">
+                    {hasStepper ? transformSteps.length : nodeLogs.length}
                   </span>
                 </button>
               )}
@@ -1704,84 +1603,20 @@ export function DebugContextViewer({
               </div>
             )}
 
-            {/* TAB 4: CONSOLE LOGS & CHECKPOINTS */}
-            {activeTab === 'console' && (
-              <div className="flex-1 overflow-auto p-4 bg-bg/40 flex flex-col gap-3">
-                <div className="bg-gray-950 rounded-md border border-gray-800 overflow-hidden flex flex-col flex-1 shadow-inner">
-                  <div className="flex items-center justify-between px-3.5 py-2 border-b border-gray-800 bg-gray-900/90">
-                    <div className="flex items-center gap-2">
-                      <Terminal size={14} className="text-emerald-400" />
-                      <span className="text-xs font-mono text-gray-200 font-semibold">Puntos de Control y Salida de Consola</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-mono text-gray-400 bg-gray-800/80 px-2 py-0.5 rounded border border-gray-700">
-                        {nodeLogs.length} {nodeLogs.length === 1 ? 'punto registrado' : 'puntos registrados'}
-                      </span>
-                    </div>
-                  </div>
+            {/* TAB 4: STEP THROUGH THE SCRIPT (breakpoints + console) */}
+            {activeTab === 'console' && hasStepper && transformTrace && (
+              <TransformStepper
+                trace={transformTrace}
+                steps={transformSteps}
+                index={stepIndex}
+                onIndexChange={setStepIndex}
+              />
+            )}
 
-                  <div className="flex-1 overflow-auto p-3 font-mono text-xs space-y-2.5">
-                    {nodeLogs.length === 0 ? (
-                      <div className="h-40 flex items-center justify-center text-gray-500 italic">
-                        No se han registrado mensajes de consola todavía. Usa console.log(...) o console.table(...) en tu código.
-                      </div>
-                    ) : (
-                      nodeLogs.map((log, i) => {
-                        const levelStyles: Record<string, { badge: string; badgeBg: string; text: string; border: string }> = {
-                          log:        { badge: 'LOG',        badgeBg: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30', text: 'text-emerald-300', border: 'border-emerald-500/20' },
-                          info:       { badge: 'INFO',       badgeBg: 'bg-sky-500/20 text-sky-400 border border-sky-500/30',         text: 'text-sky-300',     border: 'border-sky-500/20' },
-                          warn:       { badge: 'WARN',       badgeBg: 'bg-amber-500/20 text-amber-400 border border-amber-500/30',     text: 'text-amber-300',   border: 'border-amber-500/20' },
-                          error:      { badge: 'ERROR',      badgeBg: 'bg-rose-500/20 text-rose-400 border border-rose-500/30',       text: 'text-rose-300',    border: 'border-rose-500/20' },
-                          debug:      { badge: 'DEBUG',      badgeBg: 'bg-purple-500/20 text-purple-400 border border-purple-500/30', text: 'text-purple-300', border: 'border-purple-500/20' },
-                          table:      { badge: 'TABLE',      badgeBg: 'bg-teal-500/20 text-teal-400 border border-teal-500/30',       text: 'text-teal-300',   border: 'border-teal-500/30' },
-                          checkpoint: { badge: 'CHECKPOINT', badgeBg: 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30', text: 'text-indigo-300', border: 'border-indigo-500/30' },
-                        };
-                        const s = levelStyles[log.level] || levelStyles.log;
-
-                        return (
-                          <div
-                            key={i}
-                            className={cn(
-                              "p-2.5 rounded-md bg-gray-900/60 border transition-all hover:bg-gray-900/90",
-                              s.border
-                            )}
-                          >
-                            <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-gray-800/60 mb-1.5">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] font-semibold text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded font-mono">
-                                  Punto #{i + 1}
-                                </span>
-                                <span className={cn("text-[9px] px-1.5 py-0.5 rounded font-bold uppercase", s.badgeBg)}>
-                                  {s.badge}
-                                </span>
-                                {log.nodeLabel && (
-                                  <span className="text-[10px] text-gray-400 bg-gray-800/80 px-1.5 py-0.2 rounded border border-gray-700/60">
-                                    {log.nodeLabel}
-                                  </span>
-                                )}
-                              </div>
-                              {log.ts && (
-                                <span className="text-[10px] text-gray-500 font-mono">
-                                  {new Date(log.ts).toLocaleTimeString()}:{String(new Date(log.ts).getMilliseconds()).padStart(3, '0')}
-                                </span>
-                              )}
-                            </div>
-
-                            {log.level === 'table' && log.tableData ? (
-                              <div className="mt-1 overflow-x-auto rounded border border-gray-800 bg-gray-950">
-                                {renderConsoleTable(log.tableData)}
-                              </div>
-                            ) : (
-                              <div className={cn("select-text break-all whitespace-pre-wrap leading-relaxed", s.text)}>
-                                {log.args.join(' ')}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
+            {/* TAB 4 (runs without a debug trace): CONSOLE LOGS */}
+            {activeTab === 'console' && !hasStepper && (
+              <div className="flex-1 overflow-auto p-4 bg-bg/40">
+                <ConsoleLogList logs={nodeLogs} currentNodeId={node.id} />
               </div>
             )}
 
@@ -1817,8 +1652,8 @@ export function DebugContextViewer({
             )}
 
             {/* Modal Step Actions Footer */}
-            <div className="p-3 bg-surface border-t border-border flex items-center justify-between shrink-0">
-              <div className="text-xs text-muted flex items-center gap-2">
+            <div className="p-3 bg-surface border-t border-border flex items-center justify-between gap-3 shrink-0">
+              <div className="text-xs text-muted flex items-center gap-2 min-w-0 truncate">
                 <span>
                   Nodo actual: <strong className="text-fg">{(node.data?.label as string) || node.type}</strong>
                 </span>
@@ -1846,7 +1681,7 @@ export function DebugContextViewer({
                 )}
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0 whitespace-nowrap">
                 {!isViewingActiveIter ? (
                   <Button
                     variant="primary"
@@ -1863,8 +1698,20 @@ export function DebugContextViewer({
                   </Button>
                 ) : (
                   <>
+                    {activeTab === 'console' && hasNextStop && (
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => setStepIndex(stepIndex + 1)}
+                        className="gap-2"
+                        title="Ver la siguiente parada del script (→)"
+                      >
+                        <ArrowRight size={14} />
+                        <span>Siguiente parada ({stepIndex + 2}/{transformSteps.length})</span>
+                      </Button>
+                    )}
                     <Button
-                      variant={effectiveRequest && !effectiveResponse ? "primary" : "default"}
+                      variant={activeTab === 'console' && hasNextStop ? "default" : "primary"}
                       size="sm"
                       disabled={isSending}
                       onClick={() => {
@@ -1893,22 +1740,22 @@ export function DebugContextViewer({
                       ) : (
                         <>
                           {effectiveResponse || currentNodePreview?.kind === 'transform_result' ? (
-                            <StepForward size={14} className="text-accent" />
+                            <StepForward size={14} />
                           ) : effectiveRequest ? (
                             <Send size={14} />
                           ) : (
-                            <StepForward size={14} className="text-accent" />
+                            <StepForward size={14} />
                           )}
                           <span>
                             {effectiveResponse
                               ? (totalIterations > 1 && activeIterationNumber < totalIterations
                                   ? `Siguiente petición (#${activeIterationNumber + 1}/${totalIterations})`
-                                  : 'Paso siguiente')
+                                  : 'Siguiente paso')
                               : currentNodePreview?.kind === 'transform_result'
-                                ? 'Paso siguiente'
+                                ? 'Siguiente paso'
                                 : effectiveRequest
                                   ? (totalIterations > 1 ? `Enviar petición #${activeIterationNumber}` : 'Enviar esta petición')
-                                  : 'Paso siguiente'}
+                                  : 'Siguiente paso'}
                           </span>
                         </>
                       )}

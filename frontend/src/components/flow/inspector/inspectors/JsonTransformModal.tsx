@@ -1,17 +1,19 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import type { Node, Edge } from '@xyflow/react';
-import { Code2, Copy, Check, X, Terminal, Braces, Sparkles, CheckCircle } from 'lucide-react';
+import { Code2, Copy, Check, X, Terminal, Sparkles, CheckCircle, CircleDot } from 'lucide-react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { Button } from '../../../ui/button';
 import { VariablePicker } from '../editors/VariableField';
+import { breakpointGutter } from '../editors/breakpointGutter';
 
 interface JsonTransformModalProps {
   isOpen: boolean;
   onClose: () => void;
   code: string;
-  onChange: (newCode: string) => void;
+  breakpoints: number[];
+  onChange: (newCode: string, breakpoints: number[]) => void;
   node: Node;
   nodes: Node[];
   edges: Edge[];
@@ -22,6 +24,7 @@ export function JsonTransformModal({
   isOpen,
   onClose,
   code,
+  breakpoints,
   onChange,
   node,
   nodes,
@@ -31,15 +34,24 @@ export function JsonTransformModal({
   const [currentCode, setCurrentCode] = useState(code);
   const [copied, setCopied] = useState(false);
   const [applied, setApplied] = useState(false);
+  const [currentBreakpoints, setCurrentBreakpoints] = useState<number[]>(breakpoints);
   const editorRef = useRef<any>(null);
 
   // Sync internal state when opened
   React.useEffect(() => {
     if (isOpen) {
       setCurrentCode(code);
+      setCurrentBreakpoints(breakpoints);
       setApplied(false);
     }
-  }, [isOpen, code]);
+  }, [isOpen, code, breakpoints]);
+
+  // Built once per opening: CodeMirror reconfigures (and would reset the breakpoints) when the extensions change
+  const extensions = useMemo(
+    () => [javascript(), breakpointGutter(breakpoints, setCurrentBreakpoints)],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isOpen]
+  );
 
   if (!isOpen) return null;
 
@@ -50,7 +62,7 @@ export function JsonTransformModal({
   };
 
   const handleApply = () => {
-    onChange(currentCode);
+    onChange(currentCode, currentBreakpoints);
     setApplied(true);
     setTimeout(() => {
       setApplied(false);
@@ -95,12 +107,12 @@ export function JsonTransformModal({
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-fg flex items-center gap-2 truncate">
                 Editor de Código JavaScript
-                <span className="font-mono text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground">
+                <span className="font-mono text-[11px] font-normal bg-bg border border-border px-2 py-0.5 rounded-sm text-muted truncate">
                   {(node.data?.label as string) || 'Transformar Datos'}
                 </span>
               </h3>
               <p className="text-[11px] text-muted truncate">
-                Escribe lógica de transformación en JavaScript aislado con soporte de console.log()
+                <code>data</code> = datos de entrada · clic en el margen de una línea (o F9) para poner un breakpoint
               </p>
             </div>
           </div>
@@ -163,7 +175,7 @@ export function JsonTransformModal({
               ref={editorRef}
               value={currentCode}
               height="480px"
-              extensions={[javascript()]}
+              extensions={extensions}
               theme="light"
               onChange={(val) => setCurrentCode(val)}
               className="text-xs font-mono border-0 flex-1 [&_.cm-editor]:text-xs [&_.cm-scroller]:font-mono [&_.cm-content]:text-xs [&_.cm-line]:text-xs"
@@ -175,8 +187,15 @@ export function JsonTransformModal({
         {/* Footer with tips and action buttons */}
         <div className="p-3 border-t border-border flex items-center justify-between shrink-0 bg-bg/40 flex-wrap gap-2">
           <div className="flex items-center gap-3 text-[11px] text-muted font-mono">
+            <span className="flex items-center gap-1" title="Clic en el margen izquierdo de una línea, o F9 en la línea del cursor">
+              <CircleDot size={12} className="text-danger" />
+              {currentBreakpoints.length > 0
+                ? `${currentBreakpoints.length} breakpoint${currentBreakpoints.length === 1 ? '' : 's'}`
+                : 'Clic en el margen (o F9) para un breakpoint'}
+            </span>
+            <span>•</span>
             <span className="flex items-center gap-1">
-              <Terminal size={12} className="text-accent" /> Usa <code>console.log(...)</code> para imprimir en modo debug
+              <Terminal size={12} className="text-accent" /> <code>console.*</code> también se detiene en modo debug
             </span>
             <span>•</span>
             <span>Límite: 5s</span>

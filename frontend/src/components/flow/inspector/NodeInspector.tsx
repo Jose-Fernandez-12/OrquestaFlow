@@ -39,11 +39,31 @@ export interface NodeInspectorProps {
   onTestNode?: (nodeId: string) => void;
   testing?: boolean;
   testDisabled?: boolean;
+  /** The panel remembers one width while editing and another during a debug session */
+  layout?: 'edit' | 'debug';
 }
 
 const DEFAULT_WIDTH = 420;
 const MIN_WIDTH = 360;
-const MAX_WIDTH = 720;
+const MAX_WIDTH = 900;
+const WIDTH_KEYS = { edit: 'orquesta-inspector-width', debug: 'orquesta-inspector-width-debug' } as const;
+
+function readSavedWidth(layout: 'edit' | 'debug'): number {
+  try {
+    const saved = Number(localStorage.getItem(WIDTH_KEYS[layout]));
+    return saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : DEFAULT_WIDTH;
+  } catch {
+    return DEFAULT_WIDTH;
+  }
+}
+
+function saveWidth(layout: 'edit' | 'debug', width: number) {
+  try {
+    localStorage.setItem(WIDTH_KEYS[layout], String(Math.round(width)));
+  } catch {
+    // Storage unavailable: the width just is not remembered
+  }
+}
 
 export function NodeInspector({
   nodes,
@@ -53,9 +73,12 @@ export function NodeInspector({
   onTestNode,
   testing = false,
   testDisabled = false,
+  layout = 'edit',
 }: NodeInspectorProps) {
   const dispatch = useAppDispatch();
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH);
+  const [widths, setWidths] = useState(() => ({ edit: readSavedWidth('edit'), debug: readSavedWidth('debug') }));
+  const panelWidth = widths[layout];
+  const setPanelWidth = useCallback((width: number) => setWidths(prev => ({ ...prev, [layout]: width })), [layout]);
   const [isResizing, setIsResizing] = useState(false);
   const [isVariableDrawerOpen, setIsVariableDrawerOpen] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -104,14 +127,18 @@ export function NodeInspector({
   useEffect(() => {
     if (!isResizing) return;
 
+    let lastWidth: number | null = null;
     const handleMouseMove = (e: MouseEvent) => {
       const newWidth = window.innerWidth - e.clientX;
       if (newWidth >= MIN_WIDTH && newWidth <= MAX_WIDTH) {
+        lastWidth = newWidth;
         setPanelWidth(newWidth);
       }
     };
 
+    // Saved once, when the drag ends
     const handleMouseUp = () => {
+      if (lastWidth !== null) saveWidth(layout, lastWidth);
       setIsResizing(false);
     };
 
@@ -121,7 +148,12 @@ export function NodeInspector({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isResizing]);
+  }, [isResizing, layout, setPanelWidth]);
+
+  const resetWidth = () => {
+    setPanelWidth(DEFAULT_WIDTH);
+    saveWidth(layout, DEFAULT_WIDTH);
+  };
 
   // Parent loop context
   const parentForEachNode = React.useMemo(() => {
@@ -181,11 +213,12 @@ export function NodeInspector({
       {/* Resize Handle */}
       <div
         onMouseDown={startResizing}
+        onDoubleClick={resetWidth}
         className={cn(
           'absolute -left-1 top-0 bottom-0 w-2 cursor-col-resize z-20 transition-colors',
           isResizing ? 'bg-accent/40' : 'hover:bg-accent/20'
         )}
-        title="Arrastra para cambiar el ancho del panel"
+        title="Arrastra para cambiar el ancho (se recuerda) · doble clic para restablecerlo"
       />
 
       {/* Header */}
