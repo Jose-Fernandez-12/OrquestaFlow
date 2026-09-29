@@ -1,12 +1,15 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import { Button } from '../../ui/button';
-import { Trash2, Braces, Repeat, Check, Copy, ChevronDown } from 'lucide-react';
+import { Trash2, Braces, Repeat, Check, Copy, ChevronDown, FlaskConical, Loader2 } from 'lucide-react';
 import { useAppSelector, useAppDispatch } from '../../../store/hooks';
 import { selectNode } from '../../../store/flowSlice';
 import { cn } from '../../../lib/utils';
 import { InspectorHeader } from './InspectorHeader';
 import { VariableDrawer } from './VariableDrawer';
+import { ErrorHandlingSection } from './ErrorHandlingSection';
+import { NodeIssuesBanner } from '../validation/FlowIssues';
+import { useNodeIssues } from '../validation/FlowIssuesContext';
 import { DebugContextViewer } from '../DebugContextViewer';
 import { StartInspector } from './inspectors/StartInspector';
 import { HttpInspector } from './inspectors/HttpInspector';
@@ -24,6 +27,7 @@ import { JsonTransformInspector } from './inspectors/JsonTransformInspector';
 import { WebhookTriggerInspector } from './inspectors/WebhookTriggerInspector';
 import { OAuth2ConnectorInspector } from './inspectors/OAuth2ConnectorInspector';
 import { AiChatCompletionInspector } from './inspectors/AiChatCompletionInspector';
+import { NoteInspector } from './inspectors/NoteInspector';
 import { findParentForEachNode, getForEachItems, getUpstreamNodes } from './utils';
 
 export interface NodeInspectorProps {
@@ -31,30 +35,61 @@ export interface NodeInspectorProps {
   setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
   edges: Edge[];
   selectedNodeId: string;
+  /** Runs only this node with the results of the last execution */
+  onTestNode?: (nodeId: string) => void;
+  testing?: boolean;
+  testDisabled?: boolean;
+  /** The panel remembers one width while editing and another during a debug session */
+  layout?: 'edit' | 'debug';
 }
 
 const DEFAULT_WIDTH = 420;
 const MIN_WIDTH = 360;
-const MAX_WIDTH = 720;
+const MAX_WIDTH = 900;
+const WIDTH_KEYS = { edit: 'orquesta-inspector-width', debug: 'orquesta-inspector-width-debug' } as const;
+
+function readSavedWidth(layout: 'edit' | 'debug'): number {
+  try {
+    const saved = Number(localStorage.getItem(WIDTH_KEYS[layout]));
+    return saved >= MIN_WIDTH && saved <= MAX_WIDTH ? saved : DEFAULT_WIDTH;
+  } catch {
+    return DEFAULT_WIDTH;
+  }
+}
+
+function saveWidth(layout: 'edit' | 'debug', width: number) {
+  try {
+    localStorage.setItem(WIDTH_KEYS[layout], String(Math.round(width)));
+  } catch {
+    // Storage unavailable: the width just is not remembered
+  }
+}
 
 export function NodeInspector({
   nodes,
   setNodes,
   edges,
   selectedNodeId,
+  onTestNode,
+  testing = false,
+  testDisabled = false,
+  layout = 'edit',
 }: NodeInspectorProps) {
   const dispatch = useAppDispatch();
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH);
+  const [widths, setWidths] = useState(() => ({ edit: readSavedWidth('edit'), debug: readSavedWidth('debug') }));
+  const panelWidth = widths[layout];
+  const setPanelWidth = useCallback((width: number) => setWidths(prev => ({ ...prev, [layout]: width })), [layout]);
   const [isResizing, setIsResizing] = useState(false);
   const [isVariableDrawerOpen, setIsVariableDrawerOpen] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const node = nodes.find(n => n.id === selectedNodeId);
+  const nodeIssues = useNodeIssues(selectedNodeId);
 
   const pausedNodeIds = useAppSelector(state => state.flows.pausedNodeIds);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
-  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode || {});
-  const nodeDebugPreview = allNodePreviews[selectedNodeId];
+  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode);
+  const nodeDebugPreview = allNodePreviews?.[selectedNodeId];
   const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
   const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
 
@@ -66,7 +101,7 @@ export function NodeInspector({
     : globalResponsePreview;
   const iterationHistory = nodeDebugPreview?.history || [];
   const currentFlow = useAppSelector(state => state.flows.currentFlow);
-  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults || {});
+  const nodeResults = useAppSelector(state => state.flows.nodeResults);
   const isPaused = pausedNodeIds.includes(selectedNodeId);
 
   const updateNodeData = useCallback(
@@ -92,14 +127,18 @@ export function NodeInspector({
   useEffect(() => {
     if (!isResizing) return;
 
+    let lastWidth: number | null = null;
     const handleMouseMove = (e: MouseEvent) => {
       const newWidth = window.innerWidth - e.clientX;
       if (newWidth >= MIN_WIDTH && newWidth <= MAX_WIDTH) {
+        lastWidth = newWidth;
         setPanelWidth(newWidth);
       }
     };
 
+    // Saved once, when the drag ends
     const handleMouseUp = () => {
+      if (lastWidth !== null) saveWidth(layout, lastWidth);
       setIsResizing(false);
     };
 
@@ -109,7 +148,12 @@ export function NodeInspector({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isResizing]);
+  }, [isResizing, layout, setPanelWidth]);
+
+  const resetWidth = () => {
+    setPanelWidth(DEFAULT_WIDTH);
+    saveWidth(layout, DEFAULT_WIDTH);
+  };
 
   // Parent loop context
   const parentForEachNode = React.useMemo(() => {
@@ -155,6 +199,7 @@ export function NodeInspector({
   }
 
   const type = node.type || '';
+  const canTest = Boolean(onTestNode) && !['start', 'forEachEnd', 'note'].includes(type);
 
   return (
     <aside
@@ -168,11 +213,12 @@ export function NodeInspector({
       {/* Resize Handle */}
       <div
         onMouseDown={startResizing}
+        onDoubleClick={resetWidth}
         className={cn(
           'absolute -left-1 top-0 bottom-0 w-2 cursor-col-resize z-20 transition-colors',
           isResizing ? 'bg-accent/40' : 'hover:bg-accent/20'
         )}
-        title="Arrastra para cambiar el ancho del panel"
+        title="Arrastra para cambiar el ancho (se recuerda) · doble clic para restablecerlo"
       />
 
       {/* Header */}
@@ -182,34 +228,56 @@ export function NodeInspector({
         onClose={() => dispatch(selectNode(null))}
       />
 
-      {/* Action bar (Variable Panel trigger + Helpers) — hidden when there is nothing to offer */}
-      {hasAvailableVariables && (
-      <div className="px-5 py-3 border-b border-border bg-bg/40 flex items-center justify-between shrink-0">
-        <button
-          type="button"
-          onClick={() => setIsVariableDrawerOpen(prev => !prev)}
-          className={cn(
-            'flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg border transition-all',
-            isVariableDrawerOpen
-              ? 'bg-accent/10 text-accent border-accent/40 shadow-md ring-2 ring-accent/20'
-              : 'bg-accent/5 text-accent border-accent/20 hover:bg-accent/15 hover:border-accent/30 hover:shadow-sm'
-          )}
-          title="Alternar panel de variables dinámicas disponibles"
-        >
-          <Braces size={14} strokeWidth={2.5} />
-          <span>Variables disponibles</span>
-          <ChevronDown
-            size={13}
-            className={cn('transition-transform duration-200', isVariableDrawerOpen && 'rotate-180')}
-          />
-        </button>
-
-        {parentForEachNode && (
-          <span className="text-[10px] font-semibold text-accent bg-accent/5 border border-accent/20 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm">
-            <Repeat size={11} strokeWidth={2.5} />
-            <span>En bucle</span>
-          </span>
+      {/* Action bar (variables panel, loop tag, single-node test) — hidden when there is nothing to offer */}
+      {(hasAvailableVariables || canTest) && (
+      <div className="px-5 py-3 border-b border-border bg-bg/40 flex items-center justify-between gap-2 shrink-0">
+        {hasAvailableVariables ? (
+          <button
+            type="button"
+            onClick={() => setIsVariableDrawerOpen(prev => !prev)}
+            className={cn(
+              'flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg border transition-all',
+              isVariableDrawerOpen
+                ? 'bg-accent/10 text-accent border-accent/40 shadow-md ring-2 ring-accent/20'
+                : 'bg-accent/5 text-accent border-accent/20 hover:bg-accent/15 hover:border-accent/30 hover:shadow-sm'
+            )}
+            title="Alternar panel de variables dinámicas disponibles"
+          >
+            <Braces size={14} strokeWidth={2.5} />
+            <span>Variables disponibles</span>
+            <ChevronDown
+              size={13}
+              className={cn('transition-transform duration-200', isVariableDrawerOpen && 'rotate-180')}
+            />
+          </button>
+        ) : (
+          <span />
         )}
+
+        <div className="flex items-center gap-2">
+          {parentForEachNode && (
+            <span className="text-[10px] font-semibold text-accent bg-accent/5 border border-accent/20 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm">
+              <Repeat size={11} strokeWidth={2.5} />
+              <span>En bucle</span>
+            </span>
+          )}
+          {canTest && (
+            <button
+              type="button"
+              onClick={() => onTestNode?.(node.id)}
+              disabled={testDisabled}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-border bg-surface text-fg hover:border-accent/40 hover:text-accent transition-colors disabled:opacity-50 disabled:pointer-events-none"
+              title={
+                node.type === 'export'
+                  ? 'Ejecuta solo este nodo con los resultados de la última ejecución (genera el archivo)'
+                  : 'Ejecuta solo este nodo con los resultados de la última ejecución de los nodos anteriores'
+              }
+            >
+              {testing ? <Loader2 size={12} className="animate-spin" /> : <FlaskConical size={12} />}
+              <span>{testing ? 'Probando…' : 'Probar nodo'}</span>
+            </button>
+          )}
+        </div>
       </div>
       )}
 
@@ -244,6 +312,7 @@ export function NodeInspector({
 
       {/* Main Content Area */}
       <div className="p-5 flex-1 overflow-y-auto flex flex-col gap-5">
+        <NodeIssuesBanner issues={nodeIssues} />
 
         {/* Compact Loop Quick-Access Bar (if inside forEach) */}
         {parentForEachNode && (
@@ -427,6 +496,8 @@ export function NodeInspector({
           />
         )}
 
+        {type === 'note' && <NoteInspector node={node} updateNodeData={updateNodeData} />}
+
         {/* Fallback for unrecognized node types */}
         {![
           'start',
@@ -449,6 +520,7 @@ export function NodeInspector({
           'webhookTrigger',
           'oauth2Connector',
           'aiChatCompletion',
+          'note',
         ].includes(type) && (
           <div className="p-4 bg-bg border border-border rounded text-xs text-muted text-center space-y-2">
             <p className="font-medium text-fg">Tipo de nodo: {type}</p>
@@ -457,6 +529,9 @@ export function NodeInspector({
             </p>
           </div>
         )}
+
+        {/* Retries and error policy (hidden for nodes that cannot fail transiently or continue) */}
+        <ErrorHandlingSection key={node.id} node={node} updateNodeData={updateNodeData} />
 
         {/* Delete Node Button */}
         <div className="mt-8 pt-5 border-t border-border-light">

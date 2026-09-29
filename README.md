@@ -41,7 +41,7 @@ Disena pipelines complejos uniendo bloques con dependencias calculadas automatic
 - **Visor de Contexto:** Monitoreo en vivo del estado y memoria de cada paso a traves de WebSockets.
 
 ### 4. Portabilidad y Versionamiento
-- **Exportacion a Python:** Convierte cualquier flujo en un script Python ejecutable autonomo, o empaquetalo como archivo ZIP listo para produccion con entorno y dependencias (`requirements.txt`).
+- **Exportacion a Python:** Convierte cualquier flujo en un paquete ZIP listo para produccion. El script principal se lee como el flujo (una funcion por nodo con el decorador `@node` y un `main()` donde los bucles son `for` y las bifurcaciones `if`); la mecanica comun vive en `orquesta_runtime.py`. Incluye `requirements.txt`, `.env.example` (los secretos nunca se escriben en el script), las consultas en `queries/`, las transformaciones en `transforms/` y los scripts de scraping en `scripts/`. Soporta todos los tipos de nodo, reintentos y la opcion de continuar ante errores.
 - **Importacion / Exportacion JSON:** Comparte o respalda definiciones completas de flujos, incluyendo consultas y conexiones asociadas.
 - **Historial de Versiones:** Registro y recuperacion de versiones previas de cada flujo de trabajo.
 
@@ -52,6 +52,19 @@ Disena pipelines complejos uniendo bloques con dependencias calculadas automatic
 ### 6. Programador de Tareas (Scheduler)
 - Automatizacion de ejecuciones en segundo plano con expresiones Cron estándar.
 - Registro detallado de duracion, cantidad de registros procesados y estado (completado, fallido, cancelado).
+
+### 7. Confiabilidad de la Ejecucion
+- **Reintentos por nodo:** HTTP, Consulta SQL, Web Scraping, OAuth2 e IA pueden reintentar ante fallos transitorios (red, tiempo de espera, HTTP 408/429/5xx) con espera fija o que se duplica. Los nodos HTTP usan por defecto el valor global de Configuracion y reintentan cada peticion por separado.
+- **Continuar si falla:** Un nodo puede fallar sin detener el flujo; su salida pasa a ser `{ error, failed: true }` y se marca en ambar en el lienzo.
+- **Historial de ejecuciones:** Cada ejecucion (manual, debug, programada o por webhook) guarda su origen y el detalle por nodo: estado, duracion, veces que corrio dentro de un bucle, reintentos, registros y error. Incluye filtros, estadisticas y paginacion.
+
+### 8. Productividad en el Editor
+- **Deshacer / rehacer** (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`) y aviso de cambios sin guardar (`Ctrl+S` para guardar).
+- **Copiar, pegar y duplicar nodos** (`Ctrl+C`, `Ctrl+V`, `Ctrl+D`), tambien entre flujos; las referencias `{{nodo...}}` dentro del grupo copiado se actualizan a las copias.
+- **Busqueda de nodos** en el lienzo (`Ctrl+K`).
+- **Revision antes de ejecutar:** marca en el lienzo los nodos con configuracion incompleta o referencias a nodos inexistentes y avisa antes de ejecutar un flujo con errores.
+- **Probar un nodo:** ejecuta solo el nodo seleccionado con los resultados de la ultima ejecucion de los nodos anteriores.
+- **Notas:** bloques de texto para documentar partes del flujo (no se ejecutan; aparecen en el README de la exportacion a Python).
 
 ---
 
@@ -113,6 +126,14 @@ npm run dev
 El proyecto estara disponible en:
 - **Frontend (Aplicacion Web):** [http://localhost:5173](http://localhost:5173)
 - **Backend (API Fastify):** [http://localhost:3001](http://localhost:3001) (Health check: `/api/health`)
+
+### 4. Pruebas automatizadas
+Las pruebas usan [Vitest](https://vitest.dev). Las del motor corren contra una base SQLite en memoria (`ORQUESTA_DB_PATH=:memory:`), nunca contra `backend/data/orquesta.sqlite`.
+```bash
+npm test                    # backend y frontend
+npm --prefix backend test   # motor DAG, reintentos, historial, grafo y exportador a Python
+npm --prefix frontend test  # historial del lienzo, portapapeles y validacion del flujo
+```
 
 ---
 

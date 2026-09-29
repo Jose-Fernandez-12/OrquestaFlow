@@ -65,6 +65,7 @@ export const TYPE_LABELS: Record<string, string> = {
   webhookTrigger: 'Disparador Webhook',
   oauth2Connector: 'Conector OAuth2',
   aiChatCompletion: 'IA / Chat LLM',
+  note: 'Nota',
 };
 
 export const TYPE_COLORS: Record<string, string> = {
@@ -88,6 +89,7 @@ export const TYPE_COLORS: Record<string, string> = {
   webhookTrigger: 'text-pink-600',
   oauth2Connector: 'text-indigo-600',
   aiChatCompletion: 'text-fuchsia-600',
+  note: 'text-amber-600',
 };
 
 export const TYPE_BG_COLORS: Record<string, string> = {
@@ -111,4 +113,5 @@ export const TYPE_BG_COLORS: Record<string, string> = {
   webhookTrigger: 'bg-pink-500/10',
   oauth2Connector: 'bg-indigo-500/10',
   aiChatCompletion: 'bg-fuchsia-500/10',
+  note: 'bg-amber-500/10',
 };

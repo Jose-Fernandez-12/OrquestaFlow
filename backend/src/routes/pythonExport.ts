@@ -1,7 +1,11 @@
 import { FastifyInstance } from 'fastify';
 import JSZip from 'jszip';
+import fs from 'fs';
 import { getDb } from '../db/database.js';
+import { resolveScrapingScript } from '../engine/executor.js';
 import { transpileFlowToPython, TranspilerContext, TranspilerQueryInfo } from '../engine/pythonTranspiler.js';
+import { getSystemSettingsFromDb } from './settings.js';
+import { slugify } from '../engine/python/pyCode.js';
 
 export async function pythonExportRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string } }>('/:id/export-python', async (request, reply) => {
@@ -23,7 +27,11 @@ export async function pythonExportRoutes(app: FastifyInstance): Promise<void> {
     const nodes: any[] = definition.nodes || [];
 
     // Enrich query nodes with real SQL and connection info
-    const ctx: TranspilerContext = { queries: {} };
+    const settings = getSystemSettingsFromDb();
+    const ctx: TranspilerContext = {
+      queries: {},
+      settings: { httpMaxRetries: settings.http_max_retries, httpTimeoutSeconds: settings.http_timeout_seconds },
+    };
 
     const queryNodes = nodes.filter(n => n.type === 'query');
     for (const qNode of queryNodes) {
@@ -89,16 +97,28 @@ export async function pythonExportRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
+    // Scraping nodes run a Python script from the server's scripts/ folder: ship it with the package
+    ctx.scripts = {};
+    for (const sNode of nodes.filter(n => n.type === 'scraping' && n.data?.script)) {
+      const ref = String(sNode.data.script);
+      const found = resolveScrapingScript(ref);
+      if (found) ctx.scripts[ref] = { fileName: found.fileName, content: fs.readFileSync(found.path, 'utf-8') };
+    }
+
     try {
-      const { script, requirementsTxt, envExample, readmeMd, sqlFiles, jsFiles } = transpileFlowToPython(flow.name, definition, ctx);
-      const slug = flow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+      const { script, runtimePy, scriptFiles, requirementsTxt, envExample, readmeMd, sqlFiles, jsFiles } = transpileFlowToPython(flow.name, definition, ctx);
+      const slug = slugify(flow.name) || 'flujo';
       const scriptFileName = `${slug}_flow.py`;
       const zipFileName = `${slug}_bundle.zip`;
 
       const zip = new JSZip();
 
-      // 1. Python executable script
+      // 1. Python executable script and the shared runtime it imports
       zip.file(scriptFileName, script);
+      zip.file('orquesta_runtime.py', runtimePy);
+      for (const sf of scriptFiles) {
+        zip.file(`scripts/${sf.fileName}`, sf.content);
+      }
 
       // 2. Python requirements.txt
       zip.file('requirements.txt', requirementsTxt);

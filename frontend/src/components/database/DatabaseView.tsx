@@ -908,7 +908,7 @@ export function DatabaseView() {
                   <Button 
                     variant="ghost" 
                     size="sm" 
-                    className="h-6 px-2 text-[10px] uppercase font-mono text-muted-foreground hover:text-fg"
+                    className="h-6 px-2 text-[10px] uppercase font-mono text-muted hover:text-fg"
                     onClick={() => setShowQueryEditor(!showQueryEditor)}
                   >
                     {showQueryEditor ? 'Ocultar' : 'Mostrar'} Editor

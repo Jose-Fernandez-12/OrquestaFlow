@@ -112,3 +112,45 @@ export function describeRule(rule: ConditionRule): string {
   if (op.unary) return `${left} ${op.label.toLowerCase()}`;
   return `${left} ${op.symbol} ${shortExpression(rule.right) || '""'}`;
 }
+
+// ── Retries and error policy (mirrors backend/src/engine/retry.ts) ──
+
+export const HTTP_NODE_TYPES = ['httpGet', 'httpPost', 'httpRequest'];
+
+/** Nodes that talk to the outside world and can fail transiently */
+export const RETRYABLE_NODE_TYPES = [...HTTP_NODE_TYPES, 'scraping', 'query', 'oauth2Connector', 'aiChatCompletion'];
+
+/** Control-flow nodes: continuing past a failure would leave the graph in an undefined state */
+export const NO_CONTINUE_NODE_TYPES = ['start', 'forEach', 'forEachEnd', 'conditionalBranch'];
+
+export const supportsRetries = (type?: string) => !!type && RETRYABLE_NODE_TYPES.includes(type);
+export const supportsContinueOnError = (type?: string) => !!type && !NO_CONTINUE_NODE_TYPES.includes(type);
+
+export interface NodeRetryConfig {
+  retryCount: number | null;   // null = use the global default (HTTP) or 0
+  retryDelayMs: number;
+  retryBackoff: 'fixed' | 'exponential';
+  onError: 'stop' | 'continue';
+}
+
+export function getNodeRetryConfig(data: Record<string, any> | undefined): NodeRetryConfig {
+  const count = data?.retryCount;
+  const parsed = count === undefined || count === null || count === '' ? null : Number(count);
+  const delay = Number(data?.retryDelayMs);
+  return {
+    retryCount: parsed !== null && Number.isFinite(parsed) ? parsed : null,
+    retryDelayMs: Number.isFinite(delay) && data?.retryDelayMs !== '' && data?.retryDelayMs !== undefined ? delay : 1000,
+    retryBackoff: data?.retryBackoff === 'fixed' ? 'fixed' : 'exponential',
+    onError: data?.onError === 'continue' ? 'continue' : 'stop',
+  };
+}
+
+/** Human description of the wait before each retry, e.g. "1s, 2s, 4s" */
+export function describeRetryDelays(config: NodeRetryConfig, retries: number): string {
+  const n = Math.min(Math.max(retries, 0), 4);
+  const delays = Array.from({ length: n }, (_, i) =>
+    Math.min(60000, config.retryBackoff === 'exponential' ? config.retryDelayMs * 2 ** i : config.retryDelayMs)
+  );
+  const fmt = (ms: number) => (ms >= 1000 ? `${+(ms / 1000).toFixed(1)}s` : `${ms}ms`);
+  return delays.map(fmt).join(', ') + (retries > 4 ? '…' : '');
+}

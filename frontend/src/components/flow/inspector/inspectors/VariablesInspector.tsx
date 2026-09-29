@@ -12,10 +12,10 @@ import {
   HelpCircle,
   Eye,
   CheckCircle2,
-  Clock,
-  Code
+  Clock
 } from 'lucide-react';
 import { Button } from '../../../ui/button';
+import { JsonCodeField } from '../editors/JsonCodeField';
 import { cn } from '../../../../lib/utils';
 
 export interface FlowVariable {
@@ -526,26 +526,11 @@ export function VariablesInspector({
       {viewMode === 'json' && (
         <div className="space-y-2">
           <div className="space-y-1">
-            <div className="flex items-center justify-between text-xs text-muted">
-              <label>Objeto JSON de variables:</label>
-              <button
-                type="button"
-                onClick={() => {
-                  try {
-                    const parsed = JSON.parse(rawJson);
-                    updateNodeData('rawJson', JSON.stringify(parsed, null, 2));
-                  } catch {}
-                }}
-                className="text-[11px] text-violet-600 hover:underline flex items-center gap-1"
-              >
-                <Code size={11} />
-                <span>Formatear</span>
-              </button>
-            </div>
-            <textarea
-              className="w-full min-h-[180px] p-2.5 rounded-sm border border-border bg-bg text-xs font-mono text-fg focus-visible:outline-none focus-visible:border-violet-500 leading-relaxed"
+            <label className="text-xs text-muted">Objeto JSON de variables:</label>
+            <JsonCodeField
+              minHeight="180px"
               value={rawJson}
-              onChange={e => updateNodeData('rawJson', e.target.value)}
+              onChange={v => updateNodeData('rawJson', v)}
               placeholder={'{\n  "fechaInicio": "$month_start",\n  "fechaFin": "$today_ymd",\n  "estado": "A"\n}'}
             />
           </div>
