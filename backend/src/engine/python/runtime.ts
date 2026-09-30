@@ -662,10 +662,16 @@ def http_request(ctx, method, url, *, headers=None, params=None, body=None, bear
     Cada petición se reintenta por separado ante fallos transitorios.
     """
     items = [None]
+    # Iterating over a list always returns a list (one response per element), even with 0 or 1 elements
+    iterates = False
     if for_each is not None:
         found = first_list(ctx) if for_each == "auto" else resolve(ctx, for_each)
-        if isinstance(found, list) and found:
+        if isinstance(found, dict) and isinstance(found.get("_data"), list):
+            found = found["_data"]
+        # "auto" with no list in the context sends a single request, like the editor's engine
+        if isinstance(found, list) and (found or for_each != "auto"):
             items = found
+            iterates = True
 
     results = []
     for index, item in enumerate(items):
@@ -688,7 +694,7 @@ def http_request(ctx, method, url, *, headers=None, params=None, body=None, bear
         if len(items) > 1:
             log.info("   %d/%d OK", index + 1, len(items))
 
-    return results if len(items) > 1 else results[0]
+    return results if iterates else results[0]
 
 
 def _as_mapping(value):

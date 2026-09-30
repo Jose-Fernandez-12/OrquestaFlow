@@ -17,13 +17,9 @@ import {
 import { Button } from '../../../ui/button';
 import { JsonCodeField } from '../editors/JsonCodeField';
 import { cn } from '../../../../lib/utils';
+import { variablesFromJson, variablesToJson, type FlowVariable } from './variablesSync';
 
-export interface FlowVariable {
-  key: string;
-  type: 'string' | 'number' | 'boolean' | 'date' | 'json';
-  value: any;
-  description?: string;
-}
+export type { FlowVariable };
 
 interface VariablesInspectorProps {
   node: Node;
@@ -107,7 +103,7 @@ export function VariablesInspector({
   debugPreview,
 }: VariablesInspectorProps) {
   const data = (node.data || {}) as Record<string, any>;
-  const variables: FlowVariable[] = Array.isArray(data.variables) ? data.variables : [];
+  const variables: FlowVariable[] = useMemo(() => (Array.isArray(data.variables) ? data.variables : []), [data.variables]);
   const rawJson: string = typeof data.rawJson === 'string' ? data.rawJson : '';
   const [viewMode, setViewMode] = useState<'table' | 'json'>('table');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -116,10 +112,29 @@ export function VariablesInspector({
 
   const nodeLabel = (data.label as string) || 'Variables';
 
+  // Table and JSON editor always hold the same variables: every edit writes both
+  const setVariables = (next: FlowVariable[]) => {
+    updateNodeData('variables', next);
+    updateNodeData('rawJson', variablesToJson(next));
+  };
+
+  const handleJsonChange = (text: string) => {
+    updateNodeData('rawJson', text);
+    const next = variablesFromJson(text, variables);
+    if (next) updateNodeData('variables', next);
+  };
+
+  // Nodes saved before both were kept in sync can disagree; the run uses the table
+  const jsonVariables = useMemo(() => variablesFromJson(rawJson, variables), [rawJson, variables]);
+  const outOfSync = Boolean(
+    rawJson.trim() && jsonVariables && variables.length > 0 &&
+    variablesToJson(jsonVariables) !== variablesToJson(variables)
+  );
+
   const updateVariable = (index: number, patch: Partial<FlowVariable>) => {
     const next = [...variables];
     next[index] = { ...next[index], ...patch };
-    updateNodeData('variables', next);
+    setVariables(next);
   };
 
   const addVariable = (initial?: Partial<FlowVariable>) => {
@@ -132,12 +147,12 @@ export function VariablesInspector({
         description: initial?.description || '',
       },
     ];
-    updateNodeData('variables', next);
+    setVariables(next);
   };
 
   const removeVariable = (index: number) => {
     const next = variables.filter((_, i) => i !== index);
-    updateNodeData('variables', next);
+    setVariables(next);
   };
 
   const addDateRangePreset = () => {
@@ -156,7 +171,7 @@ export function VariablesInspector({
         description: 'Día actual (YYYYMMDD)',
       },
     ];
-    updateNodeData('variables', next);
+    setVariables(next);
   };
 
   const handleCopyTag = (expr: string, keyName: string) => {
@@ -188,37 +203,13 @@ export function VariablesInspector({
     setTimeout(() => setCopiedAll(false), 1500);
   };
 
-  // Sync Table to JSON or viceversa
   const handleSwitchToJson = () => {
-    const obj: Record<string, any> = {};
-    for (const v of variables) {
-      if (v.key) obj[v.key] = v.value;
-    }
-    updateNodeData('rawJson', JSON.stringify(obj, null, 2));
+    // A node with only a table (older flows) gets its JSON text on first open
+    if (!rawJson.trim() && variables.length > 0) updateNodeData('rawJson', variablesToJson(variables));
     setViewMode('json');
   };
 
   const handleSwitchToTable = () => {
-    if (rawJson.trim()) {
-      try {
-        const parsed = JSON.parse(rawJson);
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-          const nextVars: FlowVariable[] = Object.entries(parsed).map(([k, val]) => {
-            let t: FlowVariable['type'] = 'string';
-            if (typeof val === 'number') t = 'number';
-            else if (typeof val === 'boolean') t = 'boolean';
-            else if (typeof val === 'object' && val !== null) t = 'json';
-            return {
-              key: k,
-              type: t,
-              value: typeof val === 'object' ? JSON.stringify(val) : val,
-              description: '',
-            };
-          });
-          updateNodeData('variables', nextVars);
-        }
-      } catch {}
-    }
     setViewMode('table');
   };
 
@@ -261,6 +252,23 @@ export function VariablesInspector({
           {variables.length} {variables.length === 1 ? 'variable' : 'variables'}
         </span>
       </div>
+
+      {outOfSync && jsonVariables && (
+        <div className="p-2.5 rounded-sm border border-amber-400/50 bg-amber-500/5 text-[11px] text-fg space-y-2">
+          <p>
+            La tabla ({variables.length} {variables.length === 1 ? 'variable' : 'variables'}) y el editor JSON ({jsonVariables.length}) no coinciden.
+            Al ejecutar se usa la tabla. Elige cuál conservar:
+          </p>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" className="h-6 text-[11px]" onClick={() => setVariables(jsonVariables)}>
+              Usar el JSON
+            </Button>
+            <Button variant="outline" size="sm" className="h-6 text-[11px]" onClick={() => setVariables(variables)}>
+              Usar la tabla
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* TABLE VIEW */}
       {viewMode === 'table' && (
@@ -530,7 +538,7 @@ export function VariablesInspector({
             <JsonCodeField
               minHeight="180px"
               value={rawJson}
-              onChange={v => updateNodeData('rawJson', v)}
+              onChange={handleJsonChange}
               placeholder={'{\n  "fechaInicio": "$month_start",\n  "fechaFin": "$today_ymd",\n  "estado": "A"\n}'}
             />
           </div>

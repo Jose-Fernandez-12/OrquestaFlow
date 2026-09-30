@@ -394,6 +394,24 @@ const flowSlice = createSlice({
       state.nodeRetries = {};
       state.isDebugModalOpen = false;
     },
+    // Before a partial run: only the nodes about to run lose their state; the rest keep the last run's results
+    clearNodeStates(state, action: PayloadAction<string[]>) {
+      const ids = new Set(action.payload);
+      const keep = (id: string) => !ids.has(id);
+      state.executingNodeIds = state.executingNodeIds.filter(keep);
+      state.completedNodeIds = state.completedNodeIds.filter(keep);
+      state.errorNodeIds = state.errorNodeIds.filter(keep);
+      state.pausedNodeIds = state.pausedNodeIds.filter(keep);
+      state.skippedNodeIds = state.skippedNodeIds.filter(keep);
+      for (const id of ids) {
+        delete state.nodeResults[id];
+        delete state.debugPreviewsByNode[id];
+        delete state.nodeProgress[id];
+        delete state.nodeTimers[id];
+        delete state.nodeRetries[id];
+      }
+      state.isDebugModalOpen = false;
+    },
     toggleCanvasExpanded(state) {
       state.canvasExpanded = !state.canvasExpanded;
     },
@@ -477,6 +495,7 @@ export const {
   setNodeTimer,
   setNodeRetry,
   resetNodeStates,
+  clearNodeStates,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,
   setDebugModalOpen,

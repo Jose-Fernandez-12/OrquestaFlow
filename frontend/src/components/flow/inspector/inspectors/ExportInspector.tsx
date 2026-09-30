@@ -136,7 +136,7 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
               <div className="space-y-2 pt-2 border-t border-border">
                 <label className="text-xs font-semibold text-fg">Configuración de Pestañas</label>
                 <p className="text-[10px] text-muted leading-tight">
-                  Asigna un nombre de pestaña para cada nodo conectado. Se exportarán todas sus columnas automáticamente.
+                  Cada nodo conectado se exporta en su propia pestaña con todas sus columnas. Por defecto la pestaña lleva el nombre del nodo; puedes cambiarlo aquí.
                 </p>
                 <div className="space-y-2">
                   {edges
