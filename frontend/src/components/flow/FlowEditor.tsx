@@ -89,6 +89,7 @@ import {
   setNodeTimer,
   setNodeRetry,
   resetNodeStates,
+  clearNodeStates,
   setNodePaused,
   setExecutionMode,
   resumeDebugNode,
@@ -284,6 +285,9 @@ function FlowCanvas() {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showVersionsModal, setShowVersionsModal] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  // Files already downloaded in the current run. A file arrives twice: when its export node finishes
+  // (socket) and again in the run's final response, which can come long after on slow flows.
+  // Cleared when a new run starts, since a rerun overwrites the same file name.
   const downloadedUrlsRef = useRef(new Set<string>());
 
   const autoDownloadFile = (downloadUrl: string, fileName: string) => {
@@ -291,9 +295,6 @@ function FlowCanvas() {
     if (downloadedUrlsRef.current.has(key)) return;
     downloadedUrlsRef.current.add(key);
     triggerBrowserDownload(downloadUrl, fileName);
-    setTimeout(() => {
-      downloadedUrlsRef.current.delete(key);
-    }, 15000);
   };
 
   // Sync flow from route parameter
@@ -869,43 +870,39 @@ function FlowCanvas() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isLocked, canvasHistory, copyNodes, pasteNodes, nodes, edges, dispatch]);
 
-  // ── Test a single node with the results of the last run ──
+  // ── Partial runs with the results of the last run ──
+  // "Probar nodo" runs one node, "Ejecutar desde aquí" a node and everything after it,
+  // "Ejecutar selección" the selected nodes. Inputs from nodes that do not run come from the last run
+  // (the results in the editor, completed on the server with its cache of the last run).
   const [testingNodeId, setTestingNodeId] = useState<string | null>(null);
+  const [partialRunIds, setPartialRunIds] = useState<string[] | null>(null);
+  const selectedNodeIds = useMemo(() => nodes.filter(n => n.selected && n.type !== 'note').map(n => n.id), [nodes]);
 
-  const handleTestNode = useCallback(async (nodeId: string) => {
-    if (!currentFlow || testingNodeId || isLiveExecuting) return;
-    const node = nodes.find(n => n.id === nodeId);
-    if (!node) return;
-    const label = String(node.data?.label || node.id);
+  const runPartial = useCallback(async (
+    nodeIds: string[],
+    opts: { mode?: 'normal' | 'debug'; title: string; showResultOf?: string }
+  ) => {
+    if (!currentFlow || testingNodeId || partialRunIds || isLiveExecuting) return;
+    const runIds = nodeIds.filter(id => nodes.some(n => n.id === id && n.type !== 'note'));
+    if (runIds.length === 0) return;
+    const mode = opts.mode || 'normal';
 
-    // Upstream results by id and by name, as the engine keeps them
+    // Upstream results by id and by name, as the engine keeps them. The loop variables of a debug pause
+    // ({{_item}} of the request that was paused) are left out: with them an HTTP node would send one request
     const context: Record<string, any> = { ...(intermediateContext || {}) };
+    for (const key of ['_item', 'item', '_index', '_total']) delete context[key];
     for (const [id, result] of Object.entries(nodeResults || {})) {
-      if (result === undefined || (result && typeof result === 'object' && (result as any).skipped)) continue;
+      if (runIds.includes(id) || result === undefined || (result && typeof result === 'object' && (result as any).skipped)) continue;
       context[id] = result;
       const n = nodes.find(x => x.id === id);
       if (n?.data?.label) context[String(n.data.label)] = result;
     }
 
-    // Nearest data sources (timers and branches pass data through)
-    const directSources = (id: string, seen = new Set<string>()): Node[] => {
-      if (seen.has(id)) return [];
-      seen.add(id);
-      return edges.filter(e => e.target === id).flatMap(e => {
-        const src = nodes.find(n => n.id === e.source);
-        if (!src || src.type === 'start') return [];
-        return ['timer', 'delay', 'conditionalBranch'].includes(src.type || '') ? directSources(src.id, seen) : [src];
-      });
-    };
-    const loop = findParentForEachNode(node, edges, nodes);
-    const missing = directSources(node.id).filter(s => context[s.id] === undefined && s.id !== loop?.id);
-    if (missing.length > 0) {
-      dispatch(showToast(`Para probar «${label}» primero ejecuta el flujo: faltan los resultados de ${missing.map(m => `«${m.data?.label || m.id}»`).join(', ')}.`));
-      return;
-    }
-
-    // Inside a loop the node sees the first element as {{_item}}
-    if (loop && context._item === undefined) {
+    // A loop body run without its loop sees the first element as {{_item}}
+    const loop = runIds
+      .map(id => findParentForEachNode(nodes.find(n => n.id === id)!, edges, nodes))
+      .find(l => l && !runIds.includes(l.id));
+    if (loop) {
       const items = getForEachItems(loop, nodes, edges, nodeResults, intermediateContext);
       if (items.length > 0) {
         Object.assign(context, { _item: items[0], item: items[0], _index: 0, _total: items.length, [loop.id]: items[0] });
@@ -914,34 +911,76 @@ function FlowCanvas() {
       }
     }
 
-    setTestingNodeId(nodeId);
+    if (opts.showResultOf) setTestingNodeId(opts.showResultOf);
+    setPartialRunIds(runIds);
+    dispatch(setExecutionMode(mode));
+    dispatch(clearNodeStates(runIds));
+    downloadedUrlsRef.current.clear();
+    setIsLiveExecuting(true);
+    isLiveExecutingRef.current = true;
     try {
       // The server runs the saved definition
       const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
       await dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
       setSavedSignature(canvasSignature(nodes, edges));
 
-      const res = await fetch(getApiUrl(`/flows/${currentFlow.id}/nodes/${nodeId}/execute`), {
+      const res = await fetch(getApiUrl(`/flows/${currentFlow.id}/execute-partial`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ context }),
+        body: JSON.stringify({ nodeIds: runIds, context, mode }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) {
-        dispatch(showToast(`La prueba de «${label}» falló: ${payload.error || res.statusText}`));
+        dispatch(showToast(`${opts.title} falló: ${payload.error || res.statusText}`));
+        if (payload.missingNodeIds?.[0]) focusNode(payload.missingNodeIds[0]);
         return;
       }
-      dispatch(showToast(`Prueba de «${label}» completada en ${payload.data?.duration ?? 0} ms`));
-      window.dispatchEvent(new CustomEvent('inspect-node-result', {
-        detail: { id: nodeId, result: payload.data?.output, hasError: false, label },
-      }));
+      if (payload.data?.status === 'cancelled') {
+        dispatch(showToast(`${opts.title}: ejecución detenida.`));
+        return;
+      }
+      dispatch(showToast(`${opts.title} completada en ${payload.data?.duration ?? 0} ms`));
+      if (opts.showResultOf) {
+        const node = nodes.find(n => n.id === opts.showResultOf);
+        window.dispatchEvent(new CustomEvent('inspect-node-result', {
+          detail: { id: opts.showResultOf, result: payload.data?.outputs?.[opts.showResultOf], hasError: false, label: String(node?.data?.label || opts.showResultOf) },
+        }));
+      }
     } catch (err: any) {
-      dispatch(showToast(`No se pudo probar el nodo: ${err.message}`));
+      dispatch(showToast(`${opts.title} falló: ${err.message}`));
     } finally {
       setTestingNodeId(null);
+      setPartialRunIds(null);
       setIsLiveExecuting(false);
+      isLiveExecutingRef.current = false;
     }
-  }, [currentFlow, testingNodeId, isLiveExecuting, nodes, edges, nodeResults, intermediateContext, dispatch, editingName]);
+  }, [currentFlow, testingNodeId, partialRunIds, isLiveExecuting, nodes, edges, nodeResults, intermediateContext, dispatch, editingName, focusNode]);
+
+  const nodeLabel = useCallback((id: string) => String(nodes.find(n => n.id === id)?.data?.label || id), [nodes]);
+
+  const handleTestNode = useCallback((nodeId: string) => {
+    runPartial([nodeId], { title: `La prueba de «${nodeLabel(nodeId)}»`, showResultOf: nodeId });
+  }, [runPartial, nodeLabel]);
+
+  // The node and everything reachable after it
+  const handleRunFromNode = useCallback((nodeId: string, mode: 'normal' | 'debug' = 'normal') => {
+    const ids = new Set([nodeId]);
+    const queue = [nodeId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const e of edges) {
+        if (e.source === current && !ids.has(e.target)) {
+          ids.add(e.target);
+          queue.push(e.target);
+        }
+      }
+    }
+    runPartial([...ids], { mode, title: `La ejecución desde «${nodeLabel(nodeId)}»` });
+  }, [edges, runPartial, nodeLabel]);
+
+  const handleRunSelection = useCallback((mode: 'normal' | 'debug' = 'normal') => {
+    runPartial(selectedNodeIds, { mode, title: `La ejecución de ${selectedNodeIds.length} nodos` });
+  }, [runPartial, selectedNodeIds]);
 
   const handleExecute = async (mode: 'normal' | 'debug' = 'normal', skipValidation = false) => {
     if (!currentFlow) return;
@@ -987,6 +1026,7 @@ function FlowCanvas() {
   };
 
   const performExecution = async (nodesToExecute: Node[], mode: 'normal' | 'debug' = 'normal') => {
+    downloadedUrlsRef.current.clear();
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
     const definition = JSON.stringify({ nodes: nodesToExecute, edges: pruneEdges(nodesToExecute, edges) });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
@@ -1177,7 +1217,7 @@ function FlowCanvas() {
           {isLiveExecuting && (
             <div className="flex items-center gap-1.5 px-2.5 py-1 bg-accent/15 border border-accent/30 rounded text-accent text-xs font-semibold animate-pulse">
               <Loader2 size={13} className="animate-spin" />
-              <span>Ejecución en vivo...</span>
+              <span>{partialRunIds && !testingNodeId ? `Ejecución parcial · ${partialRunIds.length} ${partialRunIds.length === 1 ? 'nodo' : 'nodos'}…` : 'Ejecución en vivo...'}</span>
             </div>
           )}
           {!isLocked && (
@@ -1481,6 +1521,29 @@ function FlowCanvas() {
                 </Button>
               </div>
             )}
+            {selectedNodeIds.length > 1 && !isLiveExecuting && !isLocked && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-1.5 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-border shadow-raised rounded-full pl-4 pr-1.5 py-1.5">
+                <span className="text-xs font-semibold text-fg mr-2">{selectedNodeIds.length} nodos seleccionados</span>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => handleRunSelection('normal')}
+                  className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                  title="Ejecuta solo los nodos seleccionados, en orden. Los demás aportan los resultados de la última ejecución"
+                >
+                  <Play size={12} /> Ejecutar selección
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleRunSelection('debug')}
+                  className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                  title="Igual que «Ejecutar selección», pausando en cada paso"
+                >
+                  <Bug size={12} /> Depurar selección
+                </Button>
+              </div>
+            )}
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -1522,8 +1585,9 @@ function FlowCanvas() {
               edges={edges}
               selectedNodeId={selectedNodeId}
               onTestNode={isLocked ? undefined : handleTestNode}
+              onRunFromNode={isLocked ? undefined : handleRunFromNode}
               testing={testingNodeId === selectedNodeId}
-              testDisabled={isLiveExecuting || testingNodeId !== null}
+              testDisabled={isLiveExecuting || testingNodeId !== null || partialRunIds !== null}
               layout={isLiveExecuting && executionMode === 'debug' ? 'debug' : 'edit'}
             />
           )}

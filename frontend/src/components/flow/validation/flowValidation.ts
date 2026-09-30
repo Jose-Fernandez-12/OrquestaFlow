@@ -151,8 +151,9 @@ export function validateFlow(nodes: Node[], edges: Edge[]): FlowIssue[] {
         if (!text(data.userPrompt)) add(node.id, 'error', 'El prompt del usuario está vacío.');
         break;
       case 'export':
-        if (data.exportMode === 'multi' && Object.keys(data.multiSheetConfig || {}).length === 0) {
-          add(node.id, 'warning', 'Modo multi-pestaña sin pestañas configuradas.');
+        // Each connected node becomes a tab, named after the node unless another name was typed
+        if (data.exportMode === 'multi' && incoming(node.id).length === 0 && Object.keys(data.multiSheetConfig || {}).length === 0) {
+          add(node.id, 'warning', 'Modo multi-pestaña sin nodos conectados: conecta un nodo por cada pestaña.');
         }
         break;
     }

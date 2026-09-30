@@ -10,6 +10,78 @@ import {
   isCancellationError,
   type ExecutionStatus,
 } from '../engine/executionLog.js';
+import { loadRunCache, saveRunCache, deleteRunCache, findMissingInputs, withoutIterationKeys } from '../engine/runCache.js';
+import { normalizeEdges, findForEachEndNode, getForEachSubgraphNodes } from '../engine/graph.js';
+
+type ProgressStatus = 'running' | 'completed' | 'error' | 'progress' | 'paused';
+
+// True when some of the nodes to run are inside a forEach that is not part of the run
+function runsLoopBodyAlone(ids: string[], nodes: any[], edges: any[]): boolean {
+  const adjList: Record<string, string[]> = {};
+  for (const e of edges) (adjList[e.source] ||= []).push(e.target);
+  return nodes.some(n => {
+    if (n.type !== 'forEach' || ids.includes(n.id)) return false;
+    const endId = findForEachEndNode(n.id, adjList, nodes);
+    return endId !== null && getForEachSubgraphNodes(n.id, endId, adjList, nodes).some(id => ids.includes(id));
+  });
+}
+
+// Outputs by node id and also by label, as the engine keeps them in its context
+function withLabels(outputs: Record<string, any>, flow: any): Record<string, any> {
+  const context = { ...outputs };
+  try {
+    for (const node of JSON.parse(flow.definition || '{}').nodes || []) {
+      if (outputs[node.id] !== undefined && typeof node.data?.label === 'string' && node.data.label) {
+        context[node.data.label] = outputs[node.id];
+      }
+    }
+  } catch {
+    // invalid definition: ids only
+  }
+  return context;
+}
+
+// Relays engine progress to the editor and announces exported files as soon as each one is ready
+function createProgressEmitter(io: any, flowId: string) {
+  const exportedFiles: any[] = [];
+  const skippedNodeIds: string[] = [];
+  // Outputs of the nodes that finished, kept so a failed run still leaves its results for a partial rerun
+  const outputs: Record<string, any> = {};
+  const emit = (nodeId: string, status: ProgressStatus, result?: any) => {
+    io.emit('flow-progress', {
+      flowId,
+      nodeId,
+      status,
+      result,
+      current: result?.current,
+      total: result?.total,
+      remainingSeconds: result?.remainingSeconds,
+      totalSeconds: result?.totalSeconds,
+      context: result?.context
+    });
+
+    if (status === 'completed' && result?.skipped) skippedNodeIds.push(nodeId);
+    else if (status === 'completed' && result !== undefined) outputs[nodeId] = result;
+
+    // Emit export ready immediately when an export node finishes, so files download without waiting for other branches
+    if (status === 'completed' && result?.filePath && result?.success) {
+      const fileName = result.filePath.split(/[/\\]/).pop();
+      const info = {
+        nodeId,
+        fileName,
+        downloadUrl: `/api/files/${fileName}`,
+        records: result.records,
+        format: result.format,
+        filePath: result.filePath,
+        previewRows: result.previewRows,
+        headers: result.headers
+      };
+      exportedFiles.push(info);
+      io.emit('flow-export-ready', { flowId, ...info });
+    }
+  };
+  return { emit, exportedFiles, skippedNodeIds, outputs };
+}
 
 export async function flowRoutes(app: FastifyInstance): Promise<void> {
   // List all flows
@@ -401,6 +473,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     db.prepare('DELETE FROM flow_versions WHERE flow_id = ?').run(request.params.id);
     // Delete flow
     db.prepare('DELETE FROM flows WHERE id = ?').run(request.params.id);
+    deleteRunCache(request.params.id);
 
     return { data: { deleted: true } };
   });
@@ -502,46 +575,17 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
     const { getIo } = await import('../engine/socket.js');
     const io = getIo();
+    const progress = createProgressEmitter(io, flowId);
 
     try {
-      // Track exported files emitted in real-time so we also include them in the final DB log
-      const realtimeExportedFiles: any[] = [];
 
       // Execute the DAG with real-time socket callbacks
-      const context = await executeFlowEngine(flowId, (nodeId, status, result) => {
-        io.emit('flow-progress', {
-          flowId,
-          nodeId,
-          status,
-          result,
-          current: result?.current,
-          total: result?.total,
-          remainingSeconds: result?.remainingSeconds,
-          totalSeconds: result?.totalSeconds,
-          context: result?.context
-        });
-
-        // Emit export ready immediately when an export node finishes, so files download without waiting for other branches
-        if (status === 'completed' && result?.filePath && result?.success) {
-          const fileName = result.filePath.split(/[/\\]/).pop();
-          const info = {
-            nodeId,
-            fileName,
-            downloadUrl: `/api/files/${fileName}`,
-            records: result.records,
-            format: result.format,
-            filePath: result.filePath,
-            previewRows: result.previewRows,
-            headers: result.headers
-          };
-          realtimeExportedFiles.push(info);
-          io.emit('flow-export-ready', { flowId, ...info });
-        }
-      }, { mode, tracer });
+      const context = await executeFlowEngine(flowId, progress.emit, { mode, tracer });
+      saveRunCache(flowId, context, progress.skippedNodeIds, { merge: false });
       const duration = Date.now() - startTime;
 
       const summary = summarizeContext(context);
-      const exportedFiles = realtimeExportedFiles.length > 0 ? realtimeExportedFiles : summary.exportedFiles;
+      const exportedFiles = progress.exportedFiles.length > 0 ? progress.exportedFiles : summary.exportedFiles;
       const { recordCount } = summary;
       const trace = tracer.toJSON('completed');
       const warnings = trace.filter(t => t.status === 'continued').length;
@@ -581,6 +625,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       const errorMessage = isCancelled ? 'Ejecución detenida por el usuario' : err.message;
 
       finishExecutionLog(logId, { status, durationMs: duration, errorMessage, trace: tracer.toJSON(status) });
+      saveRunCache(flowId, withLabels(progress.outputs, flow), progress.skippedNodeIds, { merge: true });
       db.prepare("UPDATE flows SET status = 'saved' WHERE id = ?").run(flowId);
 
       if (isCancelled) {
@@ -593,42 +638,84 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // Test a single node: runs only that node, reading the upstream results sent by the editor
-  // (the last run's results). The saved definition is used, so the editor saves before calling.
-  app.post<{ Params: { id: string; nodeId: string }; Body: { context?: Record<string, any> } }>(
-    '/:id/nodes/:nodeId/execute',
+  // Partial run: only the given nodes run, in dependency order among themselves. Inputs from nodes
+  // outside the set come from the last run: the results the editor sends, completed with the ones cached
+  // on the server. The saved definition is used, so the editor saves before calling.
+  const runPartial = async (
+    flowId: string,
+    nodeIds: string[],
+    body: { context?: Record<string, any>; mode?: 'normal' | 'debug' } | undefined,
+    reply: any
+  ) => {
+    const db = getDb();
+    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
+    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+
+    const definition = JSON.parse(flow.definition || '{"nodes":[],"edges":[]}');
+    const nodes: any[] = (definition.nodes || []).filter((n: any) => n.type !== 'note');
+    const ids = [...new Set(nodeIds)];
+    const unknown = ids.filter(id => !nodes.some(n => n.id === id));
+    if (ids.length === 0) return reply.status(400).send({ error: 'No hay nodos para ejecutar' });
+    if (unknown.length > 0) return reply.status(404).send({ error: 'Algunos nodos no existen en la versión guardada del flujo' });
+
+    const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
+    if (activeFlowExecutions.get(flowId)?.status === 'running') {
+      return reply.status(409).send({ error: 'El flujo se está ejecutando; espera a que termine' });
+    }
+
+    const cache = loadRunCache(flowId);
+    const edges = normalizeEdges(nodes, definition.edges || []);
+    // {{_item}} is only valid when a loop body runs without its loop; anywhere else it would make
+    // HTTP nodes believe they run inside a loop and send a single request instead of iterating
+    const bodyContext = runsLoopBodyAlone(ids, nodes, edges) ? (body?.context || {}) : withoutIterationKeys(body?.context || {});
+    const initialContext = { ...(cache?.context || {}), ...bodyContext };
+    const missing = findMissingInputs(ids, nodes, edges, initialContext, cache?.skipped);
+    if (missing.length > 0) {
+      const names = missing.map(n => `«${n.data?.label || n.id}»`).join(', ');
+      return reply.status(422).send({
+        error: `Faltan los resultados de ${names}. Ejecuta el flujo completo (o esos nodos) primero.`,
+        missingNodeIds: missing.map(n => n.id)
+      });
+    }
+
+    const { getIo } = await import('../engine/socket.js');
+    const progress = createProgressEmitter(getIo(), flowId);
+    const startTime = Date.now();
+    try {
+      const context = await executeFlowEngine(flowId, progress.emit, {
+        mode: body?.mode === 'debug' ? 'debug' : 'normal',
+        initialContext,
+        onlyNodeIds: ids
+      });
+      saveRunCache(flowId, context, progress.skippedNodeIds, { merge: true, ranNodeIds: ids });
+      const outputs = Object.fromEntries(ids.filter(id => context[id] !== undefined).map(id => [id, context[id]]));
+      return {
+        data: { nodeIds: ids, status: 'completed', duration: Date.now() - startTime, outputs, exportedFiles: progress.exportedFiles }
+      };
+    } catch (err: any) {
+      const duration = Date.now() - startTime;
+      if (isCancellationError(err, activeFlowExecutions.get(flowId)?.status)) {
+        return { data: { nodeIds: ids, status: 'cancelled', duration } };
+      }
+      return reply.status(422).send({ error: err.message, duration });
+    }
+  };
+
+  app.post<{ Params: { id: string }; Body: { nodeIds?: string[]; context?: Record<string, any>; mode?: 'normal' | 'debug' } }>(
+    '/:id/execute-partial',
     // The upstream results travel in the body and can be large
     { bodyLimit: 50 * 1024 * 1024 },
+    async (request, reply) => runPartial(request.params.id, request.body?.nodeIds || [], request.body, reply)
+  );
+
+  // Test a single node with the results of the last run
+  app.post<{ Params: { id: string; nodeId: string }; Body: { context?: Record<string, any> } }>(
+    '/:id/nodes/:nodeId/execute',
+    { bodyLimit: 50 * 1024 * 1024 },
     async (request, reply) => {
-      const db = getDb();
-      const flowId = request.params.id;
-      const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
-      if (!flow) return reply.status(404).send({ error: 'Flow not found' });
-
-      const definition = JSON.parse(flow.definition || '{"nodes":[]}');
-      const node = (definition.nodes || []).find((n: any) => n.id === request.params.nodeId);
-      if (!node) return reply.status(404).send({ error: 'El nodo no existe en la versión guardada del flujo' });
-
-      const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
-      if (activeFlowExecutions.get(flowId)?.status === 'running') {
-        return reply.status(409).send({ error: 'El flujo se está ejecutando; espera a que termine para probar un nodo' });
-      }
-
-      const { getIo } = await import('../engine/socket.js');
-      const io = getIo();
-      const startTime = Date.now();
-      try {
-        const context = await executeFlowEngine(
-          flowId,
-          (nodeId, status, result) => {
-            io.emit('flow-progress', { flowId, nodeId, status, result, current: result?.current, total: result?.total });
-          },
-          { mode: 'normal', initialContext: request.body?.context || {}, onlyNodeIds: [node.id] }
-        );
-        return { data: { nodeId: node.id, status: 'completed', duration: Date.now() - startTime, output: context[node.id] } };
-      } catch (err: any) {
-        return reply.status(422).send({ error: err.message, nodeId: node.id, duration: Date.now() - startTime });
-      }
+      const res = await runPartial(request.params.id, [request.params.nodeId], request.body, reply);
+      if (res?.data?.outputs) return { data: { ...res.data, nodeId: request.params.nodeId, output: res.data.outputs[request.params.nodeId] } };
+      return res;
     }
   );
 
