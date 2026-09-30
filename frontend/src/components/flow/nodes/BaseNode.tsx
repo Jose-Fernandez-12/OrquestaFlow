@@ -22,11 +22,25 @@ import {
   KeyRound,
   Bot,
   SkipForward,
-  SlidersHorizontal
+  SlidersHorizontal,
+  RotateCw,
+  AlertTriangle,
+  ShieldCheck
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
-import { describeRule, getBranchOutputs, getConditionRules, isExperimentalNode, shortExpression } from '../nodeDefinitions';
+import {
+  describeRule,
+  getBranchOutputs,
+  getConditionRules,
+  getNodeRetryConfig,
+  isExperimentalNode,
+  shortExpression,
+  supportsContinueOnError,
+  supportsRetries,
+} from '../nodeDefinitions';
+import { NodeIssueBadge } from '../validation/FlowIssues';
+import { useNodeIssues } from '../validation/FlowIssuesContext';
 
 interface BaseNodeProps {
   id: string;
@@ -77,6 +91,14 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
   const nodeResult = useAppSelector(state => state.flows.nodeResults[id]);
   const progress = useAppSelector(state => state.flows.nodeProgress[id]);
   const timerState = useAppSelector(state => state.flows.nodeTimers[id]);
+  const retryState = useAppSelector(state => state.flows.nodeRetries?.[id]);
+  const issues = useNodeIssues(id);
+
+  // A failure tolerated by "continue on error": the node is marked but the flow went on
+  const continuedAfterError = hasError && Boolean(nodeResult?.continued);
+  const retryConfig = getNodeRetryConfig(data);
+  const configuredRetries = supportsRetries(type) ? retryConfig.retryCount ?? 0 : 0;
+  const continuesOnError = supportsContinueOnError(type) && retryConfig.onError === 'continue';
 
   const Icon = data?.icon || typeIcons[type] || FileSpreadsheet;
 
@@ -208,9 +230,11 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
             : executing && !paused && 'border-blue-500 ring-2 ring-blue-500/30 bg-blue-50/10',
         completed && !hasError && !skipped && 'border-success',
         skipped && !executing && 'border-dashed opacity-55',
-        hasError && !executing && 'border-red-500 ring-2 ring-red-500/30 bg-red-50'
+        hasError && !executing && !continuedAfterError && 'border-red-500 ring-2 ring-red-500/30 bg-red-50',
+        continuedAfterError && !executing && 'border-amber-500 ring-2 ring-amber-500/25'
       )}
     >
+      {!executing && !paused && !completed && !hasError && <NodeIssueBadge issues={issues} />}
       {skipped && !executing && !paused && (
         <div
           className="absolute -top-3 -right-3 w-6 h-6 bg-surface border border-border text-muted rounded-full flex items-center justify-center shadow-sm z-20"
@@ -238,9 +262,17 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           <Check size={12} strokeWidth={3} />
         </div>
       )}
-      {hasError && !executing && (
+      {hasError && !executing && !continuedAfterError && (
         <div className="absolute -top-3 -right-3 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center shadow-sm z-20">
           <X size={12} strokeWidth={3} />
+        </div>
+      )}
+      {continuedAfterError && !executing && (
+        <div
+          className="absolute -top-3 -right-3 w-6 h-6 bg-amber-500 text-white rounded-full flex items-center justify-center shadow-sm z-20"
+          title={`Falló, pero el flujo continuó: ${String(nodeResult?.error || '')}`}
+        >
+          <AlertTriangle size={12} strokeWidth={2.5} />
         </div>
       )}
 
@@ -332,12 +364,44 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
             )
           ) : (
             <div className="text-xs text-muted truncate flex items-center gap-1.5">
-              <span className="truncate">{skipped ? 'Omitido · rama no tomada' : typeLabels[type] || type}</span>
+              <span className="truncate">
+                {skipped ? 'Omitido · rama no tomada' : continuedAfterError ? 'Falló · el flujo continuó' : typeLabels[type] || type}
+              </span>
+              {configuredRetries > 0 && (
+                <span
+                  className="shrink-0 inline-flex items-center gap-0.5 text-[9px] font-semibold text-muted"
+                  title={`Reintenta hasta ${configuredRetries} ${configuredRetries === 1 ? 'vez' : 'veces'} si falla`}
+                >
+                  <RotateCw size={9} strokeWidth={2.5} />
+                  {configuredRetries}
+                </span>
+              )}
+              {continuesOnError && (
+                <span className="shrink-0 text-muted" title="Si falla, el flujo continúa">
+                  <ShieldCheck size={10} strokeWidth={2.5} />
+                </span>
+              )}
               {isExperimentalNode(type) && (
                 <span className="shrink-0 text-[8px] font-bold tracking-wide px-1 py-px rounded bg-fuchsia-500/10 text-fuchsia-600 border border-fuchsia-500/25">
                   BETA
                 </span>
               )}
+            </div>
+          )}
+
+          {/* Live retry indicator */}
+          {executing && !paused && retryState?.active && (
+            <div
+              className="mt-1 flex items-center gap-1 text-[10px] font-medium text-amber-600 truncate"
+              title={retryState.error}
+            >
+              <RotateCw size={10} className="animate-spin shrink-0" style={{ animationDuration: '2s' }} />
+              <span className="truncate">Reintento {retryState.attempt}/{retryState.maxRetries} · {retryState.error}</span>
+            </div>
+          )}
+          {!executing && completed && !hasError && !skipped && retryState && (
+            <div className="mt-1 text-[10px] text-amber-600 font-medium" title={`Último error: ${retryState.error}`}>
+              Completado tras {retryState.total} {retryState.total === 1 ? 'reintento' : 'reintentos'}
             </div>
           )}
 

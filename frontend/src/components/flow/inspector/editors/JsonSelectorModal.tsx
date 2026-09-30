@@ -8,6 +8,7 @@ import { truncateArrays, extractExportableSample } from '../utils';
 import { getApiUrl } from '../../../../lib/api';
 import { cn } from '../../../../lib/utils';
 import type { Node } from '@xyflow/react';
+import { toIterationPath } from './iterationPath';
 
 interface JsonSelectorModalProps {
   node: Node;
@@ -228,17 +229,10 @@ export function JsonSelectorModal({
     }
   };
 
-  const handleSelectKey = (path: string) => {
+  const handleSelectKey = (path: string, isArray = false) => {
     let formattedPath = path;
     if (extractIterate || node.type === 'forEach') {
-      const lastBracket = path.lastIndexOf('].');
-      if (lastBracket !== -1) {
-        formattedPath = '_item.' + path.substring(lastBracket + 2);
-      } else {
-        const lastDot = path.lastIndexOf('.');
-        if (lastDot !== -1) formattedPath = '_item.' + path.substring(lastDot + 1);
-        else formattedPath = '_item';
-      }
+      formattedPath = toIterationPath(path, isArray);
     } else if (extractArray) {
       const lastBracket = path.lastIndexOf('[');
       if (lastBracket !== -1) {
@@ -349,7 +343,7 @@ export function JsonSelectorModal({
                           if (e.target.checked) setExtractIterate(false);
                         }}
                       />
-                      <label htmlFor="extractArray" className="text-xs font-medium text-muted-foreground select-none cursor-pointer">
+                      <label htmlFor="extractArray" className="text-xs font-medium text-muted select-none cursor-pointer">
                         Extraer como lista completa (Array map [*])
                       </label>
                     </div>
@@ -364,7 +358,7 @@ export function JsonSelectorModal({
                           if (e.target.checked) setExtractArray(false);
                         }}
                       />
-                      <label htmlFor="extractIterate" className="text-xs font-medium text-muted-foreground select-none cursor-pointer">
+                      <label htmlFor="extractIterate" className="text-xs font-medium text-muted select-none cursor-pointer">
                         Extraer para Modo Iteracion (usa _item)
                       </label>
                     </div>

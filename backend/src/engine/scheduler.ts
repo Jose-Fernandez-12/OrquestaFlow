@@ -1,7 +1,8 @@
 import cron from 'node-cron';
 import cronParser from 'cron-parser';
 import { getDb } from '../db/database.js';
-import { executeFlowEngine } from './executor.js';
+import { executeFlowEngine, activeFlowExecutions } from './executor.js';
+import { ExecutionTracer, startExecutionLog, finishExecutionLog, isCancellationError } from './executionLog.js';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -67,13 +68,18 @@ function startCronJob(schedule: any) {
     runningJobIds.add(schedule.id);
     console.log(`[Scheduler] Triggered job: ${schedule.name} (${schedule.target_type})`);
     const { v4: uuid } = require('uuid');
-    const logId = uuid();
     const db = getDb();
-    
-    db.prepare(`
-      INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status)
-      VALUES (?, ?, ?, ?, 'running')
-    `).run(logId, schedule.target_type, schedule.target_id, schedule.id);
+    const tracer = new ExecutionTracer();
+    let logId: string;
+    if (schedule.target_type === 'flow') {
+      logId = startExecutionLog(schedule.target_id, 'schedule', schedule.id);
+    } else {
+      logId = uuid();
+      db.prepare(`
+        INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type)
+        VALUES (?, ?, ?, ?, 'running', 'schedule')
+      `).run(logId, schedule.target_type, schedule.target_id, schedule.id);
+    }
 
     const startTime = Date.now();
     try {
@@ -81,7 +87,7 @@ function startCronJob(schedule: any) {
       let exportedFiles: string[] = [];
 
       if (schedule.target_type === 'flow') {
-        const context = await executeFlowEngine(schedule.target_id);
+        const context = await executeFlowEngine(schedule.target_id, undefined, { tracer });
         
         const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
         exportResults.forEach((exportResult: any) => {
@@ -110,11 +116,13 @@ function startCronJob(schedule: any) {
       const duration = Date.now() - startTime;
       const resultJson = exportedFiles.length > 0 ? JSON.stringify({ exportedFiles }) : null;
 
-      db.prepare(`
-        UPDATE execution_logs
-        SET status = 'completed', duration_ms = ?, record_count = ?, result = ?, completed_at = datetime('now')
-        WHERE id = ?
-      `).run(duration, recordCount, resultJson, logId);
+      finishExecutionLog(logId, {
+        status: 'completed',
+        durationMs: duration,
+        recordCount,
+        result: resultJson ? JSON.parse(resultJson) : null,
+        trace: schedule.target_type === 'flow' ? tracer.toJSON('completed') : undefined
+      });
       
       // Update database status for the next run
       const nextNextRun = getNextRunAt(schedule.cron_expression);
@@ -124,11 +132,13 @@ function startCronJob(schedule: any) {
     } catch (err: any) {
       console.error(`[Scheduler] Error running job ${schedule.id}:`, err.message);
       const duration = Date.now() - startTime;
-      db.prepare(`
-        UPDATE execution_logs
-        SET status = 'error', error_message = ?, duration_ms = ?, completed_at = datetime('now')
-        WHERE id = ?
-      `).run(err.message, duration, logId);
+      const status = schedule.target_type === 'flow' && isCancellationError(err, activeFlowExecutions.get(schedule.target_id)?.status) ? 'cancelled' : 'error';
+      finishExecutionLog(logId, {
+        status,
+        durationMs: duration,
+        errorMessage: err.message,
+        trace: schedule.target_type === 'flow' ? tracer.toJSON(status) : undefined
+      });
     } finally {
       runningJobIds.delete(schedule.id);
     }

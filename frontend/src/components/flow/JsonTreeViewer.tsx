@@ -4,7 +4,7 @@ import { cn } from '../../lib/utils';
 
 interface JsonTreeViewerProps {
   data: any;
-  onSelectKey?: (path: string) => void;
+  onSelectKey?: (path: string, isArray?: boolean) => void;
   currentPath?: string;
   mode?: 'copy' | 'select';
   selectedPaths?: string[];
@@ -44,7 +44,7 @@ export function JsonTreeViewer({
             {mode === 'copy' && onSelectKey && (
               <button
                 type="button"
-                onClick={() => onSelectKey(path)}
+                onClick={() => onSelectKey(path, isArray)}
                 title={`Seleccionar ${path}`}
                 className="opacity-0 group-hover:opacity-100 p-0.5 text-muted hover:text-accent transition-opacity shrink-0"
               >

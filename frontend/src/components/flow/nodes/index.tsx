@@ -1,5 +1,6 @@
 import React from 'react';
 import { BaseNode } from './BaseNode';
+import { NoteNode } from './NoteNode';
 
 export const StartNode = React.memo((props: any) => <BaseNode {...props} type="start" />);
 export const HttpNode = React.memo((props: any) => <BaseNode {...props} type="httpRequest" />);
@@ -39,4 +40,5 @@ export const nodeTypes = {
   webhookTrigger: WebhookTriggerNode,
   oauth2Connector: OAuth2ConnectorNode,
   aiChatCompletion: AiChatCompletionNode,
+  note: NoteNode,
 };

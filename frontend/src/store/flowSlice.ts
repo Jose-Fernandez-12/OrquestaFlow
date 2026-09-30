@@ -34,6 +34,17 @@ export interface IterationDebugRecord {
   responsePreview?: any | null;
 }
 
+export interface NodeRetryState {
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+  error: string;
+  /** Retries performed in this run (grows across loop iterations) */
+  total: number;
+  /** True while the node is waiting for / running a retry; cleared when the next attempt starts over */
+  active: boolean;
+}
+
 export interface NodeDebugPreview {
   requestPreview?: any | null;
   responsePreview?: any | null;
@@ -58,6 +69,7 @@ interface FlowState {
   nodeResults: Record<string, any>;
   nodeProgress: Record<string, { current: number; total: number }>;
   nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
+  nodeRetries: Record<string, NodeRetryState>;
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
   isDebugModalOpen: boolean;
@@ -83,6 +95,7 @@ const initialState: FlowState = {
   nodeResults: {},
   nodeProgress: {},
   nodeTimers: {},
+  nodeRetries: {},
   canvasExpanded: false,
   nodeLibraryExpanded: true,
   isDebugModalOpen: false,
@@ -239,6 +252,7 @@ const flowSlice = createSlice({
       }
       state.pausedNodeIds = state.pausedNodeIds.filter(id => id !== action.payload);
       state.skippedNodeIds = state.skippedNodeIds.filter(id => id !== action.payload);
+      if (state.nodeRetries[action.payload]) state.nodeRetries[action.payload].active = false;
       if (state.debugPreviewsByNode?.[action.payload]) {
         state.debugRequestPreview = state.debugPreviewsByNode[action.payload].requestPreview || null;
         state.debugResponsePreview = state.debugPreviewsByNode[action.payload].responsePreview || null;
@@ -353,6 +367,12 @@ const flowSlice = createSlice({
     setNodeProgress(state, action: PayloadAction<{ nodeId: string; current: number; total: number }>) {
       const { nodeId, current, total } = action.payload;
       state.nodeProgress[nodeId] = { current, total };
+      if (state.nodeRetries[nodeId]) state.nodeRetries[nodeId].active = false;
+    },
+    setNodeRetry(state, action: PayloadAction<{ nodeId: string; attempt: number; maxRetries: number; delayMs: number; error: string }>) {
+      const { nodeId, ...info } = action.payload;
+      const prev = state.nodeRetries[nodeId];
+      state.nodeRetries[nodeId] = { ...info, total: (prev?.total || 0) + 1, active: true };
     },
     setNodeTimer(state, action: PayloadAction<{ nodeId: string; remainingSeconds: number; totalSeconds: number }>) {
       const { nodeId, remainingSeconds, totalSeconds } = action.payload;
@@ -371,6 +391,25 @@ const flowSlice = createSlice({
       state.nodeResults = {};
       state.nodeProgress = {};
       state.nodeTimers = {};
+      state.nodeRetries = {};
+      state.isDebugModalOpen = false;
+    },
+    // Before a partial run: only the nodes about to run lose their state; the rest keep the last run's results
+    clearNodeStates(state, action: PayloadAction<string[]>) {
+      const ids = new Set(action.payload);
+      const keep = (id: string) => !ids.has(id);
+      state.executingNodeIds = state.executingNodeIds.filter(keep);
+      state.completedNodeIds = state.completedNodeIds.filter(keep);
+      state.errorNodeIds = state.errorNodeIds.filter(keep);
+      state.pausedNodeIds = state.pausedNodeIds.filter(keep);
+      state.skippedNodeIds = state.skippedNodeIds.filter(keep);
+      for (const id of ids) {
+        delete state.nodeResults[id];
+        delete state.debugPreviewsByNode[id];
+        delete state.nodeProgress[id];
+        delete state.nodeTimers[id];
+        delete state.nodeRetries[id];
+      }
       state.isDebugModalOpen = false;
     },
     toggleCanvasExpanded(state) {
@@ -454,7 +493,9 @@ export const {
   setNodeError,
   setNodeProgress,
   setNodeTimer,
+  setNodeRetry,
   resetNodeStates,
+  clearNodeStates,
   toggleCanvasExpanded,
   toggleNodeLibraryExpanded,
   setDebugModalOpen,

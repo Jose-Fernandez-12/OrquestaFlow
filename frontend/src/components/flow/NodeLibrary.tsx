@@ -16,7 +16,8 @@ import {
   KeyRound,
   Bot,
   FlaskConical,
-  SlidersHorizontal
+  SlidersHorizontal,
+  StickyNote
 } from 'lucide-react';
 import { useAppSelector } from '../../store/hooks';
 
@@ -57,6 +58,13 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
     title: 'Salida',
     nodes: [
       { type: 'export', label: 'Exportar CSV/Excel', icon: FileOutput, desc: 'Generar archivo' },
+    ],
+  },
+  {
+    id: 'docs',
+    title: 'Documentación',
+    nodes: [
+      { type: 'note', label: 'Nota', icon: StickyNote, desc: 'Texto para explicar el flujo' },
     ],
   },
   {

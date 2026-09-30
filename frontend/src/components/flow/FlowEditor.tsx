@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   ReactFlow,
   MiniMap,
@@ -48,7 +48,11 @@ import {
   FileCode2,
   GitCommitVertical,
   Check,
-  Terminal
+  Terminal,
+  Undo2,
+  Redo2,
+  AlertCircle,
+  Search
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -58,6 +62,13 @@ import { FlowVersionsModal } from './FlowVersionsModal';
 import { ImportFlowModal } from './ImportFlowModal';
 import { NodeResultModal } from './NodeResultModal';
 import { getBranchOutputs, isBranchHandle } from './nodeDefinitions';
+import { useCanvasHistory } from './canvas/useCanvasHistory';
+import { CanvasSearch } from './canvas/CanvasSearch';
+import { findParentForEachNode, getForEachItems } from './inspector/utils';
+import { validateFlow, groupIssues, type FlowIssue } from './validation/flowValidation';
+import { FlowIssuesList, PreRunIssuesDialog } from './validation/FlowIssues';
+import { FlowIssuesContext } from './validation/FlowIssuesContext';
+import { canvasSignature, copySelection, isClipboardPayload, pasteClipboard, type ClipboardPayload } from './canvas/canvasState';
 import { 
   fetchFlows, 
   fetchFlow,
@@ -76,7 +87,9 @@ import {
   setNodeError,
   setNodeProgress,
   setNodeTimer,
+  setNodeRetry,
   resetNodeStates,
+  clearNodeStates,
   setNodePaused,
   setExecutionMode,
   resumeDebugNode,
@@ -109,6 +122,8 @@ function pruneEdges(nodes: Node[], edges: Edge[]): Edge[] {
   });
 }
 
+const CLIPBOARD_KEY = 'orquesta-clipboard';
+
 function FlowCanvas() {
   const dispatch = useAppDispatch();
   const flows = useAppSelector(state => state.flows.flows);
@@ -124,7 +139,7 @@ function FlowCanvas() {
   const executionMode = useAppSelector(state => state.flows.executionMode);
   const nodeResults = useAppSelector(state => state.flows.nodeResults);
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
-  const queries = useAppSelector(state => (state as any).queries.queries || []);
+  const queries = useAppSelector(state => state.queries.queries);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   
   const { id: routeFlowId } = useParams<{ id: string }>();
@@ -133,9 +148,17 @@ function FlowCanvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+  const [savedSignature, setSavedSignature] = useState<string | null>(null);
+  const lastPointer = useRef<{ x: number; y: number } | null>(null);
+
+  const selectedNodeIdRef = useRef(selectedNodeId);
+  useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+  const isInternalSelectionChangeRef = useRef(false);
 
   const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
-  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode || {});
+  const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode);
   const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
   const globalResponsePreview = useAppSelector(state => state.flows.debugResponsePreview);
 
@@ -156,7 +179,7 @@ function FlowCanvas() {
   const debugResponsePreview = nodeDebugPreview !== undefined ? nodeDebugPreview.responsePreview : globalResponsePreview;
   const iterationHistory = nodeDebugPreview?.history || [];
 
-  // Keep React Flow nodes.selected in sync with Redux selectedNodeId
+  // Keep React Flow nodes.selected in sync with Redux selectedNodeId without circular triggers
   useEffect(() => {
     setNodes(nds => {
       let hasChanges = false;
@@ -168,7 +191,11 @@ function FlowCanvas() {
         }
         return n;
       });
-      return hasChanges ? updated : nds;
+      if (hasChanges) {
+        isInternalSelectionChangeRef.current = true;
+        return updated;
+      }
+      return nds;
     });
   }, [selectedNodeId, setNodes]);
   const [editingName, setEditingName] = useState(currentFlow?.name || '');
@@ -234,6 +261,21 @@ function FlowCanvas() {
     }
   }, [pausedNodeIds.length, isLiveExecuting]);
 
+  // While a run is live the canvas takes the space: the node library always hides, and the
+  // inspector only stays in debug mode, where it shows what is paused. Both come back at the end.
+  // Runs shorter than the delay leave the layout alone instead of flickering.
+  const [runFocus, setRunFocus] = useState(false);
+  useEffect(() => {
+    if (!isLiveExecuting) {
+      const reset = setTimeout(() => setRunFocus(false), 0);
+      return () => clearTimeout(reset);
+    }
+    const timer = setTimeout(() => setRunFocus(true), 300);
+    return () => clearTimeout(timer);
+  }, [isLiveExecuting]);
+  const showNodeLibrary = !canvasExpanded && nodeLibraryExpanded && !runFocus;
+  const showInspector = !canvasExpanded && (!runFocus || executionMode === 'debug');
+
   const debugSessionLostAt = useAppSelector(state => state.flows.debugSessionLostAt);
   useEffect(() => {
     if (!debugSessionLostAt) return;
@@ -243,6 +285,9 @@ function FlowCanvas() {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showVersionsModal, setShowVersionsModal] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  // Files already downloaded in the current run. A file arrives twice: when its export node finishes
+  // (socket) and again in the run's final response, which can come long after on slow flows.
+  // Cleared when a new run starts, since a rerun overwrites the same file name.
   const downloadedUrlsRef = useRef(new Set<string>());
 
   const autoDownloadFile = (downloadUrl: string, fileName: string) => {
@@ -250,9 +295,6 @@ function FlowCanvas() {
     if (downloadedUrlsRef.current.has(key)) return;
     downloadedUrlsRef.current.add(key);
     triggerBrowserDownload(downloadUrl, fileName);
-    setTimeout(() => {
-      downloadedUrlsRef.current.delete(key);
-    }, 15000);
   };
 
   // Sync flow from route parameter
@@ -323,6 +365,7 @@ function FlowCanvas() {
         if (data?.data) {
           const state = data.data;
           const isRunning = state.isRunning || state.status === 'running';
+          if (isRunning && (state.mode === 'debug' || state.mode === 'normal')) dispatch(setExecutionMode(state.mode));
           setIsLiveExecuting(isRunning);
 
           if (state.nodes) {
@@ -377,7 +420,9 @@ function FlowCanvas() {
         } else if (data.status === 'error') {
           dispatch(setNodeError({ nodeId: data.nodeId, error: data.result }));
         } else if (data.status === 'progress') {
-          if (data.current !== undefined && data.total !== undefined) {
+          if (data.result?.retry) {
+            dispatch(setNodeRetry({ nodeId: data.nodeId, ...data.result.retry }));
+          } else if (data.current !== undefined && data.total !== undefined) {
             dispatch(setNodeProgress({ nodeId: data.nodeId, current: data.current, total: data.total }));
           }
           if (data.remainingSeconds !== undefined && data.totalSeconds !== undefined) {
@@ -447,7 +492,8 @@ function FlowCanvas() {
         if (isSkipped) {
           expectedStroke = '#94a3b8'; // slate: branch not taken
         } else if (errorNodeIds.includes(edge.source)) {
-          expectedStroke = '#ef4444'; // red
+          // amber when the node failed but its error policy let the flow continue
+          expectedStroke = nodeResults[edge.source]?.continued ? '#f59e0b' : '#ef4444';
         } else if (completedNodeIds.includes(edge.source)) {
           expectedStroke = '#22c55e'; // green
         }
@@ -466,7 +512,7 @@ function FlowCanvas() {
       });
       return changed ? newEds : eds;
     });
-  }, [completedNodeIds, errorNodeIds, skippedNodeIds, setEdges]);
+  }, [completedNodeIds, errorNodeIds, skippedNodeIds, nodeResults, setEdges]);
 
 
 
@@ -499,14 +545,43 @@ function FlowCanvas() {
           markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
         }));
         setEdges(loadedEdges);
+        setSavedSignature(canvasSignature(def.nodes || [], loadedEdges));
       } catch (e) {
         console.error("Failed to parse flow definition", e);
       }
     } else {
       setNodes([]);
       setEdges([]);
+      setSavedSignature(canvasSignature([], []));
     }
   }, [currentFlow, setNodes, setEdges]);
+
+  const canvasHistory = useCanvasHistory({
+    nodes,
+    edges,
+    setNodes,
+    setEdges,
+    resetKey: currentFlow?.id,
+    savedSignature,
+  });
+
+  // Configuration problems, recomputed shortly after each change
+  const [issues, setIssues] = useState<FlowIssue[]>([]);
+  const [showIssues, setShowIssues] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [pendingRunMode, setPendingRunMode] = useState<'normal' | 'debug' | null>(null);
+  useEffect(() => {
+    if (nodes.some(n => n.dragging)) return;
+    const timer = setTimeout(() => setIssues(validateFlow(nodes, edges)), 250);
+    return () => clearTimeout(timer);
+  }, [nodes, edges]);
+  const issuesByNode = useMemo(() => groupIssues(issues), [issues]);
+  const errorCount = issues.filter(i => i.level === 'error').length;
+
+  const focusNode = useCallback((nodeId: string) => {
+    dispatch(selectNode(nodeId));
+    reactFlowInstance?.fitView({ nodes: [{ id: nodeId }], duration: 300, maxZoom: 1.2 });
+  }, [dispatch, reactFlowInstance]);
 
   const onConnect = useCallback(
     (params: Connection | Edge) => {
@@ -553,12 +628,9 @@ function FlowCanvas() {
         y: event.clientY,
       });
 
-      const newNode: Node = {
-        id: uuid(),
-        type,
-        position,
-        data: { label: label || type },
-      };
+      const newNode: Node = type === 'note'
+        ? { id: uuid(), type, position, data: { label: 'Nota', text: '', color: 'amarillo' }, width: 240, height: 130, zIndex: -1 }
+        : { id: uuid(), type, position, data: { label: label || type } };
 
       setNodes((nds) => nds.concat(newNode));
     },
@@ -566,8 +638,16 @@ function FlowCanvas() {
   );
 
   const onSelectionChange = useCallback(({ nodes: selNodes }: { nodes: Node[] }) => {
+    if (isInternalSelectionChangeRef.current) {
+      isInternalSelectionChangeRef.current = false;
+      return;
+    }
     if (selNodes.length === 1) {
-      dispatch(selectNode(selNodes[0].id));
+      if (selNodes[0].id !== selectedNodeIdRef.current) {
+        dispatch(selectNode(selNodes[0].id));
+      }
+    } else if (selNodes.length === 0 && selectedNodeIdRef.current !== null) {
+      dispatch(selectNode(null));
     }
   }, [dispatch]);
 
@@ -622,12 +702,18 @@ function FlowCanvas() {
     
     const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
     dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
+    setSavedSignature(canvasSignature(nodes, edges));
     
     setShowSaveNotification(true);
     setTimeout(() => {
       setShowSaveNotification(false);
     }, 3000);
   };
+
+  const handleSaveRef = useRef(handleSave);
+  useEffect(() => {
+    handleSaveRef.current = handleSave;
+  });
 
   const handleToggleLock = async () => {
     if (!currentFlow) return;
@@ -675,7 +761,9 @@ function FlowCanvas() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      const slug = currentFlow.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || 'flujo';
+      // Same rule as the server (accents removed) so the file name matches the script inside
+      const slug = currentFlow.name.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'flujo';
       a.download = `${slug}_bundle.zip`;
       document.body.appendChild(a);
       a.click();
@@ -701,8 +789,207 @@ function FlowCanvas() {
     }
   };
 
-  const handleExecute = async (mode: 'normal' | 'debug' = 'normal') => {
+  // ── Clipboard: copy / paste / duplicate nodes (works across flows in this browser) ──
+  const clipboardRef = useRef<ClipboardPayload | null>(null);
+
+  const readClipboard = (): ClipboardPayload | null => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(CLIPBOARD_KEY) || 'null');
+      if (isClipboardPayload(stored)) return stored;
+    } catch {}
+    return clipboardRef.current;
+  };
+
+  const copyNodes = useCallback(() => {
+    const payload = copySelection(nodes, edges);
+    if (!payload) return false;
+    clipboardRef.current = payload;
+    try {
+      localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(payload));
+    } catch {}
+    dispatch(showToast(`${payload.nodes.length} ${payload.nodes.length === 1 ? 'nodo copiado' : 'nodos copiados'} · Ctrl+V para pegar`));
+    return true;
+  }, [nodes, edges, dispatch]);
+
+  const pasteNodes = useCallback((payload: ClipboardPayload | null, atPointer: boolean) => {
+    if (!payload || payload.nodes.length === 0 || isLocked) return;
+    const anchor = atPointer && lastPointer.current && reactFlowInstance
+      ? reactFlowInstance.screenToFlowPosition(lastPointer.current)
+      : null;
+    const pasted = pasteClipboard(payload, {
+      newId: uuid,
+      anchor,
+      existingLabels: nodes.map(n => String(n.data?.label || '')),
+    });
+    setNodes(nds => [...nds.map(n => ({ ...n, selected: false })), ...pasted.nodes]);
+    setEdges(eds => [...eds, ...pasted.edges]);
+    dispatch(selectNode(pasted.nodes.length === 1 ? pasted.nodes[0].id : null));
+  }, [isLocked, reactFlowInstance, nodes, setNodes, setEdges, dispatch]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setShowSearch(v => !v);
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      // Leave shortcuts to text fields and code editors
+      if (target?.closest('input, textarea, select, [contenteditable="true"], .cm-editor')) return;
+      const key = event.key.toLowerCase();
+
+      if (key === 's') {
+        event.preventDefault();
+        if (!isLocked) handleSaveRef.current();
+      } else if (key === 'z' && !event.shiftKey) {
+        if (isLocked) return;
+        event.preventDefault();
+        if (!canvasHistory.undo()) dispatch(showToast('No hay cambios para deshacer'));
+      } else if ((key === 'z' && event.shiftKey) || key === 'y') {
+        if (isLocked) return;
+        event.preventDefault();
+        canvasHistory.redo();
+      } else if (key === 'c') {
+        if (window.getSelection()?.toString()) return; // copying page text
+        if (copyNodes()) event.preventDefault();
+      } else if (key === 'v') {
+        const payload = readClipboard();
+        if (!payload || isLocked) return;
+        event.preventDefault();
+        pasteNodes(payload, true);
+      } else if (key === 'd') {
+        if (isLocked) return;
+        const payload = copySelection(nodes, edges);
+        if (!payload) return;
+        event.preventDefault();
+        pasteNodes(payload, false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isLocked, canvasHistory, copyNodes, pasteNodes, nodes, edges, dispatch]);
+
+  // ── Partial runs with the results of the last run ──
+  // "Probar nodo" runs one node, "Ejecutar desde aquí" a node and everything after it,
+  // "Ejecutar selección" the selected nodes. Inputs from nodes that do not run come from the last run
+  // (the results in the editor, completed on the server with its cache of the last run).
+  const [testingNodeId, setTestingNodeId] = useState<string | null>(null);
+  const [partialRunIds, setPartialRunIds] = useState<string[] | null>(null);
+  const selectedNodeIds = useMemo(() => nodes.filter(n => n.selected && n.type !== 'note').map(n => n.id), [nodes]);
+
+  const runPartial = useCallback(async (
+    nodeIds: string[],
+    opts: { mode?: 'normal' | 'debug'; title: string; showResultOf?: string }
+  ) => {
+    if (!currentFlow || testingNodeId || partialRunIds || isLiveExecuting) return;
+    const runIds = nodeIds.filter(id => nodes.some(n => n.id === id && n.type !== 'note'));
+    if (runIds.length === 0) return;
+    const mode = opts.mode || 'normal';
+
+    // Upstream results by id and by name, as the engine keeps them. The loop variables of a debug pause
+    // ({{_item}} of the request that was paused) are left out: with them an HTTP node would send one request
+    const context: Record<string, any> = { ...(intermediateContext || {}) };
+    for (const key of ['_item', 'item', '_index', '_total']) delete context[key];
+    for (const [id, result] of Object.entries(nodeResults || {})) {
+      if (runIds.includes(id) || result === undefined || (result && typeof result === 'object' && (result as any).skipped)) continue;
+      context[id] = result;
+      const n = nodes.find(x => x.id === id);
+      if (n?.data?.label) context[String(n.data.label)] = result;
+    }
+
+    // A loop body run without its loop sees the first element as {{_item}}
+    const loop = runIds
+      .map(id => findParentForEachNode(nodes.find(n => n.id === id)!, edges, nodes))
+      .find(l => l && !runIds.includes(l.id));
+    if (loop) {
+      const items = getForEachItems(loop, nodes, edges, nodeResults, intermediateContext);
+      if (items.length > 0) {
+        Object.assign(context, { _item: items[0], item: items[0], _index: 0, _total: items.length, [loop.id]: items[0] });
+        const alias = String(loop.data?.itemAlias || '').trim();
+        if (alias) context[alias] = items[0];
+      }
+    }
+
+    if (opts.showResultOf) setTestingNodeId(opts.showResultOf);
+    setPartialRunIds(runIds);
+    dispatch(setExecutionMode(mode));
+    dispatch(clearNodeStates(runIds));
+    downloadedUrlsRef.current.clear();
+    setIsLiveExecuting(true);
+    isLiveExecutingRef.current = true;
+    try {
+      // The server runs the saved definition
+      const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
+      await dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
+      setSavedSignature(canvasSignature(nodes, edges));
+
+      const res = await fetch(getApiUrl(`/flows/${currentFlow.id}/execute-partial`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodeIds: runIds, context, mode }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        dispatch(showToast(`${opts.title} falló: ${payload.error || res.statusText}`));
+        if (payload.missingNodeIds?.[0]) focusNode(payload.missingNodeIds[0]);
+        return;
+      }
+      if (payload.data?.status === 'cancelled') {
+        dispatch(showToast(`${opts.title}: ejecución detenida.`));
+        return;
+      }
+      dispatch(showToast(`${opts.title} completada en ${payload.data?.duration ?? 0} ms`));
+      if (opts.showResultOf) {
+        const node = nodes.find(n => n.id === opts.showResultOf);
+        window.dispatchEvent(new CustomEvent('inspect-node-result', {
+          detail: { id: opts.showResultOf, result: payload.data?.outputs?.[opts.showResultOf], hasError: false, label: String(node?.data?.label || opts.showResultOf) },
+        }));
+      }
+    } catch (err: any) {
+      dispatch(showToast(`${opts.title} falló: ${err.message}`));
+    } finally {
+      setTestingNodeId(null);
+      setPartialRunIds(null);
+      setIsLiveExecuting(false);
+      isLiveExecutingRef.current = false;
+    }
+  }, [currentFlow, testingNodeId, partialRunIds, isLiveExecuting, nodes, edges, nodeResults, intermediateContext, dispatch, editingName, focusNode]);
+
+  const nodeLabel = useCallback((id: string) => String(nodes.find(n => n.id === id)?.data?.label || id), [nodes]);
+
+  const handleTestNode = useCallback((nodeId: string) => {
+    runPartial([nodeId], { title: `La prueba de «${nodeLabel(nodeId)}»`, showResultOf: nodeId });
+  }, [runPartial, nodeLabel]);
+
+  // The node and everything reachable after it
+  const handleRunFromNode = useCallback((nodeId: string, mode: 'normal' | 'debug' = 'normal') => {
+    const ids = new Set([nodeId]);
+    const queue = [nodeId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const e of edges) {
+        if (e.source === current && !ids.has(e.target)) {
+          ids.add(e.target);
+          queue.push(e.target);
+        }
+      }
+    }
+    runPartial([...ids], { mode, title: `La ejecución desde «${nodeLabel(nodeId)}»` });
+  }, [edges, runPartial, nodeLabel]);
+
+  const handleRunSelection = useCallback((mode: 'normal' | 'debug' = 'normal') => {
+    runPartial(selectedNodeIds, { mode, title: `La ejecución de ${selectedNodeIds.length} nodos` });
+  }, [runPartial, selectedNodeIds]);
+
+  const handleExecute = async (mode: 'normal' | 'debug' = 'normal', skipValidation = false) => {
     if (!currentFlow) return;
+    const currentIssues = validateFlow(nodes, edges);
+    if (!skipValidation && currentIssues.some(i => i.level === 'error')) {
+      setIssues(currentIssues);
+      setPendingRunMode(mode);
+      return;
+    }
     dispatch(setExecutionMode(mode));
     dispatch(resetNodeStates());
     
@@ -739,6 +1026,7 @@ function FlowCanvas() {
   };
 
   const performExecution = async (nodesToExecute: Node[], mode: 'normal' | 'debug' = 'normal') => {
+    downloadedUrlsRef.current.clear();
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
     const definition = JSON.stringify({ nodes: nodesToExecute, edges: pruneEdges(nodesToExecute, edges) });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
@@ -819,7 +1107,23 @@ function FlowCanvas() {
   }
 
   return (
+    <FlowIssuesContext.Provider value={issuesByNode}>
     <div className="flex-1 flex flex-col min-h-0 bg-bg">
+      {pendingRunMode && (
+        <PreRunIssuesDialog
+          issues={issues}
+          nodes={nodes}
+          onReview={nodeId => {
+            setPendingRunMode(null);
+            if (nodeId) focusNode(nodeId);
+          }}
+          onRunAnyway={() => {
+            const mode = pendingRunMode;
+            setPendingRunMode(null);
+            handleExecute(mode, true);
+          }}
+        />
+      )}
       {/* Topbar inside editor */}
       <div className="h-14 border-b border-border bg-surface flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-3">
@@ -871,11 +1175,40 @@ function FlowCanvas() {
                 onChange={(e) => setEditingName(e.target.value)}
                 placeholder="Nombre del flujo"
               />
-              {currentFlow.status === 'draft' ? (
+              {canvasHistory.isDirty ? (
+                <span
+                  className="text-[10px] bg-amber-500/10 text-amber-600 px-2 py-0.5 rounded border border-amber-500/25 font-medium"
+                  title="Hay cambios en el lienzo que aún no se han guardado (Ctrl+S)"
+                >
+                  Sin guardar
+                </span>
+              ) : currentFlow.status === 'draft' ? (
                 <span className="text-[10px] bg-warn/15 text-warn px-2 py-0.5 rounded border border-warn/20 font-medium">Borrador</span>
               ) : (
                 <span className="text-[10px] bg-success/15 text-success px-2 py-0.5 rounded border border-success/20 font-medium">Guardado</span>
               )}
+              <div className="flex items-center gap-0.5 ml-1">
+                <Button
+                  variant="icon"
+                  size="icon"
+                  onClick={() => canvasHistory.undo()}
+                  disabled={!canvasHistory.canUndo}
+                  title="Deshacer (Ctrl+Z)"
+                  className="h-8 w-8 disabled:opacity-35"
+                >
+                  <Undo2 size={16} />
+                </Button>
+                <Button
+                  variant="icon"
+                  size="icon"
+                  onClick={() => canvasHistory.redo()}
+                  disabled={!canvasHistory.canRedo}
+                  title="Rehacer (Ctrl+Y o Ctrl+Shift+Z)"
+                  className="h-8 w-8 disabled:opacity-35"
+                >
+                  <Redo2 size={16} />
+                </Button>
+              </div>
             </div>
           )}
         </div>
@@ -884,11 +1217,11 @@ function FlowCanvas() {
           {isLiveExecuting && (
             <div className="flex items-center gap-1.5 px-2.5 py-1 bg-accent/15 border border-accent/30 rounded text-accent text-xs font-semibold animate-pulse">
               <Loader2 size={13} className="animate-spin" />
-              <span>Ejecución en vivo...</span>
+              <span>{partialRunIds && !testingNodeId ? `Ejecución parcial · ${partialRunIds.length} ${partialRunIds.length === 1 ? 'nodo' : 'nodos'}…` : 'Ejecución en vivo...'}</span>
             </div>
           )}
           {!isLocked && (
-            <Button variant="default" size="sm" onClick={handleSave} className="gap-2">
+            <Button variant="default" size="sm" onClick={handleSave} className="gap-2" title="Guardar (Ctrl+S)">
               <Save size={16} /> Guardar
             </Button>
           )}
@@ -905,6 +1238,42 @@ function FlowCanvas() {
             </Button>
           ) : (
             <div className="flex items-center gap-2">
+              {issues.length > 0 && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowIssues(v => !v)}
+                    className={cn(
+                      'h-8 px-2.5 flex items-center gap-1.5 rounded-sm border text-xs font-medium transition-colors',
+                      errorCount > 0
+                        ? 'border-danger/30 bg-danger/5 text-danger hover:bg-danger/10'
+                        : 'border-amber-400/50 bg-amber-500/5 text-amber-600 hover:bg-amber-500/10'
+                    )}
+                    title="Problemas de configuración del flujo"
+                  >
+                    {errorCount > 0 ? <AlertCircle size={14} /> : <AlertTriangle size={14} />}
+                    {issues.length}
+                  </button>
+                  {showIssues && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setShowIssues(false)} />
+                      <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto bg-surface border border-border rounded-md shadow-raised z-50">
+                        <div className="px-3 py-2 border-b border-border text-xs font-semibold text-fg">
+                          Revisión del flujo · {errorCount} {errorCount === 1 ? 'error' : 'errores'}, {issues.length - errorCount} {issues.length - errorCount === 1 ? 'aviso' : 'avisos'}
+                        </div>
+                        <FlowIssuesList
+                          issues={issues}
+                          nodes={nodes}
+                          onSelect={id => {
+                            setShowIssues(false);
+                            focusNode(id);
+                          }}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
               <Button variant="outline" size="sm" onClick={() => handleExecute('debug')} className="gap-2 text-amber-600 border-amber-600 hover:bg-amber-50" disabled={nodes.length === 0}>
                 <Bug size={16} /> Debug
               </Button>
@@ -1054,82 +1423,124 @@ function FlowCanvas() {
       {/* Editor Body */}
       <div className="flex-1 flex flex-col min-h-0 relative">
         <div className="flex-1 flex min-h-0 relative">
-          {!canvasExpanded && nodeLibraryExpanded && <NodeLibrary />}
+          {showNodeLibrary && <NodeLibrary />}
           
-          <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
+          <div
+            className="flex-1 h-full relative"
+            ref={reactFlowWrapper}
+            onMouseMove={(e) => { lastPointer.current = { x: e.clientX, y: e.clientY }; }}
+            onMouseLeave={() => { lastPointer.current = null; }}
+          >
+            {showSearch && (
+              <CanvasSearch nodes={nodes} onSelect={focusNode} onClose={() => setShowSearch(false)} />
+            )}
+            <button
+              type="button"
+              onClick={() => setShowSearch(true)}
+              className="absolute top-3 left-3 z-10 h-8 pl-2.5 pr-2 flex items-center gap-2 rounded-sm border border-border bg-surface/90 text-xs text-muted hover:text-fg hover:border-border-hover shadow-sm backdrop-blur"
+              title="Buscar un nodo en el lienzo"
+            >
+              <Search size={13} />
+              <span>Buscar nodo</span>
+              <kbd className="text-[10px] border border-border rounded px-1">Ctrl K</kbd>
+            </button>
             {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-2 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-amber-300 shadow-raised rounded-full px-4 py-2">
-                <div className="flex items-center gap-2 text-amber-600 text-sm font-semibold mr-1">
-                  <Bug size={16} className={isLiveExecuting && pausedNodeIds.length === 0 ? "animate-spin" : "animate-pulse"} />
-                  <span>Debugging</span>
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-1.5 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-border shadow-raised rounded-full pl-4 pr-1.5 py-1.5">
+                {/* Amber only marks the state; actions follow the app's buttons */}
+                <div className="flex items-center gap-2 text-xs font-semibold text-fg mr-2">
+                  {pausedNodeIds.length > 0 ? (
+                    <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 text-amber-600">
+                      <Pause size={10} className="fill-amber-600" />
+                    </span>
+                  ) : (
+                    <Loader2 size={14} className="animate-spin text-amber-600" />
+                  )}
+                  <span>{pausedNodeIds.length > 0 ? 'En pausa' : 'Ejecutando…'}</span>
                 </div>
                 {pausedNodeIds.length > 0 ? (
                   <>
                     <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
-                      className="h-7 min-h-0 shrink-0 text-xs border-amber-200 hover:bg-amber-50"
-                      title="Ejecutar el paso actual e ir al siguiente (paso a paso)"
-                    >
-                      <StepForward size={14} className="mr-1" /> Paso a paso
-                    </Button>
-                    <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
-                      className="h-7 min-h-0 shrink-0 text-xs bg-amber-600 hover:bg-amber-700"
-                      title="Continuar ejecución sin pausas"
+                      onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
+                      className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                      title="Ejecutar el paso actual y pausar en el siguiente"
                     >
-                      <PlayCircle size={14} className="mr-1" /> Continuar Todo
+                      <StepForward size={13} /> Siguiente paso
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
+                      className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                      title="Continuar la ejecución sin pausas"
+                    >
+                      <PlayCircle size={13} /> Continuar todo
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => dispatch(setDebugModalOpen(true))}
-                      className="h-7 min-h-0 shrink-0 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
-                      title="Abrir ventana modal de inspección de depuración"
+                      className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                      title="Abrir la ventana de inspección"
                     >
-                      <Eye size={13} className="mr-1" /> Inspeccionar
+                      <Eye size={13} /> Inspeccionar
                     </Button>
                   </>
                 ) : (
-                  <>
-                    <div className="flex items-center gap-1.5 text-xs text-muted font-medium px-1">
-                      <Loader2 size={13} className="animate-spin text-amber-600" />
-                      <span>Ejecutando...</span>
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={isPausing}
-                      onClick={async () => {
-                        setIsPausing(true);
-                        await dispatch(pauseDebugExecution(currentFlow!.id));
-                      }}
-                      className="h-7 min-h-0 shrink-0 text-xs border-amber-400 text-amber-700 hover:bg-amber-50 font-medium disabled:opacity-70"
-                      title="Pausar en el siguiente paso para retomar el control paso a paso"
-                    >
-                      {isPausing ? (
-                        <>
-                          <Loader2 size={13} className="mr-1 animate-spin text-amber-600" /> Pausando...
-                        </>
-                      ) : (
-                        <>
-                          <Pause size={13} className="mr-1 fill-amber-600" /> Pausar
-                        </>
-                      )}
-                    </Button>
-                  </>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isPausing}
+                    onClick={async () => {
+                      setIsPausing(true);
+                      await dispatch(pauseDebugExecution(currentFlow!.id));
+                    }}
+                    className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                    title="Pausar en el siguiente paso para retomar el control"
+                  >
+                    {isPausing ? (
+                      <>
+                        <Loader2 size={13} className="animate-spin" /> Pausando…
+                      </>
+                    ) : (
+                      <>
+                        <Pause size={12} /> Pausar
+                      </>
+                    )}
+                  </Button>
                 )}
                 <Button
-                  variant="default"
+                  variant="outline"
                   size="sm"
                   onClick={handleStopExecution}
-                  className="h-7 min-h-0 shrink-0 text-xs bg-danger text-white hover:bg-danger/90 border-danger"
-                  title="Detener ejecución del flujo"
+                  className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1 text-danger border-danger/30 hover:bg-danger/5 hover:border-danger/50"
+                  title="Detener la ejecución del flujo"
                 >
-                  <Square size={11} className="mr-1 fill-white" /> Detener
+                  <Square size={10} className="fill-danger" /> Detener
+                </Button>
+              </div>
+            )}
+            {selectedNodeIds.length > 1 && !isLiveExecuting && !isLocked && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-1.5 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-border shadow-raised rounded-full pl-4 pr-1.5 py-1.5">
+                <span className="text-xs font-semibold text-fg mr-2">{selectedNodeIds.length} nodos seleccionados</span>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => handleRunSelection('normal')}
+                  className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                  title="Ejecuta solo los nodos seleccionados, en orden. Los demás aportan los resultados de la última ejecución"
+                >
+                  <Play size={12} /> Ejecutar selección
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleRunSelection('debug')}
+                  className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
+                  title="Igual que «Ejecutar selección», pausando en cada paso"
+                >
+                  <Bug size={12} /> Depurar selección
                 </Button>
               </div>
             )}
@@ -1167,12 +1578,17 @@ function FlowCanvas() {
             </ReactFlow>
           </div>
 
-          {!canvasExpanded && selectedNodeId && (
-            <NodeInspector 
-              nodes={nodes} 
+          {showInspector && selectedNodeId && (
+            <NodeInspector
+              nodes={nodes}
               setNodes={setNodes}
               edges={edges}
-              selectedNodeId={selectedNodeId} 
+              selectedNodeId={selectedNodeId}
+              onTestNode={isLocked ? undefined : handleTestNode}
+              onRunFromNode={isLocked ? undefined : handleRunFromNode}
+              testing={testingNodeId === selectedNodeId}
+              testDisabled={isLiveExecuting || testingNodeId !== null || partialRunIds !== null}
+              layout={isLiveExecuting && executionMode === 'debug' ? 'debug' : 'edit'}
             />
           )}
 
@@ -1238,7 +1654,7 @@ function FlowCanvas() {
           <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-lg flex flex-col">
             <div className="p-4 border-b border-border flex items-center justify-between">
               <h2 className="text-lg font-semibold text-danger">Faltan parámetros requeridos</h2>
-              <button onClick={() => setMissingParamsContext(null)} className="p-2 hover:bg-muted rounded-md text-muted-foreground">
+              <button onClick={() => setMissingParamsContext(null)} className="p-2 hover:bg-bg rounded-md text-muted hover:text-fg">
                 <X size={20} />
               </button>
             </div>
@@ -1449,6 +1865,7 @@ function FlowCanvas() {
       />
 
     </div>
+    </FlowIssuesContext.Provider>
   );
 }
 
