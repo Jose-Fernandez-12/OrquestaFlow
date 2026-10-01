@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import {
   X,
   HelpCircle,
@@ -6,29 +6,45 @@ import {
   Code2,
   Activity,
   Lightbulb,
-  CheckCircle2,
   AlertCircle,
   RotateCw,
-  GitMerge,
-  Globe,
-  Database,
-  FileSpreadsheet,
-  Repeat,
-  Clock,
-  Terminal,
-  Server
+  Bug,
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeHelpModal } from '../../store/uiSlice';
 import { API_BASE_URL, getApiUrl } from '../../lib/api';
 import { Button } from '../ui/button';
 import { cn } from '../../lib/utils';
+import { NODE_GROUPS, SYNTAX_ITEMS, DEBUG_GUIDE, TIPS, type GuideItem } from './helpContent';
+
+type HelpTab = 'nodes' | 'syntax' | 'debug' | 'tips' | 'health';
+
+const TABS: Array<{ id: HelpTab; label: string; icon: typeof BookOpen }> = [
+  { id: 'nodes', label: 'Catálogo de nodos', icon: BookOpen },
+  { id: 'syntax', label: 'Sintaxis y variables', icon: Code2 },
+  { id: 'debug', label: 'Probar y depurar', icon: Bug },
+  { id: 'tips', label: 'Buenas prácticas', icon: Lightbulb },
+  { id: 'health', label: 'Diagnóstico', icon: Activity },
+];
+
+function GuideList({ items }: { items: GuideItem[] }) {
+  return (
+    <div className="space-y-3">
+      {items.map(item => (
+        <div key={item.title} className="p-3.5 bg-bg rounded-md border border-border space-y-1">
+          <h4 className="text-xs font-semibold text-fg">{item.title}</h4>
+          <p className="text-xs text-muted leading-relaxed">{item.text}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function HelpModal() {
   const dispatch = useAppDispatch();
   const isOpen = useAppSelector((state) => state.ui.helpModalOpen);
 
-  const [activeTab, setActiveTab] = useState<'nodes' | 'syntax' | 'health' | 'shortcuts'>('nodes');
+  const [activeTab, setActiveTab] = useState<HelpTab>('nodes');
   const [healthStatus, setHealthStatus] = useState<{
     status: string;
     version?: string;
@@ -86,7 +102,7 @@ export function HelpModal() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-fg">Centro de Ayuda y Referencia</h2>
-              <p className="text-xs text-muted">Documentación rápida, sintaxis de variables y diagnóstico de estado</p>
+              <p className="text-xs text-muted">Nodos, sintaxis de variables, pruebas y depuración, y estado del servidor</p>
             </div>
           </div>
           <button
@@ -98,203 +114,81 @@ export function HelpModal() {
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex border-b border-border bg-bg/50 px-6">
-          <button
-            type="button"
-            onClick={() => setActiveTab('nodes')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'nodes'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <BookOpen size={14} />
-            Catálogo de Nodos
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('syntax')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'syntax'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <Code2 size={14} />
-            Sintaxis y Variables
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('health')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'health'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <Activity size={14} />
-            Diagnóstico de Servidor
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('shortcuts')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'shortcuts'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <Lightbulb size={14} />
-            Buenas Prácticas
-          </button>
+        <div className="flex border-b border-border bg-bg/50 px-6 overflow-x-auto">
+          {TABS.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap",
+                activeTab === tab.id
+                  ? "border-accent text-accent font-semibold"
+                  : "border-transparent text-muted hover:text-fg"
+              )}
+            >
+              <tab.icon size={14} />
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Body Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {activeTab === 'nodes' && (
-            <div className="space-y-3">
-              <p className="text-xs text-muted mb-3">
-                OrquestaFlow permite componer pipelines secuenciales o paralelos mediante grafos dirigidos acíclicos (DAG). Conoce los bloques fundamentales:
+            <div className="space-y-5">
+              <p className="text-xs text-muted">
+                Un flujo es un grafo de nodos conectados: cada nodo se ejecuta cuando terminan los nodos que lo alimentan,
+                y los que no dependen entre sí corren en paralelo.
               </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="p-3 bg-bg rounded-md border border-border flex items-start gap-3">
-                  <div className="p-2 rounded bg-emerald-500/10 text-emerald-600 shrink-0">
-                    <GitMerge size={16} />
+              {NODE_GROUPS.map(group => (
+                <div key={group.title} className="space-y-2">
+                  <div className="flex items-baseline gap-2">
+                    <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted">{group.title}</h3>
+                    {group.note && <span className="text-[11px] text-muted">· {group.note}</span>}
                   </div>
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-semibold text-fg">Inicio (Start)</h4>
-                    <p className="text-[11px] text-muted leading-relaxed">
-                      Punto de entrada de todo flujo. Marca el arranque de ejecución de la orquestación.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border flex items-start gap-3">
-                  <div className="p-2 rounded bg-blue-500/10 text-blue-600 shrink-0">
-                    <Globe size={16} />
-                  </div>
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-semibold text-fg">Peticiones HTTP (GET / POST)</h4>
-                    <p className="text-[11px] text-muted leading-relaxed">
-                      Invoca APIs REST externas. Soporta query parameters dinámicos, headers, Bearer tokens y modo iterativo interno.
-                    </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {group.nodes.map(node => (
+                      <div key={node.name} className="p-3 bg-bg rounded-md border border-border flex items-start gap-3">
+                        <node.icon size={16} className={cn('mt-0.5 shrink-0', node.color)} />
+                        <div className="space-y-0.5">
+                          <h4 className="text-xs font-semibold text-fg">{node.name}</h4>
+                          <p className="text-[11px] text-muted leading-relaxed">{node.desc}</p>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border flex items-start gap-3">
-                  <div className="p-2 rounded bg-amber-500/10 text-amber-600 shrink-0">
-                    <Database size={16} />
-                  </div>
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-semibold text-fg">Consultas SQL (Query)</h4>
-                    <p className="text-[11px] text-muted leading-relaxed">
-                      Ejecuta sentencias SQL Server o SQLite contra conexiones registradas e inyecta parámetros dinámicos con `#param_nombre`.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border flex items-start gap-3">
-                  <div className="p-2 rounded bg-purple-500/10 text-purple-600 shrink-0">
-                    <FileSpreadsheet size={16} />
-                  </div>
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-semibold text-fg">Exportación (Excel / CSV)</h4>
-                    <p className="text-[11px] text-muted leading-relaxed">
-                      Transforma registros estructurados en archivos descargables (`.xlsx` con estilos o `.csv`), con soporte multi-hoja.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border flex items-start gap-3">
-                  <div className="p-2 rounded bg-rose-500/10 text-rose-600 shrink-0">
-                    <Repeat size={16} />
-                  </div>
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-semibold text-fg">Iterador ForEach</h4>
-                    <p className="text-[11px] text-muted leading-relaxed">
-                      Itera sobre listas de elementos (ej. IDs o filas) ejecutando el sub-grafo conectado por cada elemento.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border flex items-start gap-3">
-                  <div className="p-2 rounded bg-indigo-500/10 text-indigo-600 shrink-0">
-                    <Clock size={16} />
-                  </div>
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-semibold text-fg">Temporizador (Delay)</h4>
-                    <p className="text-[11px] text-muted leading-relaxed">
-                      Pausa la ejecución durante segundos o minutos antes de continuar con el siguiente paso para respetar límites de tasa (rate limits).
-                    </p>
-                  </div>
-                </div>
-              </div>
+              ))}
             </div>
           )}
 
           {activeTab === 'syntax' && (
             <div className="space-y-4">
               <div className="p-3 bg-accent-light border border-accent/20 rounded-md text-xs text-fg leading-relaxed">
-                Utiliza estas convenciones en URLs, cuerpos JSON, encabezados o parámetros de consulta para referenciar datos entre nodos.
+                Úsalas en URLs, parámetros, encabezados, cuerpos JSON y consultas para tomar datos de otros nodos.
+                En modo Debug, "Referencias resueltas" muestra el valor que tomó cada una.
               </div>
-
               <div className="space-y-3">
-                <div className="p-3 bg-bg rounded-md border border-border space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs font-semibold text-accent">{`{{ID_NODO.propiedad}}`}</span>
-                    <span className="text-[11px] bg-surface px-2 py-0.5 rounded border border-border text-muted">Acceso Directo</span>
+                {SYNTAX_ITEMS.map(item => (
+                  <div key={item.code} className="p-3 bg-bg rounded-md border border-border space-y-1.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-mono text-xs font-semibold text-accent break-all">{item.code}</span>
+                      <span className="text-[11px] bg-surface px-2 py-0.5 rounded border border-border text-muted whitespace-nowrap">{item.tag}</span>
+                    </div>
+                    <p className="text-xs text-muted leading-relaxed">{item.desc}</p>
+                    {item.example && (
+                      <div className="bg-surface p-2 rounded border border-border text-[11px] font-mono text-fg break-all">{item.example}</div>
+                    )}
                   </div>
-                  <p className="text-xs text-muted">
-                    Extrae una propiedad específica del resultado emitido por un nodo anterior.
-                  </p>
-                  <div className="bg-surface p-2 rounded border border-border text-[11px] font-mono text-fg">
-                    {`https://api.empresa.com/v1/ordenes/{{http_login.data.token}}`}
-                  </div>
-                </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs font-semibold text-accent">{`{{_item.campo}}`} o {`{{item.campo}}`}</span>
-                    <span className="text-[11px] bg-surface px-2 py-0.5 rounded border border-border text-muted">Iterador ForEach</span>
-                  </div>
-                  <p className="text-xs text-muted">
-                    En nodos dentro de un bucle ForEach o en modo iteración, representa el elemento actual que se está procesando.
-                  </p>
-                  <div className="bg-surface p-2 rounded border border-border text-[11px] font-mono text-fg">
-                    {`{"clienteId": "{{_item.id}}", "monto": {{_item.total}}}`}
-                  </div>
-                </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs font-semibold text-accent">#param_nombre</span>
-                    <span className="text-[11px] bg-surface px-2 py-0.5 rounded border border-border text-muted">Parámetros SQL</span>
-                  </div>
-                  <p className="text-xs text-muted">
-                    Sintaxis nativa para definir parámetros seguros en consultas SQL Server / SQLite sin concatenación vulnerable.
-                  </p>
-                  <div className="bg-surface p-2 rounded border border-border text-[11px] font-mono text-fg">
-                    SELECT * FROM Clientes WHERE Ciudad = #param_ciudad AND Estado = 1
-                  </div>
-                </div>
-
-                <div className="p-3 bg-bg rounded-md border border-border space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs font-semibold text-accent">{`{{_index}}`}</span>
-                    <span className="text-[11px] bg-surface px-2 py-0.5 rounded border border-border text-muted">Índice Numérico</span>
-                  </div>
-                  <p className="text-xs text-muted">
-                    Representa la posición numérica actual (iniciando en 0) dentro de una iteración.
-                  </p>
-                </div>
+                ))}
               </div>
             </div>
           )}
+
+          {activeTab === 'debug' && <GuideList items={DEBUG_GUIDE} />}
+
+          {activeTab === 'tips' && <GuideList items={TIPS} />}
 
           {activeTab === 'health' && (
             <div className="space-y-4">
@@ -338,7 +232,7 @@ export function HelpModal() {
                   <div className="p-3 bg-bg rounded border border-border">
                     <span className="text-[10px] text-muted uppercase font-semibold block">Versión de API</span>
                     <span className="text-sm font-mono font-bold text-fg">
-                      {healthStatus.version ? (healthStatus.version.startsWith('v') ? healthStatus.version : `v${healthStatus.version}`) : 'v1.3.0'}
+                      {healthStatus.version ? (healthStatus.version.startsWith('v') ? healthStatus.version : `v${healthStatus.version}`) : '-'}
                     </span>
                   </div>
                   <div className="p-3 bg-bg rounded border border-border">
@@ -356,31 +250,6 @@ export function HelpModal() {
                   <span>{healthStatus.error}</span>
                 </div>
               )}
-            </div>
-          )}
-
-          {activeTab === 'shortcuts' && (
-            <div className="space-y-3">
-              <div className="p-3.5 bg-bg rounded-md border border-border space-y-1">
-                <h4 className="text-xs font-semibold text-fg">Modo Depuración Paso a Paso</h4>
-                <p className="text-xs text-muted leading-relaxed">
-                  En el editor de flujos, utiliza el botón "Depurar" para pausar antes y después de cada petición HTTP o nodo pesado. Te permite inspeccionar el payload exacto antes de ser enviado.
-                </p>
-              </div>
-
-              <div className="p-3.5 bg-bg rounded-md border border-border space-y-1">
-                <h4 className="text-xs font-semibold text-fg">Cancelación en Vivo de Consultas</h4>
-                <p className="text-xs text-muted leading-relaxed">
-                  Al ejecutar consultas en Bases de Datos, si el servidor tarda demasiado puedes presionar "Cancelar" en cualquier momento. Esto emitirá un `request.cancel()` directamente al motor MSSQL, liberando memoria y CPU de inmediato.
-                </p>
-              </div>
-
-              <div className="p-3.5 bg-bg rounded-md border border-border space-y-1">
-                <h4 className="text-xs font-semibold text-fg">Protección contra Sobrecarga</h4>
-                <p className="text-xs text-muted leading-relaxed">
-                  Ajusta los tiempos de espera en el menú de Configuración para evitar que un servicio externo caído o una base de datos bloqueada congele tu pipeline de trabajo.
-                </p>
-              </div>
             </div>
           )}
         </div>

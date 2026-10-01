@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveMssqlCredentials } from '../src/engine/mssql';
+import { resolveMssqlCredentials, describeMssqlCredentials } from '../src/engine/mssql';
 
 describe('resolveMssqlCredentials', () => {
   const conn = { name: 'VantiHO40', env_credential_key: 'SQLSERVER' };
@@ -24,5 +24,15 @@ describe('resolveMssqlCredentials', () => {
     expect(() => resolveMssqlCredentials({ ...conn, username: '', password: '' }, {}))
       .toThrow(/«VantiHO40» no tiene usuario y contraseña.*SQLSERVER_USER y SQLSERVER_PASSWORD/);
     expect(() => resolveMssqlCredentials(conn, { SQLSERVER_USER: 'u' })).toThrow(/no tiene contraseña/);
+  });
+});
+
+describe('describeMssqlCredentials', () => {
+  it('tells where the credentials come from without returning them', () => {
+    expect(describeMssqlCredentials({ username: 'u', password: 'p' }, {})).toEqual({ source: 'connection', key: 'SQLSERVER', variables: [] });
+    expect(describeMssqlCredentials({ env_credential_key: 'SQLSERVER_2' }, { SQLSERVER_2_USER: 'u', SQLSERVER_2_PASSWORD: 'p' }))
+      .toEqual({ source: 'env', key: 'SQLSERVER_2', variables: ['SQLSERVER_2_USER', 'SQLSERVER_2_PASSWORD'] });
+    expect(describeMssqlCredentials({}, { SQLSERVER_USER: 'u' }))
+      .toEqual({ source: 'missing', key: 'SQLSERVER', variables: ['SQLSERVER_USER', 'SQLSERVER_PASSWORD'] });
   });
 });

@@ -1600,7 +1600,8 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
     }
   }
 
-  const previewRows = exportData.slice(0, 1000);
+  // Rows sent to the editor to preview the file (Configuración → límite de filas en previsualización)
+  const previewRows = exportData.slice(0, Math.max(1, Number(getSystemSettingsFromDb().table_preview_row_limit) || 500));
   const sampleHeaders = exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null
     ? Object.keys(exportData[0])
     : [];

@@ -69,6 +69,24 @@ export function saveRunCache(
   }
 }
 
+/** Saved results of all flows: how many and how much space they take. */
+export function runCacheStats(): { flows: number; bytes: number } {
+  try {
+    const files = fs.readdirSync(cacheDir()).filter(f => f.endsWith('.json'));
+    const bytes = files.reduce((sum, f) => sum + fs.statSync(path.join(cacheDir(), f)).size, 0);
+    return { flows: files.length, bytes };
+  } catch {
+    return { flows: 0, bytes: 0 };
+  }
+}
+
+/** Removes the saved results of every flow. Partial runs need a full run again afterwards. */
+export function clearRunCache(): number {
+  const { flows } = runCacheStats();
+  fs.rmSync(cacheDir(), { recursive: true, force: true });
+  return flows;
+}
+
 export function deleteRunCache(flowId: string): void {
   try {
     fs.rmSync(cacheFile(flowId), { force: true });

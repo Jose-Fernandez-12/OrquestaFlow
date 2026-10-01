@@ -15,7 +15,9 @@ import {
   FlaskConical,
   Radio,
   KeyRound,
-  Bot
+  Bot,
+  UserRound,
+  PlugZap
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';
@@ -23,13 +25,23 @@ import { updateSettings, resetSettings, type SystemSettings } from '../../store/
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
+import { ConnectionsDataSettings } from './ConnectionsDataSettings';
+
+type SettingsTab = 'general' | 'timeouts' | 'connections' | 'experimental';
+
+const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Clock }> = [
+  { id: 'general', label: 'General', icon: Sliders },
+  { id: 'timeouts', label: 'Tiempos y reintentos', icon: Clock },
+  { id: 'connections', label: 'Conexiones y datos', icon: PlugZap },
+  { id: 'experimental', label: 'Experimental', icon: FlaskConical },
+];
 
 export function SettingsModal() {
   const dispatch = useAppDispatch();
   const isOpen = useAppSelector((state) => state.ui.settingsModalOpen);
   const { settings, saving, loading } = useAppSelector((state) => state.settings);
 
-  const [activeTab, setActiveTab] = useState<'timeouts' | 'display' | 'experimental'>('timeouts');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
   const [formData, setFormData] = useState<SystemSettings>(settings);
   const [hasChanges, setHasChanges] = useState(false);
 
@@ -91,7 +103,7 @@ export function SettingsModal() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-fg">Configuración del Sistema</h2>
-              <p className="text-xs text-muted">Ajusta tiempos de espera, límites y preferencias generales</p>
+              <p className="text-xs text-muted">Perfil, tiempos de espera, reintentos, credenciales y funciones en prueba</p>
             </div>
           </div>
           <button
@@ -103,46 +115,23 @@ export function SettingsModal() {
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex border-b border-border bg-bg/50 px-6">
-          <button
-            type="button"
-            onClick={() => setActiveTab('timeouts')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'timeouts'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <Clock size={14} />
-            Tiempos de Espera (Timeouts)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('display')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'display'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <Sliders size={14} />
-            Visualización y Tablas
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('experimental')}
-            className={cn(
-              "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === 'experimental'
-                ? "border-accent text-accent font-semibold"
-                : "border-transparent text-muted hover:text-fg"
-            )}
-          >
-            <FlaskConical size={14} />
-            Experimental
-          </button>
+        <div className="flex border-b border-border bg-bg/50 px-6 overflow-x-auto">
+          {TABS.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                "flex items-center gap-2 py-3 px-3 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap",
+                activeTab === tab.id
+                  ? "border-accent text-accent font-semibold"
+                  : "border-transparent text-muted hover:text-fg"
+              )}
+            >
+              <tab.icon size={14} />
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Form Body */}
@@ -150,7 +139,8 @@ export function SettingsModal() {
           {activeTab === 'timeouts' && (
             <div className="space-y-4">
               <div className="p-3 bg-accent-light border border-accent/20 rounded-md text-xs text-fg leading-relaxed">
-                Los límites de tiempo aplican tanto a la ejecución de flujos de trabajo como a las consultas directas en bases de datos y scripts del backend.
+                Estos límites aplican a todos los flujos, a las consultas que ejecutas desde Bases de datos y a los scripts.
+                Evitan que un servicio caído o una base de datos bloqueada deje un flujo esperando indefinidamente.
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -172,7 +162,7 @@ export function SettingsModal() {
                     className="h-8 text-xs font-mono"
                   />
                   <p className="text-[11px] text-muted">
-                    Límite máximo para nodos HTTP (`GET`, `POST`, etc.). Por defecto: 30s.
+                    Tiempo máximo de cada petición de un nodo HTTP (también el login de OAuth2 y las llamadas de IA). Por defecto: 30 s.
                   </p>
                 </div>
 
@@ -194,7 +184,7 @@ export function SettingsModal() {
                     className="h-8 text-xs font-mono"
                   />
                   <p className="text-[11px] text-muted">
-                    Tiempo para establecer handshake inicial con el servidor SQL. Por defecto: 30s.
+                    Tiempo para conectarse al servidor SQL Server antes de dar error. Por defecto: 30 s.
                   </p>
                 </div>
 
@@ -216,7 +206,7 @@ export function SettingsModal() {
                     className="h-8 text-xs font-mono"
                   />
                   <p className="text-[11px] text-muted">
-                    Límite para consultas pesadas antes de cancelar en el motor. Por defecto: 300s (5 min).
+                    Tiempo máximo de una consulta antes de cancelarla. Por defecto: 300 s (5 min).
                   </p>
                 </div>
 
@@ -238,7 +228,7 @@ export function SettingsModal() {
                     className="h-8 text-xs font-mono"
                   />
                   <p className="text-[11px] text-muted">
-                    Tiempo de espera para procesos hijo de scripts externos. Por defecto: 60s.
+                    Tiempo máximo de los scripts de Web Scraping y de los que ejecutas desde Scripts. Por defecto: 60 s.
                   </p>
                 </div>
               </div>
@@ -247,7 +237,10 @@ export function SettingsModal() {
               <div className="p-3.5 bg-bg rounded-md border border-border flex items-center justify-between gap-4">
                 <div className="space-y-0.5">
                   <label className="text-xs font-semibold text-fg">Reintentos automáticos HTTP</label>
-                  <p className="text-[11px] text-muted">Cantidad de intentos adicionales ante fallos de conexión transitorios (0 a 5)</p>
+                  <p className="text-[11px] text-muted leading-relaxed">
+                    Intentos adicionales (0 a 5) ante errores transitorios: sin conexión, tiempo agotado o respuestas 408, 429 y 5xx.
+                    Solo se usa en los nodos HTTP que no definen sus propios reintentos en la sección &quot;Reintentos y errores&quot; del nodo.
+                  </p>
                 </div>
                 <div className="w-24 shrink-0">
                   <Input
@@ -263,11 +256,39 @@ export function SettingsModal() {
             </div>
           )}
 
-          {activeTab === 'display' && (
+          {activeTab === 'general' && (
             <div className="space-y-4">
+              <div className="p-3.5 bg-bg rounded-md border border-border space-y-3">
+                <label className="text-xs font-semibold text-fg flex items-center gap-1.5">
+                  <UserRound size={14} className="text-accent" />
+                  Perfil
+                </label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <span className="text-[11px] text-muted">Nombre</span>
+                    <Input
+                      value={formData.user_display_name || ''}
+                      onChange={(e) => handleChange('user_display_name', e.target.value)}
+                      placeholder="Tu nombre"
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-[11px] text-muted">Rol</span>
+                    <Input
+                      value={formData.user_role_label || ''}
+                      onChange={(e) => handleChange('user_role_label', e.target.value)}
+                      placeholder="Administrador"
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted">Se muestran en la barra lateral.</p>
+              </div>
+
               <div className="p-3.5 bg-bg rounded-md border border-border space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-fg">Límite de filas en previsualización de tablas</label>
+                  <label className="text-xs font-semibold text-fg">Filas en la vista previa de exportaciones</label>
                   <span className="text-[11px] font-mono text-muted">filas</span>
                 </div>
                 <select
@@ -275,17 +296,20 @@ export function SettingsModal() {
                   onChange={(e) => handleNumberChange('table_preview_row_limit', e.target.value, 50)}
                   className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-3 py-1.5 text-xs focus-visible:outline-none focus-visible:border-accent"
                 >
-                  <option value={100}>100 filas (máximo rendimiento)</option>
+                  <option value={100}>100 filas (más liviano)</option>
                   <option value={250}>250 filas</option>
                   <option value={500}>500 filas (recomendado)</option>
                   <option value={1000}>1000 filas</option>
                 </select>
                 <p className="text-[11px] text-muted">
-                  Controla la cantidad de registros renderizados en pantalla al explorar resultados de consultas SQL o archivos cargados en nodos de datos.
+                  Cuántas filas del archivo generado se envían al editor para previsualizarlo (doble clic en el nodo de exportación).
+                  El archivo siempre incluye todas las filas.
                 </p>
               </div>
             </div>
           )}
+
+          {activeTab === 'connections' && <ConnectionsDataSettings />}
 
           {activeTab === 'experimental' && (
             <div className="space-y-4">
