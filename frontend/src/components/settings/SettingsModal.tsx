@@ -16,7 +16,6 @@ import {
   Radio,
   KeyRound,
   Bot,
-  UserRound,
   PlugZap
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -103,7 +102,7 @@ export function SettingsModal() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-fg">Configuración del Sistema</h2>
-              <p className="text-xs text-muted">Perfil, tiempos de espera, reintentos, credenciales y funciones en prueba</p>
+              <p className="text-xs text-muted">Tiempos de espera, reintentos, credenciales y funciones en prueba</p>
             </div>
           </div>
           <button
@@ -258,34 +257,6 @@ export function SettingsModal() {
 
           {activeTab === 'general' && (
             <div className="space-y-4">
-              <div className="p-3.5 bg-bg rounded-md border border-border space-y-3">
-                <label className="text-xs font-semibold text-fg flex items-center gap-1.5">
-                  <UserRound size={14} className="text-accent" />
-                  Perfil
-                </label>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <span className="text-[11px] text-muted">Nombre</span>
-                    <Input
-                      value={formData.user_display_name || ''}
-                      onChange={(e) => handleChange('user_display_name', e.target.value)}
-                      placeholder="Tu nombre"
-                      className="h-8 text-xs"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <span className="text-[11px] text-muted">Rol</span>
-                    <Input
-                      value={formData.user_role_label || ''}
-                      onChange={(e) => handleChange('user_role_label', e.target.value)}
-                      placeholder="Administrador"
-                      className="h-8 text-xs"
-                    />
-                  </div>
-                </div>
-                <p className="text-[11px] text-muted">Se muestran en la barra lateral.</p>
-              </div>
-
               <div className="p-3.5 bg-bg rounded-md border border-border space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-fg">Filas en la vista previa de exportaciones</label>
