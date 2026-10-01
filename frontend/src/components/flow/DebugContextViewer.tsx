@@ -27,7 +27,8 @@ import {
   ArrowLeft,
   ArrowRight,
   History,
-  Terminal
+  Terminal,
+  Database,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -37,6 +38,8 @@ import { cn } from '../../lib/utils';
 import { TransformStepper } from './debug/TransformStepper';
 import { ConsoleLogList, type ConsoleLogEntry } from './debug/ConsoleLogList';
 import { buildTransformSteps, type TransformTrace } from './debug/transformTrace';
+import { QueryPreviewPanel, type QueryPreview } from './debug/QueryPreviewPanel';
+import { ResolvedReferences, type ResolvedReference } from './debug/ResolvedReferences';
 
 export interface HttpRequestPreview {
   method: string;
@@ -44,6 +47,8 @@ export interface HttpRequestPreview {
   headers?: Record<string, string>;
   body?: any;
   params?: any;
+  // Each {{reference}} used to build the request and the value it resolved to
+  references?: ResolvedReference[];
   iteration?: {
     current: number;
     total: number;
@@ -78,7 +83,7 @@ interface DebugContextViewerProps {
   bannerOnly?: boolean;
 }
 
-type ModalTab = 'request' | 'response' | 'input' | 'console' | 'output';
+type ModalTab = 'request' | 'response' | 'query' | 'input' | 'console' | 'output';
 
 export function DebugContextViewer({
   node,
@@ -139,6 +144,7 @@ export function DebugContextViewer({
   const isViewingActiveIter = viewingIterNum === activeIterationNumber;
 
   const currentNodePreview = allNodePreviews[node.id]?.nodePreview;
+  const queryPreview: QueryPreview | null = currentNodePreview?.kind === 'query' ? currentNodePreview : null;
   const effectiveOutput = useMemo(() => {
     if (currentNodePreview?.kind === 'transform_result') {
       return currentNodePreview.output;
@@ -223,6 +229,8 @@ export function DebugContextViewer({
       setActiveTab('response');
     } else if (requestPreview) {
       setActiveTab('request');
+    } else if (queryPreview) {
+      setActiveTab('query');
     } else if (hasStepper || nodeLogs.length > 0) {
       setActiveTab('console');
     } else if (effectiveOutput !== undefined) {
@@ -230,7 +238,7 @@ export function DebugContextViewer({
     } else {
       setActiveTab('input');
     }
-  }, [responsePreview, requestPreview, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
+  }, [responsePreview, requestPreview, queryPreview, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
 
   // STRICT GRAPH ISOLATION:
   // Traverse backwards along incoming edges to find ONLY real ancestor nodes that lead into this node
@@ -1028,6 +1036,27 @@ export function DebugContextViewer({
                 </button>
               )}
 
+              {queryPreview && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('query')}
+                  className={cn(
+                    "px-3.5 py-2.5 text-xs font-medium border-b-2 flex items-center gap-2 transition-colors cursor-pointer",
+                    activeTab === 'query'
+                      ? "border-accent text-accent font-semibold"
+                      : "border-transparent text-muted hover:text-fg"
+                  )}
+                >
+                  <Database size={14} />
+                  <span>Consulta SQL</span>
+                  {queryPreview.params.some(p => p.missing) && (
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-rose-500/10 text-rose-600 font-semibold">
+                      faltan valores
+                    </span>
+                  )}
+                </button>
+              )}
+
               {upstreamAncestorNodes.length > 0 && (
                 <button
                   type="button"
@@ -1155,7 +1184,7 @@ export function DebugContextViewer({
                   <div className="p-3 bg-surface rounded-md border border-border space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold text-fg">
-                        {effectiveRequest.params ? 'Parámetros Query' : 'Contexto de Origen'}
+                        {effectiveRequest.params ? 'Parámetros Query (valores enviados)' : 'Contexto de Origen'}
                       </span>
                       {effectiveRequest.iteration && (
                         <span className="text-[10px] font-mono text-accent">
@@ -1216,8 +1245,12 @@ export function DebugContextViewer({
                     </div>
                   )}
                 </div>
+
+                <ResolvedReferences references={effectiveRequest.references} />
               </div>
             )}
+
+            {activeTab === 'query' && queryPreview && <QueryPreviewPanel preview={queryPreview} />}
 
             {/* TAB 2: SERVER RESPONSE (Status, Headers, Body or Loading State) */}
             {activeTab === 'response' && isSending && isViewingActiveIter && !effectiveResponse && (
