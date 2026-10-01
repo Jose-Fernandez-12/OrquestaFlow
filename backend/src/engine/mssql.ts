@@ -33,6 +33,30 @@ export function resolveMssqlCredentials(
   return { user, password };
 }
 
+export type CredentialSource = 'connection' | 'env' | 'missing';
+
+/**
+ * Where a SQL Server connection takes its credentials from, without revealing them: saved in the
+ * connection, from backend/.env (and which variables), or missing. Shown in Configuración.
+ */
+export function describeMssqlCredentials(
+  connection: { username?: string; password?: string; env_credential_key?: string | null },
+  env: Record<string, string | undefined> = process.env
+): { source: CredentialSource; key: string; variables: string[] } {
+  const key = (connection.env_credential_key || 'SQLSERVER').trim();
+  const has = (name: string) => env[name] !== undefined && env[name] !== '';
+  // Same order resolveMssqlCredentials uses
+  const userVar = [`${key}_USER`, `DB_USER_${key}`, 'DB_USER_DEFAULT'].find(has);
+  const passVar = [`${key}_PASSWORD`, `DB_PASSWORD_${key}`, 'DB_PASSWORD_DEFAULT'].find(has);
+
+  if (connection.username && connection.password) return { source: 'connection', key, variables: [] };
+  if ((!connection.username && !userVar) || (!connection.password && !passVar)) {
+    return { source: 'missing', key, variables: [`${key}_USER`, `${key}_PASSWORD`] };
+  }
+  const variables = [connection.username ? null : userVar, connection.password ? null : passVar].filter(Boolean) as string[];
+  return { source: 'env', key, variables };
+}
+
 // Create connection config from SQLite database entry
 function buildMssqlConfig(connection: any) {
   const { user, password } = resolveMssqlCredentials(connection);

@@ -1,5 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
+import { describeMssqlCredentials } from '../engine/mssql.js';
+import { runCacheStats, clearRunCache } from '../engine/runCache.js';
 
 export interface SystemSettingsMap {
   http_timeout_seconds: number;
@@ -104,6 +106,25 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     } catch (err: any) {
       return reply.status(500).send({ error: `Error al guardar configuración: ${err.message}` });
     }
+  });
+
+  // Where each SQL Server connection takes its credentials from (never the values)
+  app.get('/credentials', async () => {
+    const db = getDb();
+    const rows = db.prepare('SELECT id, name, host, database_name, driver, username, password, env_credential_key FROM connections ORDER BY name').all() as any[];
+    return {
+      data: rows
+        .filter(c => c.driver !== 'sqlite')
+        .map(c => ({ id: c.id, name: c.name, host: c.host, database: c.database_name, ...describeMssqlCredentials(c) }))
+    };
+  });
+
+  // Results saved from the last run of each flow, used by partial runs
+  app.get('/run-cache', async () => ({ data: runCacheStats() }));
+
+  app.delete('/run-cache', async () => {
+    const removed = clearRunCache();
+    return { data: { removed }, message: 'Resultados guardados eliminados' };
   });
 
   // Reset to default settings
