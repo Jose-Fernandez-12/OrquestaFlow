@@ -917,27 +917,9 @@ function verifyWebhookAuth(request: any, secret: string): string | null {
   return 'Este webhook requiere autenticación: envía la cabecera x-webhook-signature o Authorization: Bearer <secreto>';
 }
 
-const SECRET_NODE_FIELDS = ['apiKey', 'clientSecret', 'password', 'refreshToken', 'secret', 'authToken', 'authPassword'];
-// Keys that hold a credential inside a JSON request body (e.g. a login request)
-const SECRET_BODY_KEY = /^(password|pass|pwd|passwd|clave|contrase(n|ñ)a|secret|client_?secret|api_?key|access_?token|refresh_?token)$/i;
+const SECRET_NODE_FIELDS = ['apiKey', 'clientSecret', 'password', 'refreshToken', 'secret'];
 
-// A value written as env:VARIABLE or {{reference}} points to the secret instead of holding it
-function holdsSecret(value: unknown): value is string {
-  return typeof value === 'string' && value !== '' && !value.startsWith('env:') && !value.includes('{{');
-}
-
-function stripBodySecrets(value: any): any {
-  if (Array.isArray(value)) return value.map(stripBodySecrets);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, SECRET_BODY_KEY.test(k) && holdsSecret(v) ? '' : stripBodySecrets(v)])
-    );
-  }
-  return value;
-}
-
-// Secrets typed directly into nodes are removed from exports, including passwords inside JSON request
-// bodies; env:VARIABLE and {{reference}} values are kept because they do not hold the secret itself
+// Secrets typed directly into nodes are removed from exports; env:VARIABLE references are kept
 export function stripNodeSecrets(definition: { nodes: any[]; edges: any[] }) {
   return {
     ...definition,
@@ -945,16 +927,8 @@ export function stripNodeSecrets(definition: { nodes: any[]; edges: any[] }) {
       if (!node?.data) return node;
       const data = { ...node.data };
       for (const field of SECRET_NODE_FIELDS) {
-        if (holdsSecret(data[field])) data[field] = '';
-      }
-      for (const field of ['body', 'payload']) {
-        if (typeof data[field] !== 'string' || !data[field].trim()) continue;
-        try {
-          const parsed = JSON.parse(data[field]);
-          const stripped = stripBodySecrets(parsed);
-          if (JSON.stringify(stripped) !== JSON.stringify(parsed)) data[field] = JSON.stringify(stripped, null, 2);
-        } catch {
-          // Not JSON (or a template): left as typed
+        if (typeof data[field] === 'string' && data[field] && !data[field].startsWith('env:')) {
+          data[field] = '';
         }
       }
       return { ...node, data };

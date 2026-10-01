@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { resolveMssqlCredentials } from '../src/engine/mssql';
-import { stripNodeSecrets } from '../src/routes/flows';
 
 describe('resolveMssqlCredentials', () => {
   const conn = { name: 'VantiHO40', env_credential_key: 'SQLSERVER' };
@@ -25,32 +24,5 @@ describe('resolveMssqlCredentials', () => {
     expect(() => resolveMssqlCredentials({ ...conn, username: '', password: '' }, {}))
       .toThrow(/«VantiHO40» no tiene usuario y contraseña.*SQLSERVER_USER y SQLSERVER_PASSWORD/);
     expect(() => resolveMssqlCredentials(conn, { SQLSERVER_USER: 'u' })).toThrow(/no tiene contraseña/);
-  });
-});
-
-describe('stripNodeSecrets', () => {
-  const node = (data: Record<string, any>) => ({ id: 'n', type: 'httpRequest', data });
-  const strip = (data: Record<string, any>) => stripNodeSecrets({ nodes: [node(data)], edges: [] }).nodes[0].data;
-
-  it('removes passwords typed inside a JSON request body and keeps the rest', () => {
-    const data = strip({ body: '{\n  "username": "Jose14",\n  "password": "MDAwMA==",\n  "rememberMe": true\n}' });
-    expect(JSON.parse(data.body)).toEqual({ username: 'Jose14', password: '', rememberMe: true });
-  });
-
-  it('keeps references and env: values, which do not hold the secret', () => {
-    const data = strip({
-      authToken: '{{Logearse.data.token}}',
-      body: '{"password": "{{Variables.clave}}", "apiKey": "env:API_KEY"}',
-    });
-    expect(data.authToken).toBe('{{Logearse.data.token}}');
-    expect(JSON.parse(data.body)).toEqual({ password: '{{Variables.clave}}', apiKey: 'env:API_KEY' });
-  });
-
-  it('removes a token typed directly in the node', () => {
-    expect(strip({ authToken: 'eyJhbGciOi...' }).authToken).toBe('');
-  });
-
-  it('leaves bodies that are not JSON untouched', () => {
-    expect(strip({ body: '{{_item}}' }).body).toBe('{{_item}}');
   });
 });
