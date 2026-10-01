@@ -4,15 +4,38 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+/**
+ * User and password of a SQL Server connection. In order: the ones saved in the connection, then the
+ * environment for its credential key (KEY_USER / KEY_PASSWORD, or DB_USER_KEY / DB_PASSWORD_KEY),
+ * then DB_USER_DEFAULT / DB_PASSWORD_DEFAULT. Several connections can share one key, so one pair of
+ * variables serves all of them.
+ *
+ * Fails with a clear message when nothing is found: guessing a login only produces a confusing
+ * "Login failed" from the server (a flow imported from a JSON file arrives without credentials).
+ */
+export function resolveMssqlCredentials(
+  connection: { name?: string; username?: string; password?: string; env_credential_key?: string | null },
+  env: Record<string, string | undefined> = process.env
+): { user: string; password: string } {
+  const key = (connection.env_credential_key || 'SQLSERVER').trim();
+  const pick = (...names: string[]) => names.map(n => env[n]).find(v => v !== undefined && v !== '');
+
+  const user = connection.username || pick(`${key}_USER`, `DB_USER_${key}`, 'DB_USER_DEFAULT');
+  const password = connection.password || pick(`${key}_PASSWORD`, `DB_PASSWORD_${key}`, 'DB_PASSWORD_DEFAULT');
+
+  if (!user || !password) {
+    const missing = [!user && 'usuario', !password && 'contraseña'].filter(Boolean).join(' y ');
+    throw new Error(
+      `La conexión «${connection.name || 'sin nombre'}» no tiene ${missing}. ` +
+      `Configúralos en Conexiones o define ${key}_USER y ${key}_PASSWORD en backend/.env.`
+    );
+  }
+  return { user, password };
+}
+
 // Create connection config from SQLite database entry
 function buildMssqlConfig(connection: any) {
-  // Map environment credential keys. 
-  // User quote: "hay multiples conexiones, pero 1 de ellas comparte el mismo usuario y contraseña, y solo 2 distintas"
-  // So we check process.env[env_credential_key + '_USER'] & process.env[env_credential_key + '_PASSWORD']
-  const key = connection.env_credential_key || 'SQLSERVER';
-  
-  const user = connection.username || process.env[`DB_USER_${key}`] || process.env.DB_USER_DEFAULT || 'sa';
-  const password = connection.password || process.env[`DB_PASSWORD_${key}`] || process.env.DB_PASSWORD_DEFAULT || 'SecretPassword123!';
+  const { user, password } = resolveMssqlCredentials(connection);
 
   // Dynamic timeouts from system_settings with defaults
   let connTimeoutMs = 30000;
