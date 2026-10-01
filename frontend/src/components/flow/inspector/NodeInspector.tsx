@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import { Button } from '../../ui/button';
-import { Trash2, Braces, Repeat, Check, Copy, ChevronDown, FlaskConical, Loader2 } from 'lucide-react';
+import { Trash2, Braces, Repeat, Check, Copy, ChevronDown, FlaskConical, Loader2, FastForward } from 'lucide-react';
 import { useAppSelector, useAppDispatch } from '../../../store/hooks';
 import { selectNode } from '../../../store/flowSlice';
 import { cn } from '../../../lib/utils';
@@ -37,6 +37,8 @@ export interface NodeInspectorProps {
   selectedNodeId: string;
   /** Runs only this node with the results of the last execution */
   onTestNode?: (nodeId: string) => void;
+  /** Runs this node and everything after it with the results of the last execution */
+  onRunFromNode?: (nodeId: string) => void;
   testing?: boolean;
   testDisabled?: boolean;
   /** The panel remembers one width while editing and another during a debug session */
@@ -71,6 +73,7 @@ export function NodeInspector({
   edges,
   selectedNodeId,
   onTestNode,
+  onRunFromNode,
   testing = false,
   testDisabled = false,
   layout = 'edit',
@@ -200,6 +203,7 @@ export function NodeInspector({
 
   const type = node.type || '';
   const canTest = Boolean(onTestNode) && !['start', 'forEachEnd', 'note'].includes(type);
+  const canRunFrom = Boolean(onRunFromNode) && type !== 'note' && edges.some(e => e.source === node.id);
 
   return (
     <aside
@@ -229,7 +233,7 @@ export function NodeInspector({
       />
 
       {/* Action bar (variables panel, loop tag, single-node test) — hidden when there is nothing to offer */}
-      {(hasAvailableVariables || canTest) && (
+      {(hasAvailableVariables || canTest || canRunFrom) && (
       <div className="px-5 py-3 border-b border-border bg-bg/40 flex items-center justify-between gap-2 shrink-0">
         {hasAvailableVariables ? (
           <button
@@ -275,6 +279,18 @@ export function NodeInspector({
             >
               {testing ? <Loader2 size={12} className="animate-spin" /> : <FlaskConical size={12} />}
               <span>{testing ? 'Probando…' : 'Probar nodo'}</span>
+            </button>
+          )}
+          {canRunFrom && (
+            <button
+              type="button"
+              onClick={() => onRunFromNode?.(node.id)}
+              disabled={testDisabled}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-border bg-surface text-fg hover:border-accent/40 hover:text-accent transition-colors disabled:opacity-50 disabled:pointer-events-none"
+              title="Ejecuta este nodo y todos los que siguen, usando los resultados de la última ejecución para los nodos anteriores"
+            >
+              <FastForward size={12} />
+              <span>Desde aquí</span>
             </button>
           )}
         </div>

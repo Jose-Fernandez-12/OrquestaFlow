@@ -172,6 +172,7 @@ export async function executeFlowEngine(
   // The forEach node will manage their execution internally.
   const forEachNodes = nodes.filter(n => n.type === 'forEach');
   const forEachManagedNodeIds = new Set<string>();
+  const forEachOwner: Record<string, string> = {};
 
   for (const feNode of forEachNodes) {
     const endId = findForEachEndNode(feNode.id, adjList, nodes);
@@ -179,6 +180,7 @@ export async function executeFlowEngine(
       const subIds = getForEachSubgraphNodes(feNode.id, endId, adjList, nodes);
       subIds.forEach(sid => {
         forEachManagedNodeIds.add(sid);
+        forEachOwner[sid] ??= feNode.id;
         inDegree[sid] = Infinity; // Exclude from main DAG traversal
       });
 
@@ -213,28 +215,37 @@ export async function executeFlowEngine(
     );
   }
 
-  const initialInDegree: Record<string, number> = { ...inDegree };
-  const skippedIncoming: Record<string, number> = {};
-  const skippedNodes = new Set<string>();
-
   const context: Record<string, any> = { ...(options?.initialContext || {}) };
   const runningPromises = new Map<string, Promise<void>>();
   const completedNodes = new Set<string>();
   const errorNodes = new Set<string>();
 
-  // Single-node test: only the requested nodes run, reading the upstream results passed in initialContext.
+  // Partial run: only the requested nodes run, in dependency order among themselves.
+  // Inputs coming from nodes outside the set are read from initialContext (the previous run's results).
   // The rest of the graph is kept so data sources (edges) are still found.
   if (options?.onlyNodeIds?.length) {
     const only = new Set(options.onlyNodeIds);
     for (const n of nodes) {
-      if (only.has(n.id)) {
-        inDegree[n.id] = 0;
-        forEachManagedNodeIds.delete(n.id);
-      } else {
+      if (!only.has(n.id)) {
         completedNodes.add(n.id);
+      } else if (!only.has(forEachOwner[n.id])) {
+        // Its loop is not part of the run: it runs once with the {{_item}} given in the context
+        forEachManagedNodeIds.delete(n.id);
+      }
+    }
+    for (const id of only) inDegree[id] = 0;
+    for (const [src, targets] of Object.entries(adjList)) {
+      // Loop bodies never unlock nodes from the main traversal (their forEach does)
+      if (!only.has(src) || forEachManagedNodeIds.has(src)) continue;
+      for (const tgt of targets) {
+        if (only.has(tgt)) inDegree[tgt]++;
       }
     }
   }
+
+  const initialInDegree: Record<string, number> = { ...inDegree };
+  const skippedIncoming: Record<string, number> = {};
+  const skippedNodes = new Set<string>();
 
   return new Promise((resolve, reject) => {
     let hasError = false;
@@ -252,7 +263,7 @@ export async function executeFlowEngine(
       if (hasError || current?.status === 'cancelled' || abortController.signal.aborted) {
         return; // Stop triggering new nodes if flow failed or cancelled
       }
-      
+
       let allDone = true;
 
       nodes.forEach(node => {
@@ -263,7 +274,7 @@ export async function executeFlowEngine(
 
         if (!completedNodes.has(node.id) && !errorNodes.has(node.id)) {
           allDone = false;
-          
+
           if (inDegree[node.id] === 0 && !runningPromises.has(node.id)) {
             // Node is ready to run
             const p = (async () => {
@@ -283,7 +294,7 @@ export async function executeFlowEngine(
               }
 
               notifyProgress(node.id, 'running');
-              
+
               const isDebug = currentExec?.mode === 'debug';
               const delayMs = isDebug ? (node.type === 'start' ? 150 : 500) : 0;
               if (delayMs > 0) {
@@ -304,7 +315,7 @@ export async function executeFlowEngine(
               if (abortController.signal.aborted) {
                 throw new Error('Ejecución detenida por el usuario');
               }
-              
+
               try {
                 const runOnce = async (): Promise<any> => {
                   let output: any = {};
@@ -495,7 +506,7 @@ export async function executeFlowEngine(
             })();
 
             runningPromises.set(node.id, p);
-            
+
             p.then(() => {
               runningPromises.delete(node.id);
               checkAndRun();
@@ -567,6 +578,9 @@ async function executeHttpNode(
   const iterateOver = node.data?.iterateOver;
   const iterateMode = node.data?.iterateMode;
   let itemsToIterate: any[] = [null]; // By default, run once with no item
+  // Iterating over a list always outputs a list (one response per element), even with 0 or 1 elements,
+  // so the nodes after it can rely on the shape
+  let iteratesList = false;
 
   // When executing inside a forEach loop, the outer loop already drives iteration item-by-item.
   // Sub-nodes must run exactly once per item, never performing batch iteration over the parent list.
@@ -580,6 +594,7 @@ async function executeHttpNode(
       }
       if (Array.isArray(resolved)) {
         itemsToIterate = resolved;
+        iteratesList = true;
       }
     }
 
@@ -588,9 +603,11 @@ async function executeHttpNode(
       for (const ctxVal of Object.values(context)) {
         if (Array.isArray(ctxVal) && ctxVal.length > 0) {
           itemsToIterate = ctxVal;
+          iteratesList = true;
           break;
         } else if (ctxVal && typeof ctxVal === 'object' && Array.isArray(ctxVal._data) && ctxVal._data.length > 0) {
           itemsToIterate = ctxVal._data;
+          iteratesList = true;
           break;
         }
       }
@@ -605,13 +622,13 @@ async function executeHttpNode(
       throw new Error('Ejecución detenida por el usuario');
     }
     const item = itemsToIterate[i];
-    
+
     // Create a localized context for this iteration
     const localContext = { ...context };
     if (item !== null) {
       localContext['_item'] = item;
     }
-    
+
     let endpoint = node.data?.endpoint || '';
     if (endpoint.includes('storefront.com') || !endpoint.startsWith('http')) {
       results.push({
@@ -621,7 +638,7 @@ async function executeHttpNode(
       });
       continue;
     }
-    
+
     endpoint = resolveTemplate(localContext, endpoint) as string;
 
     if (node.data?.params && node.data.params.trim() !== '') {
@@ -650,7 +667,7 @@ async function executeHttpNode(
       try {
         const parsedHeaders = JSON.parse(node.data.headers);
         headers = { ...headers, ...resolveTemplate(localContext, parsedHeaders) };
-      } catch(e) {
+      } catch (e) {
         console.error('Failed to parse headers', e);
       }
     }
@@ -676,7 +693,14 @@ async function executeHttpNode(
         const bodyContent = node.data.body;
         const resolvedBody = resolveTemplate(localContext, bodyContent);
         if (resolvedBody === undefined || resolvedBody === null || resolvedBody === '') {
-          // skip - no body
+          // A configured body that resolves to nothing is a wrong path: sending an empty request hides it
+          const itemKeys = item && typeof item === 'object' ? Object.keys(item).slice(0, 12) : [];
+          throw new Error(
+            `El cuerpo "${bodyContent.trim().slice(0, 80)}" no produjo datos` +
+            (item !== null ? ` en el elemento ${i + 1} de ${itemsToIterate.length}` : '') +
+            '. Revisa la ruta de la variable' +
+            (itemKeys.length > 0 ? ` (el elemento {{_item}} tiene: ${itemKeys.join(', ')})` : '') + '.'
+          );
         } else if (typeof resolvedBody === 'object') {
           requestBody = JSON.stringify(resolvedBody, null, 2);
         } else {
@@ -697,8 +721,8 @@ async function executeHttpNode(
     // DEBUG MODE: Pause before sending each request to let the user inspect how the request was formed
     const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
     const shouldPause = currentExec?.mode === 'debug' &&
-                        currentExec?.debugState === 'paused' &&
-                        !currentExec?.skipHttpPauseForNode?.[node.id];
+      currentExec?.debugState === 'paused' &&
+      !currentExec?.skipHttpPauseForNode?.[node.id];
 
     if (shouldPause) {
       const effectiveItem = item ?? context._item;
@@ -760,7 +784,7 @@ async function executeHttpNode(
           const sysSec = parseInt(row.value, 10);
           if (!isNaN(sysSec) && sysSec > 0) httpTimeoutMs = sysSec * 1000;
         }
-      } catch {}
+      } catch { }
     }
 
     const timeoutSeconds = Math.round(httpTimeoutMs / 1000);
@@ -790,7 +814,7 @@ async function executeHttpNode(
           response.headers.forEach((v, k) => {
             responseHeaders[k] = v;
           });
-        } catch {}
+        } catch { }
 
         const text = await response.text();
         let parsedBody: any;
@@ -861,14 +885,14 @@ async function executeHttpNode(
       const errDetail = typeof parsedBody === 'string' ? parsedBody.slice(0, 300) : JSON.stringify(parsedBody).slice(0, 300);
       throw new Error(`HTTP Request falló con estado ${response.status} en ${endpoint}. ${errDetail ? 'Detalle: ' + errDetail : ''}`);
     }
-    
+
     // Report progress
     if (itemsToIterate.length > 1 && onNodeProgress) {
       onNodeProgress(node.id, 'progress', { current: i + 1, total: itemsToIterate.length });
     }
   }
 
-  return itemsToIterate.length > 1 ? results : results[0];
+  return iteratesList ? results : results[0];
 }
 
 // Scraping script: a script registered in the Scripts section (by id or name) or, for older flows,
@@ -884,7 +908,7 @@ export function resolveScrapingScript(scriptRef: string): { path: string; fileNa
         return { path: registered, fileName: path.basename(row.file_path).replace(/^[0-9a-f-]{36}_/, '') };
       }
     }
-  } catch {}
+  } catch { }
   for (const candidate of [ref, `${ref}.py`]) {
     const legacy = path.join(process.cwd(), 'scripts', candidate);
     if (fs.existsSync(legacy)) return { path: legacy, fileName: candidate };
@@ -922,7 +946,7 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
     const timer = setTimeout(() => {
       try {
         py.kill('SIGTERM');
-      } catch {}
+      } catch { }
       reject(new Error(`Web scraping: el script superó el límite de ${timeoutMs / 1000}s`));
     }, timeoutMs);
 
@@ -931,7 +955,7 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
         clearTimeout(timer);
         try {
           py.kill('SIGTERM');
-        } catch {}
+        } catch { }
         reject(new Error('Ejecución detenida por el usuario'));
       }, { once: true });
     }
@@ -1175,11 +1199,11 @@ function resolveTemplate(context: Record<string, any>, value: any): any {
 
     return res;
   }
-  
+
   if (Array.isArray(value)) {
     return value.map(v => resolveTemplate(context, v));
   }
-  
+
   if (value !== null && typeof value === 'object') {
     const result: any = {};
     for (const key of Object.keys(value)) {
@@ -1187,7 +1211,7 @@ function resolveTemplate(context: Record<string, any>, value: any): any {
     }
     return result;
   }
-  
+
   return value;
 }
 
@@ -1231,9 +1255,34 @@ function flattenRows(data: any): any[] {
   return result;
 }
 
+/**
+ * Tabs of a multi-sheet export: one per node connected to the export, in the order they were connected.
+ * The tab takes the name typed in the inspector or, when none was typed, the node's name (what the
+ * inspector shows). Nodes only present in the saved configuration are kept for older flows.
+ * Names are made valid for Excel: at most 31 characters, no []:*?/\ and never repeated.
+ */
+export function getMultiSheetSources(node: any, edges: any[] = [], nodes: any[] = []): Array<{ nodeId: string; sheetName: string }> {
+  const config = (node.data?.multiSheetConfig as Record<string, string>) || {};
+  const ids = [...new Set([...getEffectiveDataSources(node.id, edges, nodes), ...Object.keys(config)])];
+  const used = new Set<string>();
+
+  return ids.map(nodeId => {
+    const source = nodes.find(n => n.id === nodeId);
+    const raw = String(config[nodeId] || source?.data?.label || `Hoja_${nodeId.substring(0, 5)}`);
+    const base = raw.replace(/[[\]:*?/\\]/g, ' ').trim().substring(0, 31) || `Hoja_${nodeId.substring(0, 5)}`;
+    let sheetName = base;
+    for (let n = 2; used.has(sheetName.toLowerCase()); n++) {
+      const suffix = ` (${n})`;
+      sheetName = base.substring(0, 31 - suffix.length) + suffix;
+    }
+    used.add(sheetName.toLowerCase());
+    return { nodeId, sheetName };
+  });
+}
+
 // Export Node Handler
 async function executeExportNode(node: any, context: Record<string, any>, edges?: any[], nodes?: any[]) {
-  let fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0,10)}`;
+  let fileName = node.data?.fileName || `exportacion_${new Date().toISOString().slice(0, 10)}`;
   // Resolve template variables in fileName (e.g., {{_item.id_eds}} inside a forEach loop)
   if (typeof fileName === 'string' && fileName.includes('{{')) {
     fileName = resolveTemplate(context, fileName);
@@ -1276,13 +1325,13 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
 
   let baseDataWrapped: { item: any, rootIndex: number }[] = [];
   if (Array.isArray(rawData)) {
-      rawData.forEach((rootItem, idx) => {
-          const flat = flattenRows(rootItem);
-          baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: idx })));
-      });
+    rawData.forEach((rootItem, idx) => {
+      const flat = flattenRows(rootItem);
+      baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: idx })));
+    });
   } else {
-      const flat = flattenRows(rawData);
-      baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: 0 })));
+    const flat = flattenRows(rawData);
+    baseDataWrapped.push(...flat.map(item => ({ item, rootIndex: 0 })));
   }
 
   const baseData = baseDataWrapped.map(w => w.item);
@@ -1337,7 +1386,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
       for (const col of columns) {
         if (col.header && col.key) {
           if (col.key.includes('{{') && col.key.includes('}}')) {
-             row[col.header] = resolveTemplate({ ...context, _item: item, _index: itemIndex }, col.key) ?? '';
+            row[col.header] = resolveTemplate({ ...context, _item: item, _index: itemIndex }, col.key) ?? '';
           } else {
             // 1. Resolve dot-notation key on item
             const parts = col.key.split('.');
@@ -1346,7 +1395,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
               if (val === undefined || val === null) break;
               val = val[part];
             }
-            
+
             // 2. Check if val is present in matched joined node rows
             if (val === undefined || val === null) {
               for (const matchedRow of joinedRowMatches.values()) {
@@ -1361,7 +1410,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
             if (val === undefined || val === null) {
               val = resolvePath(context, col.key);
             }
-            
+
             row[col.header] = val ?? '';
           }
         }
@@ -1401,41 +1450,36 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
   if (isExcel) {
     // Generate .xlsx with ExcelJS
     const workbook = new ExcelJS.Workbook();
-    
+
     const headerColStr = node.data?.headerColor as string;
-    const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr) 
-      ? headerColStr.replace('#', '').toUpperCase() 
+    const parsedColor = headerColStr && /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(headerColStr)
+      ? headerColStr.replace('#', '').toUpperCase()
       : null;
 
     if (node.data?.exportMode === 'multi') {
-      const multiSheetConfig = (node.data?.multiSheetConfig as Record<string, string>) || {};
-      const nodeIds = Object.keys(multiSheetConfig);
-      
-      if (nodeIds.length === 0) {
+      const sheets = getMultiSheetSources(node, edges, nodes);
+
+      if (sheets.length === 0) {
         workbook.addWorksheet('Datos Vacio');
       }
 
-      for (const nodeId of nodeIds) {
-        let sheetName = multiSheetConfig[nodeId];
-        if (!sheetName || sheetName.trim() === '') {
-          sheetName = `Hoja_${nodeId.substring(0, 5)}`;
+      for (const { nodeId, sheetName } of sheets) {
+        const flatData = flattenRows(context[nodeId]);
+        if (flatData.length === 0) {
+          // Keep the tab so an empty result is visible instead of a missing sheet
+          workbook.addWorksheet(sheetName).addRow(['Sin registros']);
+          continue;
         }
-        
-        let sheetData = context[nodeId];
-        if (!sheetData) continue;
-        
-        const flatData = flattenRows(sheetData);
-        if (flatData.length === 0) continue;
-        
-        const sheet = workbook.addWorksheet(sheetName.substring(0, 31));
+
+        const sheet = workbook.addWorksheet(sheetName);
         const firstItem = typeof flatData[0] === 'object' && flatData[0] !== null ? flatData[0] : { Valor: flatData[0] };
         const headers = Object.keys(firstItem);
-        
+
         sheet.columns = headers.map(h => ({ header: h, key: h, width: Math.max(h.length + 4, 16) }));
         const headerRow = sheet.getRow(1);
         headerRow.height = 24;
         headerRow.eachCell({ includeEmpty: false }, (cell) => {
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c + c).join('') : parsedColor}` : 'FF1E293B' } };
           cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
           cell.alignment = { vertical: 'middle', horizontal: 'left' };
         });
@@ -1458,8 +1502,8 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
           Object.keys(row).forEach(k => allKeysSet.add(k));
         }
       }
-      const headers = allKeysSet.size > 0 
-        ? Array.from(allKeysSet) 
+      const headers = allKeysSet.size > 0
+        ? Array.from(allKeysSet)
         : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
 
       if (exportData.length > 0 && headers.length > 0) {
@@ -1467,7 +1511,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
         const headerRow = sheet.getRow(1);
         headerRow.height = 24;
         headerRow.eachCell({ includeEmpty: false }, (cell) => {
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c+c).join('') : parsedColor}` : 'FF1E293B' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: parsedColor ? `FF${parsedColor.length === 3 ? parsedColor.split('').map(c => c + c).join('') : parsedColor}` : 'FF1E293B' } };
           cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
           cell.alignment = { vertical: 'middle', horizontal: 'left' };
         });
@@ -1506,8 +1550,8 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
         Object.keys(row).forEach(k => allKeysSet.add(k));
       }
     }
-    const headers = allKeysSet.size > 0 
-      ? Array.from(allKeysSet) 
+    const headers = allKeysSet.size > 0
+      ? Array.from(allKeysSet)
       : (exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null ? Object.keys(exportData[0]) : []);
 
     let csvContent = '';
@@ -1634,7 +1678,7 @@ function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[]
       result.push(edge.source);
       continue;
     }
-    
+
     if (sourceNode.type === 'timer' || sourceNode.type === 'delay' || sourceNode.type === 'conditionalBranch') {
       const upstreamSources = getEffectiveDataSources(sourceNode.id, edges, nodes);
       result.push(...upstreamSources);
@@ -1668,10 +1712,10 @@ async function executeDataSourceNode(
     const targetKeys = incomingSourceIds.length > 0
       ? incomingSourceIds
       : Object.keys(context).filter(k => {
-          if (k === 'start' || k === node.id) return false;
-          const n = (nodes || []).find(nodeItem => nodeItem.id === k);
-          return n?.type !== 'timer' && n?.type !== 'delay';
-        });
+        if (k === 'start' || k === node.id) return false;
+        const n = (nodes || []).find(nodeItem => nodeItem.id === k);
+        return n?.type !== 'timer' && n?.type !== 'delay';
+      });
 
     const contextResults: any[][] = [];
     for (const key of targetKeys) {
@@ -1694,20 +1738,20 @@ async function executeDataSourceNode(
 
     const merged = baseArray.map((baseItem, index) => {
       let combined = { ...baseItem };
-      
+
       for (const arr of otherArrays) {
         let rowMatch: any = null;
-        
+
         // Smart Relational Join: Buscar llaves ID en común
         const itemKeys = Object.keys(combined);
         const foreignKeys = Object.keys(arr[0] || {});
-        
-        const commonKeys = itemKeys.filter(k => 
+
+        const commonKeys = itemKeys.filter(k =>
           foreignKeys.some(fk => fk.toLowerCase() === k.toLowerCase())
         );
-        
+
         const bestKeyItem = commonKeys.find(k => k.toLowerCase().includes('id') || k.toLowerCase().includes('code')) || commonKeys[0];
-        
+
         if (bestKeyItem && combined[bestKeyItem] !== undefined && combined[bestKeyItem] !== null) {
           const bestKeyForeign = foreignKeys.find(fk => fk.toLowerCase() === bestKeyItem.toLowerCase())!;
           rowMatch = arr.find((r: any) => String(r[bestKeyForeign]) === String(combined[bestKeyItem]));
@@ -1760,7 +1804,7 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
   let connectionIds: string[] = [];
   try {
     connectionIds = JSON.parse(queryInfo.connection_ids || '[]');
-  } catch(e) {}
+  } catch (e) { }
   if (connectionIds.length === 0) throw new Error('Query has no connections configured');
 
   let params: Record<string, any> = {};
@@ -1768,7 +1812,7 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
     try {
       const parsed = JSON.parse(node.data.queryParams);
       params = resolveTemplate(context, parsed);
-    } catch(e) {
+    } catch (e) {
       console.error('Failed to parse query params mapping', e);
     }
   }
@@ -1786,11 +1830,11 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
   if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
 
   const extractMode = node.data?.extractMode || 'all';
-  
+
   if (extractMode === 'selected_columns') {
     const colsStr = node.data?.extractColumns || '';
     const cols = colsStr.split(',').map((c: string) => c.trim()).filter(Boolean);
-    
+
     if (cols.length > 0 && result.rows && result.rows.length > 0) {
       if (cols.length === 1) {
         return result.rows.map((r: any) => r[cols[0]]);

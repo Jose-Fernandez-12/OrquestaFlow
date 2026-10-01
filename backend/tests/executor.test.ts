@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { setupDb, runFlow, edge, jsonResponse, createFlow } from './helpers';
 import { executeFlowEngine } from '../src/engine/executor';
+import ExcelJS from 'exceljs';
+import fs from 'fs';
 
 beforeAll(() => setupDb());
 afterEach(() => vi.unstubAllGlobals());
@@ -203,8 +205,171 @@ describe('executeFlowEngine · single-node test', () => {
   });
 });
 
+describe('executeFlowEngine · http iteration output', () => {
+  it('returns a list even when the iterated list has a single element', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => jsonResponse({ data: { ventas: [] } })));
+    const { context } = await runFlow(
+      [
+        list('peticiones', [{ codigoEds: '540' }]),
+        http('buscar', { method: 'POST', body: '{{_item}}', iterateMode: true, iterateOver: '{{peticiones}}' }),
+        transform('ventas', 'return data.flatMap(r => r.data.ventas);'),
+      ],
+      [edge('peticiones', 'buscar'), edge('buscar', 'ventas')]
+    );
+    expect(Array.isArray(context.buscar)).toBe(true);
+    expect(context.buscar).toHaveLength(1);
+    expect(context.ventas).toEqual([]);
+  });
+
+  it('returns an empty list and sends nothing when the iterated list is empty', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { context } = await runFlow(
+      [list('peticiones', []), http('buscar', { method: 'POST', body: '{{_item}}', iterateMode: true, iterateOver: '{{peticiones}}' })],
+      [edge('peticiones', 'buscar')]
+    );
+    expect(context.buscar).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns the response itself when the node does not iterate', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => jsonResponse({ token: 'abc' })));
+    const { context } = await runFlow([http('login')], []);
+    expect(context.login).toEqual({ token: 'abc' });
+  });
+});
+
+describe('executeFlowEngine · http body', () => {
+  const peticiones = list('peticiones', [{ codigoEds: '13', numeroDocumentos: ['1'] }, { codigoEds: '51', numeroDocumentos: ['2'] }]);
+
+  it('sends each item as the body of its request', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    await runFlow(
+      [peticiones, http('buscar', { method: 'POST', body: '{{_item}}', iterateMode: true, iterateOver: '{{peticiones}}' })],
+      [edge('peticiones', 'buscar')]
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ codigoEds: '51', numeroDocumentos: ['2'] });
+  });
+
+  it('fails instead of sending an empty body when the body path does not exist', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(runFlow(
+      [peticiones, http('buscar', { method: 'POST', body: '{{_item._data}}', iterateMode: true, iterateOver: '{{peticiones}}' })],
+      [edge('peticiones', 'buscar')]
+    )).rejects.toThrow(/no produjo datos.*codigoEds, numeroDocumentos/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeFlowEngine · partial run', () => {
+  it('runs the selected nodes in dependency order, reading earlier results for the rest', async () => {
+    // A slow first step: if the selection ran in parallel, "texto" would read no "suma"
+    const flowId = createFlow(
+      [
+        start,
+        list('ventas', [{ total: 1 }]),
+        transform('suma', 'const t0 = Date.now(); while (Date.now() - t0 < 30) {} return data.reduce((a, r) => a + r.total, 0);'),
+        transform('texto', 'return `total ${data}`;'),
+        transform('fin', 'return data.toUpperCase();'),
+      ],
+      [edge('start', 'ventas'), edge('ventas', 'suma'), edge('suma', 'texto'), edge('texto', 'fin')]
+    );
+    const events: Array<{ nodeId: string; status: string }> = [];
+    const context = await executeFlowEngine(flowId, (nodeId, status) => events.push({ nodeId, status }), {
+      initialContext: { ventas: [{ total: 40 }, { total: 2 }] },
+      onlyNodeIds: ['suma', 'texto', 'fin'],
+    });
+    expect(context.fin).toBe('TOTAL 42');
+    const done = events.filter(e => e.status === 'completed').map(e => e.nodeId);
+    expect(done).toEqual(['suma', 'texto', 'fin']);
+    expect(events.some(e => e.nodeId === 'ventas')).toBe(false);
+  });
+
+  it('skips the branch that is not selected inside the partial run', async () => {
+    const branch = {
+      id: 'br',
+      type: 'conditionalBranch',
+      data: { label: 'br', mode: 'if_else', conditions: [{ id: 'r1', left: '{{ventas.total}}', operator: 'gt', right: '100' }] },
+    };
+    const flowId = createFlow(
+      [list('ventas', [{ total: 1 }]), branch, transform('alta', 'return "alta";'), transform('baja', 'return "baja";')],
+      [edge('ventas', 'br'), edge('br', 'alta', { sourceHandle: 'true' }), edge('br', 'baja', { sourceHandle: 'false' })]
+    );
+    const context = await executeFlowEngine(flowId, undefined, {
+      initialContext: { ventas: [{ total: 500 }] },
+      onlyNodeIds: ['br', 'alta', 'baja'],
+    });
+    expect(context.alta).toBe('alta');
+    expect(context.baja).toBeUndefined();
+  });
+
+  it('runs a whole loop when the loop and its body are selected', async () => {
+    const flowId = createFlow(
+      [
+        list('items', [{ id: 1 }]),
+        { id: 'loop', type: 'forEach', data: { label: 'loop', iterateOver: '{{items}}' } },
+        transform('doble', 'return { doble: data.id * 2 };'),
+        { id: 'end', type: 'forEachEnd', data: { label: 'end' } },
+        transform('total', 'return data.length;'),
+      ],
+      [edge('items', 'loop'), edge('loop', 'doble'), edge('doble', 'end'), edge('end', 'total')]
+    );
+    const context = await executeFlowEngine(flowId, undefined, {
+      initialContext: { items: [{ id: 1 }, { id: 2 }, { id: 3 }] },
+      onlyNodeIds: ['loop', 'doble', 'end', 'total'],
+    });
+    expect(context.end.map((r: any) => r.doble)).toEqual([2, 4, 6]);
+    expect(context.total).toBe(3);
+  });
+});
+
 describe('executeFlowEngine · transform errors', () => {
   it('reports JavaScript errors from the transform node', async () => {
     await expect(runFlow([transform('t', 'throw new Error("dato inválido");')], [])).rejects.toThrow(/dato inválido/);
+  });
+});
+
+describe('executeFlowEngine · multi-sheet export', () => {
+  const readSheets = async (filePath: string) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    return workbook.worksheets.map(ws => ({ name: ws.name, rows: ws.rowCount, header: ws.getRow(1).values }));
+  };
+
+  it('exports one tab per connected node, named after the node when no name was typed', async () => {
+    const { context } = await runFlow(
+      [
+        list('VentasNoencontradas', [{ ticket: 'A1' }, { ticket: 'A2' }]),
+        transform('ventasEncontradas', 'return [{ ticket: "B1", total: 10 }];'),
+        { id: 'xls', type: 'export', data: { label: 'xls', format: 'Excel', exportMode: 'multi', fileName: `test_multi_${Date.now()}` } },
+      ],
+      [edge('VentasNoencontradas', 'xls'), edge('ventasEncontradas', 'xls')]
+    );
+    const sheets = await readSheets(context.xls.filePath);
+    fs.rmSync(context.xls.filePath, { force: true });
+    expect(sheets.map(s => [s.name, s.rows])).toEqual([['VentasNoencontradas', 3], ['ventasEncontradas', 2]]);
+  });
+
+  it('uses typed names, keeps empty results as a tab and makes names valid for Excel', async () => {
+    const { context } = await runFlow(
+      [
+        list('a', [{ x: 1 }]),
+        list('b', []),
+        list('c', [{ y: 2 }]),
+        {
+          id: 'xls',
+          type: 'export',
+          data: { label: 'xls', format: 'Excel', exportMode: 'multi', fileName: `test_multi_${Date.now()}`, multiSheetConfig: { a: 'Ventas/Faltantes', c: 'Ventas Faltantes' } },
+        },
+      ],
+      [edge('a', 'xls'), edge('b', 'xls'), edge('c', 'xls')]
+    );
+    const sheets = await readSheets(context.xls.filePath);
+    fs.rmSync(context.xls.filePath, { force: true });
+    expect(sheets.map(s => s.name)).toEqual(['Ventas Faltantes', 'b', 'Ventas Faltantes (2)']);
+    expect(sheets[1].rows).toBe(1);
   });
 });
