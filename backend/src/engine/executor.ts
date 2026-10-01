@@ -12,6 +12,7 @@ import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphN
 import { getRetryPolicy, runWithRetry, isAbortError, isRetryableStatus, HTTP_NODE_TYPES, RETRYABLE_NODE_TYPES, type RetryPolicy } from './retry.js';
 import type { ExecutionTracer } from './executionLog.js';
 import { instrumentTransformCode, type BreakpointResolution } from './transformDebug.js';
+import { resolveReferences, buildSqlPreview, describeQueryParams } from './debugPreview.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -730,12 +731,22 @@ async function executeHttpNode(
         ? { current: i + 1, total: itemsToIterate.length }
         : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
 
+      let resolvedParams: any = null;
+      if (node.data?.params && node.data.params.trim() !== '') {
+        try {
+          resolvedParams = resolveTemplate(localContext, JSON.parse(node.data.params));
+        } catch {
+          resolvedParams = node.data.params;
+        }
+      }
       const requestPreview = {
         method,
         endpoint,
         headers,
         body: requestBody || null,
-        params: node.data?.params || null,
+        // The values sent, not the {{templates}} they come from (those are listed in references)
+        params: resolvedParams,
+        references: resolveReferences(node.data, ['endpoint', 'params', 'headers', 'body', 'payload', 'authToken', 'authUsername', 'authPassword'], expr => resolveTemplate(localContext, expr)),
         iteration: currentIterationInfo,
         item: effectiveItem
       };
@@ -1589,7 +1600,8 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
     }
   }
 
-  const previewRows = exportData.slice(0, 1000);
+  // Rows sent to the editor to preview the file (Configuración → límite de filas en previsualización)
+  const previewRows = exportData.slice(0, Math.max(1, Number(getSystemSettingsFromDb().table_preview_row_limit) || 500));
   const sampleHeaders = exportData.length > 0 && typeof exportData[0] === 'object' && exportData[0] !== null
     ? Object.keys(exportData[0])
     : [];
@@ -1790,9 +1802,9 @@ async function executeDataSourceNode(
 }
 
 // Query Node Handler
-async function executeQueryNode(node: any, context: Record<string, any>, signal?: AbortSignal) {
-  if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
-
+// What a query node will run: the saved statement, its connections and the parameters resolved
+// from the flow context. Shared by the run and by the debug preview so both show the same values.
+function prepareQueryNode(node: any, context: Record<string, any>) {
   const queryId = node.data?.queryId;
   if (!queryId) throw new Error('Query ID not configured in query node');
 
@@ -1800,22 +1812,32 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
   const queryInfo = db.prepare('SELECT * FROM queries WHERE id = ?').get(queryId) as any;
   if (!queryInfo) throw new Error('Query not found in database');
 
-  const sqlText = queryInfo.sql_text;
+  const sqlText: string = queryInfo.sql_text;
   let connectionIds: string[] = [];
   try {
     connectionIds = JSON.parse(queryInfo.connection_ids || '[]');
   } catch (e) { }
   if (connectionIds.length === 0) throw new Error('Query has no connections configured');
 
+  let templates: Record<string, any> = {};
   let params: Record<string, any> = {};
   if (node.data?.queryParams && node.data.queryParams.trim() !== '') {
     try {
-      const parsed = JSON.parse(node.data.queryParams);
-      params = resolveTemplate(context, parsed);
+      templates = JSON.parse(node.data.queryParams);
+      params = resolveTemplate(context, templates);
     } catch (e) {
       console.error('Failed to parse query params mapping', e);
     }
   }
+
+  return { queryInfo, sqlText, connectionIds, templates, params };
+}
+
+async function executeQueryNode(node: any, context: Record<string, any>, signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
+
+  const { sqlText, connectionIds, params } = prepareQueryNode(node, context);
+  const db = getDb();
 
   const connectionId = connectionIds[0];
   const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(connectionId) as any;
@@ -3136,6 +3158,23 @@ function buildDebugPreview(
         return { nodePreview: { kind: 'condition', ...executeConditionalBranchNode(node, context) } };
       case 'jsonTransform':
         return { nodePreview: { kind: 'transform', input: summarizeData(resolveTransformInput(node, context, edges, nodes)) } };
+      case 'query': {
+        const { queryInfo, sqlText, connectionIds, templates, params } = prepareQueryNode(node, context);
+        const connection = getDb().prepare('SELECT name, database_name, driver FROM connections WHERE id = ?').get(connectionIds[0]) as any;
+        return {
+          nodePreview: {
+            kind: 'query',
+            queryName: queryInfo.name || null,
+            connection: connection
+              ? { name: connection.name, database: connection.database_name || null, driver: connection.driver || 'mssql' }
+              : null,
+            sql: sqlText,
+            sqlPreview: buildSqlPreview(sqlText, params),
+            params: describeQueryParams(sqlText, templates, params),
+            references: resolveReferences(node.data, ['queryParams'], expr => resolveTemplate(context, expr)),
+          },
+        };
+      }
       case 'aiChatCompletion': {
         const req = buildAiRequest(node, context);
         return {
