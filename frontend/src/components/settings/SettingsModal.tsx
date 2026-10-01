@@ -95,7 +95,7 @@ export function SettingsModal() {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-surface border border-border rounded-lg shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-surface">
+        <div className="flex shrink-0 items-center justify-between px-6 py-4 border-b border-border bg-surface">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-md bg-accent/10 text-accent">
               <Settings size={20} />
@@ -114,7 +114,7 @@ export function SettingsModal() {
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex border-b border-border bg-bg/50 px-6 overflow-x-auto">
+        <div className="flex shrink-0 border-b border-border bg-bg/50 px-6 overflow-x-auto [scrollbar-width:thin]">
           {TABS.map(tab => (
             <button
               key={tab.id}
@@ -335,7 +335,7 @@ export function SettingsModal() {
         </form>
 
         {/* Footer Actions */}
-        <div className="flex items-center justify-between px-6 py-3 border-t border-border bg-surface">
+        <div className="flex shrink-0 items-center justify-between px-6 py-3 border-t border-border bg-surface">
           <Button
             type="button"
             variant="ghost"

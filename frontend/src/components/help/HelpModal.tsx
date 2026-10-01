@@ -20,8 +20,8 @@ import { NODE_GROUPS, SYNTAX_ITEMS, DEBUG_GUIDE, TIPS, type GuideItem } from './
 type HelpTab = 'nodes' | 'syntax' | 'debug' | 'tips' | 'health';
 
 const TABS: Array<{ id: HelpTab; label: string; icon: typeof BookOpen }> = [
-  { id: 'nodes', label: 'Catálogo de nodos', icon: BookOpen },
-  { id: 'syntax', label: 'Sintaxis y variables', icon: Code2 },
+  { id: 'nodes', label: 'Nodos', icon: BookOpen },
+  { id: 'syntax', label: 'Sintaxis', icon: Code2 },
   { id: 'debug', label: 'Probar y depurar', icon: Bug },
   { id: 'tips', label: 'Buenas prácticas', icon: Lightbulb },
   { id: 'health', label: 'Diagnóstico', icon: Activity },
@@ -95,7 +95,7 @@ export function HelpModal() {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-surface border border-border rounded-lg shadow-xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-surface">
+        <div className="flex shrink-0 items-center justify-between px-6 py-4 border-b border-border bg-surface">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-md bg-accent/10 text-accent">
               <HelpCircle size={20} />
@@ -114,7 +114,7 @@ export function HelpModal() {
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex border-b border-border bg-bg/50 px-6 overflow-x-auto">
+        <div className="flex shrink-0 border-b border-border bg-bg/50 px-6 overflow-x-auto [scrollbar-width:thin]">
           {TABS.map(tab => (
             <button
               key={tab.id}
@@ -255,7 +255,7 @@ export function HelpModal() {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-3 border-t border-border bg-surface">
+        <div className="flex shrink-0 items-center justify-between px-6 py-3 border-t border-border bg-surface">
           <span className="text-[11px] text-muted">OrquestaFlow • Sistema de Orquestación y Automatización</span>
           <Button
             type="button"
