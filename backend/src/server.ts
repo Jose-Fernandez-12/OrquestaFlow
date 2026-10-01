@@ -82,7 +82,7 @@ async function start(): Promise<void> {
 
   // Health check
   app.get('/api/health', async () => {
-    let version = '1.4.0';
+    let version = '1.5.0';
     try {
       const pkgPath = join(process.cwd(), 'package.json');
       if (existsSync(pkgPath)) {
