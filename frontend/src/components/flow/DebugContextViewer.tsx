@@ -309,7 +309,7 @@ export function DebugContextViewer({
   const [viewMode, setViewMode] = useState<'table' | 'structured' | 'raw'>('table');
 
   useEffect(() => {
-    setViewMode(isCurrentDataTabular ? 'table' : 'structured');
+    setViewMode(isCurrentDataTabular ? 'table' : 'raw');
     setPage(1);
     setSearchTerm('');
   }, [activeTab, isCurrentDataTabular]);
@@ -1667,6 +1667,29 @@ export function DebugContextViewer({
                     )}
                   </div>
                   <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1 bg-bg p-0.5 rounded border border-border">
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('structured')}
+                        className={cn(
+                          "px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer",
+                          viewMode === 'structured' ? "bg-surface shadow-xs text-fg font-semibold" : "text-muted hover:text-fg"
+                        )}
+                      >
+                        <Code2 size={12} className="inline mr-1" />
+                        Árbol
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('raw')}
+                        className={cn(
+                          "px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer",
+                          viewMode !== 'structured' ? "bg-surface shadow-xs text-fg font-semibold" : "text-muted hover:text-fg"
+                        )}
+                      >
+                        JSON
+                      </button>
+                    </div>
                     <button
                       type="button"
                       onClick={() => handleCopy(JSON.stringify(effectiveOutput, null, 2))}
@@ -1678,9 +1701,15 @@ export function DebugContextViewer({
                   </div>
                 </div>
 
-                <div className="flex-1 overflow-auto p-4 bg-surface rounded-md border border-border shadow-xs">
-                  {renderStructuredData(effectiveOutput, 'output')}
-                </div>
+                {viewMode === 'structured' ? (
+                  <div className="flex-1 overflow-auto p-4 bg-surface rounded-md border border-border shadow-xs">
+                    {renderStructuredData(effectiveOutput, 'output')}
+                  </div>
+                ) : (
+                  <pre className="flex-1 overflow-auto p-4 bg-surface text-fg rounded-md font-mono text-xs leading-relaxed border border-border shadow-xs select-text">
+                    {JSON.stringify(effectiveOutput, null, 2)}
+                  </pre>
+                )}
               </div>
             )}
 
