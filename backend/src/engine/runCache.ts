@@ -17,7 +17,7 @@ const PASS_THROUGH_TYPES = ['timer', 'delay', 'conditionalBranch'];
 
 // Variables of the current loop iteration: they belong to one moment of a run, never to its results.
 // Left in the context, an HTTP node would think it runs inside a loop and send a single request.
-export const ITERATION_KEYS = ['_item', '_index', '_total'];
+export const ITERATION_KEYS = ['_item', '_index', '_total', '_loops'];
 
 export function withoutIterationKeys(context: Record<string, any>): Record<string, any> {
   const clean = { ...context };

@@ -86,6 +86,42 @@ describe('forEach helpers', () => {
   it('returns the nodes strictly inside the loop', () => {
     expect(getForEachSubgraphNodes('fe', 'end', adj, nodes)).toEqual(['a', 'b']);
   });
+
+  describe('nested loops', () => {
+    // outer → a → inner → b → innerEnd → c → outerEnd
+    const nested = [
+      { id: 'outer', type: 'forEach' },
+      { id: 'a', type: 'httpRequest' },
+      { id: 'inner', type: 'forEach' },
+      { id: 'b', type: 'httpRequest' },
+      { id: 'innerEnd', type: 'forEachEnd' },
+      { id: 'c', type: 'jsonTransform' },
+      { id: 'outerEnd', type: 'forEachEnd' },
+    ];
+    const nestedAdj = { outer: ['a'], a: ['inner'], inner: ['b'], b: ['innerEnd'], innerEnd: ['c'], c: ['outerEnd'], outerEnd: [] };
+
+    it('pairs each loop with its own end', () => {
+      expect(findForEachEndNode('outer', nestedAdj, nested)).toBe('outerEnd');
+      expect(findForEachEndNode('inner', nestedAdj, nested)).toBe('innerEnd');
+    });
+
+    it('pairs correctly when the inner end is reached first by distance', () => {
+      // outer → inner → innerEnd → outerEnd, with a long branch inside the inner body
+      const adj2 = { outer: ['inner'], inner: ['x', 'innerEnd'], x: ['y'], y: ['innerEnd'], innerEnd: ['outerEnd'], outerEnd: [] };
+      const nodes2 = [
+        { id: 'outer', type: 'forEach' }, { id: 'inner', type: 'forEach' },
+        { id: 'x', type: 'delay' }, { id: 'y', type: 'delay' },
+        { id: 'innerEnd', type: 'forEachEnd' }, { id: 'outerEnd', type: 'forEachEnd' },
+      ];
+      expect(findForEachEndNode('outer', adj2, nodes2)).toBe('outerEnd');
+      expect(findForEachEndNode('inner', adj2, nodes2)).toBe('innerEnd');
+    });
+
+    it('includes the whole inner loop in the outer body', () => {
+      expect(getForEachSubgraphNodes('outer', 'outerEnd', nestedAdj, nested)).toEqual(['a', 'inner', 'b', 'innerEnd', 'c']);
+      expect(getForEachSubgraphNodes('inner', 'innerEnd', nestedAdj, nested)).toEqual(['b']);
+    });
+  });
 });
 
 describe('isBranchHandle', () => {

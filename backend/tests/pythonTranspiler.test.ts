@@ -174,4 +174,32 @@ describe('transpileFlowToPython', () => {
     const empty = transpileFlowToPython('Vacío', { nodes: [], edges: [] }, { queries: {} });
     expect(empty.script).toContain('no tiene nodos');
   });
+
+  it('renders a loop inside another loop as nested for blocks', () => {
+    const nested = transpileFlowToPython(
+      'Reportes por EDS',
+      {
+        nodes: [
+          n('start', 'start'),
+          n('eds', 'dataList', { label: 'Estaciones', items: '[{"IdEds": 1, "flotas": [{"id": 9}]}]' }),
+          n('porEds', 'forEach', { label: 'Cada EDS', iterateOver: '{{eds}}', itemAlias: 'estacion' }),
+          n('porFlota', 'forEach', { label: 'Cada flota', iterateOver: '{{_item.flotas}}' }),
+          n('rep', 'httpRequest', {
+            label: 'Reporte', method: 'POST', endpoint: 'https://api.test/reporte',
+            body: '{"idEds": "{{estacion.IdEds}}", "idFlota": "{{_item.id}}"}',
+          }),
+          n('finFlota', 'forEachEnd', { label: 'Fin flotas' }),
+          n('finEds', 'forEachEnd', { label: 'Fin EDS' }),
+        ],
+        edges: [e('start', 'eds'), e('eds', 'porEds'), e('porEds', 'porFlota'), e('porFlota', 'rep'), e('rep', 'finFlota'), e('finFlota', 'finEds')],
+      },
+      { queries: {} }
+    );
+    expect(nested.script).not.toContain('no soportado');
+    expect(nested.script).toMatch(
+      / {4}for _ in loop\(ctx, cada_eds, collect=\[fin_flotas\], alias="estacion"\):\n {8}for _ in loop\(ctx, cada_flota, collect=\[reporte\]\):\n {12}run\(ctx, reporte\)\n {8}run\(ctx, fin_flotas\)/
+    );
+    // The outer alias is known inside the inner loop: it is not asked for
+    expect(nested.script).not.toContain('ask_into(ctx, "estacion.IdEds")');
+  });
 });

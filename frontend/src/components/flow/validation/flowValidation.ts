@@ -11,7 +11,7 @@ export interface FlowIssue {
   inline?: boolean;
 }
 
-const LOOP_VARIABLES = new Set(['_item', 'item', '_index', '_total', 'Variables', 'variables', 'context', 'data']);
+const LOOP_VARIABLES = new Set(['_item', 'item', '_index', '_total', '_loops','Variables', 'variables', 'context', 'data']);
 
 function parseJson(raw: unknown): { ok: boolean; value?: any } {
   if (typeof raw !== 'string') return { ok: raw !== undefined, value: raw };

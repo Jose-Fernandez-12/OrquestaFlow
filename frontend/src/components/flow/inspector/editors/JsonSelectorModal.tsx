@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '../../../ui/button';
-import { X } from 'lucide-react';
+import { Link2, X } from 'lucide-react';
 import { JsonTreeViewer } from '../../JsonTreeViewer';
 import { useAppSelector } from '../../../../store/hooks';
 import { truncateArrays, extractExportableSample } from '../utils';
@@ -17,6 +17,8 @@ interface JsonSelectorModalProps {
   onSelectValue?: (val: string) => void;
   customLabel?: string;
   className?: string;
+  /** Render the trigger as a small link icon (for use inside inputs) */
+  iconOnly?: boolean;
 }
 
 export function JsonSelectorModal({
@@ -26,6 +28,7 @@ export function JsonSelectorModal({
   onSelectValue,
   customLabel,
   className,
+  iconOnly = false,
 }: JsonSelectorModalProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState('');
@@ -284,6 +287,16 @@ export function JsonSelectorModal({
 
   return (
     <>
+      {iconOnly ? (
+        <button
+          type="button"
+          onClick={handleOpen}
+          className={cn('p-1 rounded text-muted hover:text-accent hover:bg-accent/10 transition-colors', className)}
+          title={`Mapear desde: ${nodeLabel}`}
+        >
+          <Link2 size={12} />
+        </button>
+      ) : (
       <button
         type="button"
         onClick={handleOpen}
@@ -300,6 +313,7 @@ export function JsonSelectorModal({
       >
         <span className="truncate">{buttonText}</span>
       </button>
+      )}
 
       {isOpen &&
         createPortal(

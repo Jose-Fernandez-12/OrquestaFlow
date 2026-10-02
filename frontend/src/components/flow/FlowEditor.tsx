@@ -890,7 +890,7 @@ function FlowCanvas() {
     // Upstream results by id and by name, as the engine keeps them. The loop variables of a debug pause
     // ({{_item}} of the request that was paused) are left out: with them an HTTP node would send one request
     const context: Record<string, any> = { ...(intermediateContext || {}) };
-    for (const key of ['_item', 'item', '_index', '_total']) delete context[key];
+    for (const key of ['_item', 'item', '_index', '_total', '_loops']) delete context[key];
     for (const [id, result] of Object.entries(nodeResults || {})) {
       if (runIds.includes(id) || result === undefined || (result && typeof result === 'object' && (result as any).skipped)) continue;
       context[id] = result;

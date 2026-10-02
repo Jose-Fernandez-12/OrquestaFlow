@@ -173,15 +173,19 @@ export async function executeFlowEngine(
   // The forEach node will manage their execution internally.
   const forEachNodes = nodes.filter(n => n.type === 'forEach');
   const forEachManagedNodeIds = new Set<string>();
+  // Innermost loop that runs each node (with nested loops a node is inside several bodies)
   const forEachOwner: Record<string, string> = {};
+  const bodySize: Record<string, number> = {};
 
   for (const feNode of forEachNodes) {
     const endId = findForEachEndNode(feNode.id, adjList, nodes);
     if (endId) {
       const subIds = getForEachSubgraphNodes(feNode.id, endId, adjList, nodes);
+      bodySize[feNode.id] = subIds.length;
       subIds.forEach(sid => {
         forEachManagedNodeIds.add(sid);
-        forEachOwner[sid] ??= feNode.id;
+        const owner = forEachOwner[sid];
+        if (owner === undefined || bodySize[owner] > subIds.length) forEachOwner[sid] = feNode.id;
         inDegree[sid] = Infinity; // Exclude from main DAG traversal
       });
 
@@ -692,7 +696,7 @@ async function executeHttpNode(
     if (['POST', 'PUT', 'PATCH'].includes(method)) {
       if (node.data?.body && node.data.body.trim() !== '') {
         const bodyContent = node.data.body;
-        const resolvedBody = resolveTemplate(localContext, bodyContent);
+        const resolvedBody = resolveJsonBody(localContext, bodyContent) ?? resolveTemplate(localContext, bodyContent);
         if (resolvedBody === undefined || resolvedBody === null || resolvedBody === '') {
           // A configured body that resolves to nothing is a wrong path: sending an empty request hides it
           const itemKeys = item && typeof item === 'object' ? Object.keys(item).slice(0, 12) : [];
@@ -728,8 +732,8 @@ async function executeHttpNode(
     if (shouldPause) {
       const effectiveItem = item ?? context._item;
       const currentIterationInfo = itemsToIterate.length > 1
-        ? { current: i + 1, total: itemsToIterate.length }
-        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+        ? { current: i + 1, total: itemsToIterate.length, outer: outerLoops(context, true) }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total, outer: outerLoops(context, false) } : undefined);
 
       let resolvedParams: any = null;
       if (node.data?.params && node.data.params.trim() !== '') {
@@ -860,8 +864,8 @@ async function executeHttpNode(
     const shouldPauseAfterResponse = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id];
     if (shouldPause || shouldPauseAfterResponse) {
       const currentIterationInfo = itemsToIterate.length > 1
-        ? { current: i + 1, total: itemsToIterate.length }
-        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+        ? { current: i + 1, total: itemsToIterate.length, outer: outerLoops(context, true) }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total, outer: outerLoops(context, false) } : undefined);
 
       const responsePreview = {
         status: response.status,
@@ -1120,6 +1124,48 @@ function resolvePath(context: Record<string, any>, pathStr: string): any {
   }
 
   return undefined;
+}
+
+/**
+ * Loops that enclose the iteration shown in debug, outermost first. The innermost forEach is the
+ * "Iteración x de y" itself unless the node iterates its own list (`ownIteration`), in which case
+ * every forEach around it is outer.
+ */
+function outerLoops(context: Record<string, any>, ownIteration: boolean): Array<{ label: string; current: number; total: number }> | undefined {
+  const loops: any[] = Array.isArray(context._loops) ? context._loops : [];
+  const outer = (ownIteration ? loops : loops.slice(0, -1)).map(l => ({ label: l.label, current: l.current, total: l.total }));
+  return outer.length > 0 ? outer : undefined;
+}
+
+/**
+ * Resolves a body written as JSON with {{...}} inside its strings, on the parsed object rather than as text:
+ * a value that is exactly "{{ruta}}" receives the real data with its type (a list, an object, a number), so
+ * `"idsEds": "{{nodo.lista}}"` sends an array instead of broken text and `"id": "{{_item.id}}"` sends 2015,
+ * not "2015" (same as the Python export). Returns undefined when the body is not valid JSON.
+ */
+function resolveJsonBody(context: Record<string, any>, raw: string): any {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object') return undefined;
+  const walk = (v: any): any => {
+    if (typeof v === 'string') {
+      if (/^\{\{([^}]+)\}\}$/.test(v.trim())) {
+        const val = resolveTemplate(context, v);
+        return val === undefined ? '' : val;
+      }
+      return v.includes('{{') ? resolveTemplate(context, v) : v;
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v !== null && typeof v === 'object') {
+      return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    }
+    return v;
+  };
+  return walk(parsed);
 }
 
 function resolveTemplate(context: Record<string, any>, value: any): any {
@@ -2056,24 +2102,38 @@ async function executeForEachNode(
     e => e.target === forEachEndId && subgraphNodeIds.includes(e.source)
   );
 
+  // Nested loops: a forEach inside this body runs its own body through a recursive
+  // executeForEachNode, so those nodes are left out of this level, and the nested
+  // forEachEnd waits only for its forEach (same rule as the main traversal).
+  const nestedBodyIds = new Set<string>();
+  const nestedPairs: Array<{ feId: string; endId: string }> = [];
+  for (const n of subgraphNodes) {
+    if (n.type !== 'forEach') continue;
+    const nestedEndId = findForEachEndNode(n.id, adjList, nodes);
+    if (!nestedEndId || !subgraphNodeIds.includes(nestedEndId)) continue;
+    nestedPairs.push({ feId: n.id, endId: nestedEndId });
+    getForEachSubgraphNodes(n.id, nestedEndId, adjList, nodes).forEach(id => nestedBodyIds.add(id));
+  }
+  const levelNodes = subgraphNodes.filter(n => !nestedBodyIds.has(n.id));
+  const levelNodeIds = new Set(levelNodes.map(n => n.id));
+
   // Build local adjList and compute base inDegree for the sub-graph
   const subAdjList: Record<string, string[]> = {};
   const baseInDegree: Record<string, number> = {};
 
-  subgraphNodes.forEach(n => {
+  levelNodes.forEach(n => {
     subAdjList[n.id] = [];
     baseInDegree[n.id] = 0;
   });
 
-  // Only include edges whose source and target are both in the sub-graph
-  const subEdges = edges.filter(
-    e => subgraphNodeIds.includes(e.source) && subgraphNodeIds.includes(e.target)
-  );
-
-  // Also include edges from the forEach node to sub-graph nodes (these start with inDegree 0)
-  const forEachOutEdges = edges.filter(
-    e => e.source === node.id && subgraphNodeIds.includes(e.target)
-  );
+  // Only include edges whose source and target are both in this level of the sub-graph
+  const subEdges = edges
+    .filter(e => levelNodeIds.has(e.source) && levelNodeIds.has(e.target))
+    .concat(
+      nestedPairs
+        .filter(p => levelNodeIds.has(p.feId) && levelNodeIds.has(p.endId))
+        .map(p => ({ id: `nested_${p.feId}_${p.endId}`, source: p.feId, target: p.endId }))
+    );
 
   subEdges.forEach(edge => {
     if (subAdjList[edge.source]) {
@@ -2123,6 +2183,11 @@ async function executeForEachNode(
       item: item,
       _index: i,
       _total: items.length,
+      // Position in every enclosing loop, outermost first (debug shows "Cada EDS 2/10 › 3 de 5")
+      _loops: [
+        ...(Array.isArray(context._loops) ? context._loops : []),
+        { id: node.id, label: String(node.data?.label || 'Bucle'), current: i + 1, total: items.length }
+      ],
       [node.id]: item
     };
     // Optional alias for the current element, e.g. {{sucursal.id}}
@@ -2145,7 +2210,7 @@ async function executeForEachNode(
 
         let allDone = true;
 
-        subgraphNodes.forEach(subNode => {
+        levelNodes.forEach(subNode => {
           if (!localCompleted.has(subNode.id) && !iterationError) {
             allDone = false;
 
@@ -2158,7 +2223,7 @@ async function executeForEachNode(
                 if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
                   onNodeProgress(subNode.id, 'paused', {
                     context: { ...localContext },
-                    iteration: { current: i + 1, total: items.length, item },
+                    iteration: { current: i + 1, total: items.length, item, outer: outerLoops(localContext, false) },
                     ...buildDebugPreview(subNode, localContext, edges, nodes, { current: i + 1, total: items.length })
                   });
                   await new Promise<void>((resolve) => {
@@ -2225,6 +2290,17 @@ async function executeForEachNode(
                       case 'variables':
                         output = executeVariablesNode(subNode, localContext);
                         break;
+                      case 'forEach':
+                        // Nested loop: iterates with this iteration's context ({{_item}} is still the outer element here)
+                        output = await executeForEachNode(subNode, localContext, edges, nodes, adjList, onNodeProgress, signal, flowId);
+                        break;
+                      case 'forEachEnd': {
+                        // End of a nested loop: the results its forEach accumulated for this outer element
+                        const pair = nestedPairs.find(p => p.endId === subNode.id);
+                        output = pair ? localContext[pair.feId] : localContext[subNode.id];
+                        if (Array.isArray(output)) output = flattenRows(output);
+                        break;
+                      }
                       case 'conditionalBranch':
                         output = executeConditionalBranchNode(subNode, localContext);
                         break;
