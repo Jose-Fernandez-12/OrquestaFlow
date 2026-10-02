@@ -703,7 +703,7 @@ class Generator {
     this.jsFiles.push({
       fileName,
       nodeLabel: this.label(node),
-      content: `// ${this.label(node)} (paso ${step.number} de "${this.flowName}")\n// data = entrada del paso, context = resultados de los pasos anteriores\n${code}\n`,
+      content: `// ${this.label(node)} (paso ${step.number} de "${this.flowName}")\n// data = entrada del paso, context = resultados de los pasos anteriores, item / index = elemento del bucle\n${code}\n`,
     });
     lines.push(`return run_js(ctx, ${pyStr(`transforms/${fileName}`)}, data)`);
     return lines;

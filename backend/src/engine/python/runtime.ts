@@ -1075,8 +1075,9 @@ process.stdin.on('end', () => {
     const logs = [];
     const capture = (level) => (...args) => { logs.push(level + ': ' + args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')); };
     const fakeConsole = { log: capture('log'), info: capture('info'), warn: capture('warn'), error: capture('error'), debug: capture('debug'), table: capture('table') };
-    const fn = new Function('data', 'context', 'console', '"use strict";\n' + source);
-    const result = fn(data, context, fakeConsole);
+    // Same variables as in OrquestaFlow: 'item' and 'index' are the current loop element and its position
+    const fn = new Function('data', 'context', 'item', 'index', 'console', '"use strict";\n' + source);
+    const result = fn(data, context, context._item ?? null, context._index ?? null, fakeConsole);
     process.stdout.write(JSON.stringify({ ok: true, result: result === undefined ? null : result, logs }));
   } catch (err) {
     process.stdout.write(JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) }));
@@ -1088,7 +1089,8 @@ process.stdin.on('end', () => {
 def run_js(ctx, script_file, data):
     """
     Ejecuta una transformación JavaScript (carpeta transforms/) con Node.js 18+.
-    Dentro del script: 'data' es la entrada y 'context' los resultados de los pasos.
+    Dentro del script: 'data' es la entrada, 'context' los resultados de los pasos e
+    'item' / 'index' el elemento del bucle actual y su posición.
     """
     import shutil
     import subprocess

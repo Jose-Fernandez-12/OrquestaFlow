@@ -50,6 +50,8 @@ export interface NodeDebugPreview {
   responsePreview?: any | null;
   nodePreview?: any | null;
   history?: IterationDebugRecord[];
+  /** Position in the enclosing loops the history belongs to (e.g. "2" = 2nd EDS) */
+  outerKey?: string;
 }
 
 interface FlowState {
@@ -286,6 +288,15 @@ const flowSlice = createSlice({
       const nodeEntry = state.debugPreviewsByNode[nodeId];
       if (!nodeEntry.history) nodeEntry.history = [];
       if (nodePreview !== undefined) nodeEntry.nodePreview = nodePreview;
+
+      // In a nested loop the history belongs to one element of the outer loops: when it changes
+      // (next EDS), the iterations of the previous one are dropped instead of mixing both
+      const outer = requestPreview?.iteration?.outer ?? responsePreview?.iteration?.outer;
+      const outerKey = Array.isArray(outer) ? outer.map((l: any) => l.current).join('.') : '';
+      if ((nodeEntry.outerKey ?? '') !== outerKey) {
+        nodeEntry.history = [];
+        nodeEntry.outerKey = outerKey;
+      }
 
       const currentIterIndex = requestPreview?.iteration?.current ?? responsePreview?.iteration?.current ?? 1;
       let record = nodeEntry.history.find(h => h.iterationIndex === currentIterIndex);

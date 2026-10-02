@@ -140,6 +140,16 @@ export function DebugContextViewer({
     setSelectedIterNum(activeIterationNumber);
   }, [activeIterationNumber]);
 
+  // Enclosing loops shown before "Iteración x de y" (nested loops): the HTTP preview sends the outer
+  // ones; any other paused node inside a loop reads its whole position from the context
+  const loopPath = useMemo((): Array<{ label: string; current: number; total: number }> => {
+    const outer = requestPreview?.iteration?.outer ?? responsePreview?.iteration?.outer;
+    if (Array.isArray(outer)) return outer;
+    if (requestPreview || responsePreview) return [];
+    const loops = (context as any)?._loops;
+    return Array.isArray(loops) ? loops : [];
+  }, [requestPreview, responsePreview, context]);
+
   const viewingIterNum = selectedIterNum ?? activeIterationNumber;
   const isViewingActiveIter = viewingIterNum === activeIterationNumber;
 
@@ -813,9 +823,15 @@ export function DebugContextViewer({
                         Error en el script
                       </span>
                     )}
-                    {totalIterations > 1 && (
-                      <span className="text-[10px] bg-accent/10 text-accent font-semibold px-2 py-0.5 rounded border border-accent/20 font-mono">
-                        Iteración {viewingIterNum} de {totalIterations}
+                    {(totalIterations > 1 || loopPath.length > 0) && (
+                      <span
+                        className="text-[10px] bg-accent/10 text-accent font-semibold px-2 py-0.5 rounded border border-accent/20 font-mono"
+                        title="Posición en los bucles: del más externo al actual"
+                      >
+                        {[
+                          ...loopPath.map(l => `${l.label} ${l.current}/${l.total}`),
+                          ...(totalIterations > 1 ? [`Iteración ${viewingIterNum} de ${totalIterations}`] : []),
+                        ].join(' › ')}
                       </span>
                     )}
                   </div>

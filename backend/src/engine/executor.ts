@@ -732,8 +732,8 @@ async function executeHttpNode(
     if (shouldPause) {
       const effectiveItem = item ?? context._item;
       const currentIterationInfo = itemsToIterate.length > 1
-        ? { current: i + 1, total: itemsToIterate.length }
-        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+        ? { current: i + 1, total: itemsToIterate.length, outer: outerLoops(context, true) }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total, outer: outerLoops(context, false) } : undefined);
 
       let resolvedParams: any = null;
       if (node.data?.params && node.data.params.trim() !== '') {
@@ -864,8 +864,8 @@ async function executeHttpNode(
     const shouldPauseAfterResponse = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id];
     if (shouldPause || shouldPauseAfterResponse) {
       const currentIterationInfo = itemsToIterate.length > 1
-        ? { current: i + 1, total: itemsToIterate.length }
-        : (context._index !== undefined ? { current: context._index + 1, total: context._total } : undefined);
+        ? { current: i + 1, total: itemsToIterate.length, outer: outerLoops(context, true) }
+        : (context._index !== undefined ? { current: context._index + 1, total: context._total, outer: outerLoops(context, false) } : undefined);
 
       const responsePreview = {
         status: response.status,
@@ -1124,6 +1124,17 @@ function resolvePath(context: Record<string, any>, pathStr: string): any {
   }
 
   return undefined;
+}
+
+/**
+ * Loops that enclose the iteration shown in debug, outermost first. The innermost forEach is the
+ * "Iteración x de y" itself unless the node iterates its own list (`ownIteration`), in which case
+ * every forEach around it is outer.
+ */
+function outerLoops(context: Record<string, any>, ownIteration: boolean): Array<{ label: string; current: number; total: number }> | undefined {
+  const loops: any[] = Array.isArray(context._loops) ? context._loops : [];
+  const outer = (ownIteration ? loops : loops.slice(0, -1)).map(l => ({ label: l.label, current: l.current, total: l.total }));
+  return outer.length > 0 ? outer : undefined;
 }
 
 /**
@@ -2172,6 +2183,11 @@ async function executeForEachNode(
       item: item,
       _index: i,
       _total: items.length,
+      // Position in every enclosing loop, outermost first (debug shows "Cada EDS 2/10 › 3 de 5")
+      _loops: [
+        ...(Array.isArray(context._loops) ? context._loops : []),
+        { id: node.id, label: String(node.data?.label || 'Bucle'), current: i + 1, total: items.length }
+      ],
       [node.id]: item
     };
     // Optional alias for the current element, e.g. {{sucursal.id}}
@@ -2207,7 +2223,7 @@ async function executeForEachNode(
                 if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
                   onNodeProgress(subNode.id, 'paused', {
                     context: { ...localContext },
-                    iteration: { current: i + 1, total: items.length, item },
+                    iteration: { current: i + 1, total: items.length, item, outer: outerLoops(localContext, false) },
                     ...buildDebugPreview(subNode, localContext, edges, nodes, { current: i + 1, total: items.length })
                   });
                   await new Promise<void>((resolve) => {
