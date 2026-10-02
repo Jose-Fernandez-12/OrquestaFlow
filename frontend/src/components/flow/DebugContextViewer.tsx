@@ -140,6 +140,16 @@ export function DebugContextViewer({
     setSelectedIterNum(activeIterationNumber);
   }, [activeIterationNumber]);
 
+  // Enclosing loops shown before "Iteración x de y" (nested loops): the HTTP preview sends the outer
+  // ones; any other paused node inside a loop reads its whole position from the context
+  const loopPath = useMemo((): Array<{ label: string; current: number; total: number }> => {
+    const outer = requestPreview?.iteration?.outer ?? responsePreview?.iteration?.outer;
+    if (Array.isArray(outer)) return outer;
+    if (requestPreview || responsePreview) return [];
+    const loops = (context as any)?._loops;
+    return Array.isArray(loops) ? loops : [];
+  }, [requestPreview, responsePreview, context]);
+
   const viewingIterNum = selectedIterNum ?? activeIterationNumber;
   const isViewingActiveIter = viewingIterNum === activeIterationNumber;
 
@@ -309,7 +319,7 @@ export function DebugContextViewer({
   const [viewMode, setViewMode] = useState<'table' | 'structured' | 'raw'>('table');
 
   useEffect(() => {
-    setViewMode(isCurrentDataTabular ? 'table' : 'structured');
+    setViewMode(isCurrentDataTabular ? 'table' : 'raw');
     setPage(1);
     setSearchTerm('');
   }, [activeTab, isCurrentDataTabular]);
@@ -813,9 +823,15 @@ export function DebugContextViewer({
                         Error en el script
                       </span>
                     )}
-                    {totalIterations > 1 && (
-                      <span className="text-[10px] bg-accent/10 text-accent font-semibold px-2 py-0.5 rounded border border-accent/20 font-mono">
-                        Iteración {viewingIterNum} de {totalIterations}
+                    {(totalIterations > 1 || loopPath.length > 0) && (
+                      <span
+                        className="text-[10px] bg-accent/10 text-accent font-semibold px-2 py-0.5 rounded border border-accent/20 font-mono"
+                        title="Posición en los bucles: del más externo al actual"
+                      >
+                        {[
+                          ...loopPath.map(l => `${l.label} ${l.current}/${l.total}`),
+                          ...(totalIterations > 1 ? [`Iteración ${viewingIterNum} de ${totalIterations}`] : []),
+                        ].join(' › ')}
                       </span>
                     )}
                   </div>
@@ -1667,6 +1683,29 @@ export function DebugContextViewer({
                     )}
                   </div>
                   <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1 bg-bg p-0.5 rounded border border-border">
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('structured')}
+                        className={cn(
+                          "px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer",
+                          viewMode === 'structured' ? "bg-surface shadow-xs text-fg font-semibold" : "text-muted hover:text-fg"
+                        )}
+                      >
+                        <Code2 size={12} className="inline mr-1" />
+                        Árbol
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('raw')}
+                        className={cn(
+                          "px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer",
+                          viewMode !== 'structured' ? "bg-surface shadow-xs text-fg font-semibold" : "text-muted hover:text-fg"
+                        )}
+                      >
+                        JSON
+                      </button>
+                    </div>
                     <button
                       type="button"
                       onClick={() => handleCopy(JSON.stringify(effectiveOutput, null, 2))}
@@ -1678,9 +1717,15 @@ export function DebugContextViewer({
                   </div>
                 </div>
 
-                <div className="flex-1 overflow-auto p-4 bg-surface rounded-md border border-border shadow-xs">
-                  {renderStructuredData(effectiveOutput, 'output')}
-                </div>
+                {viewMode === 'structured' ? (
+                  <div className="flex-1 overflow-auto p-4 bg-surface rounded-md border border-border shadow-xs">
+                    {renderStructuredData(effectiveOutput, 'output')}
+                  </div>
+                ) : (
+                  <pre className="flex-1 overflow-auto p-4 bg-surface text-fg rounded-md font-mono text-xs leading-relaxed border border-border shadow-xs select-text">
+                    {JSON.stringify(effectiveOutput, null, 2)}
+                  </pre>
+                )}
               </div>
             )}
 

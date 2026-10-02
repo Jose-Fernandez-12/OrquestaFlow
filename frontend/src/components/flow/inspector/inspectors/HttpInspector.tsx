@@ -574,6 +574,7 @@ export function HttpInspector({
                 ) : (
                   <KeyValueEditor
                     hideToggle={true}
+                    mapNodes={upstreamDataNodes}
                     jsonString={(node.data?.body as string) || ''}
                     onChange={(newJson) => updateNodeData('body', newJson)}
                     keyPlaceholder="Campo (ej. email)"

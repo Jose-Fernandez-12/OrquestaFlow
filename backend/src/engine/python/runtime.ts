@@ -247,6 +247,10 @@ def loop(ctx, loop_fn, collect=(), alias=None):
     items = items if isinstance(items, list) else ([] if items is None else [items])
     results = []
     ran_before = set(ctx.ran)
+    # In a nested loop these keys hold the outer loop's element: they are restored at the end
+    loop_keys = [k for k in ("_item", "item", "_index", "_total", alias) if k]
+    _missing = object()
+    saved = {k: ctx.get(k, _missing) for k in loop_keys}
     ctx.depth += 1
     for index, item in enumerate(items):
         ctx.ran = set(ran_before)
@@ -262,9 +266,11 @@ def loop(ctx, loop_fn, collect=(), alias=None):
             results.extend(_merge_with_item(item, row))
 
     ctx.depth -= 1
-    for key in ("_item", "item", "_index", "_total", alias):
-        if key:
+    for key in loop_keys:
+        if saved[key] is _missing:
             ctx.pop(key, None)
+        else:
+            ctx[key] = saved[key]
     ctx.ran = ran_before
     ctx[loop_fn.node_id] = results
     ctx[loop_fn.label] = results
@@ -1069,8 +1075,9 @@ process.stdin.on('end', () => {
     const logs = [];
     const capture = (level) => (...args) => { logs.push(level + ': ' + args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')); };
     const fakeConsole = { log: capture('log'), info: capture('info'), warn: capture('warn'), error: capture('error'), debug: capture('debug'), table: capture('table') };
-    const fn = new Function('data', 'context', 'console', '"use strict";\n' + source);
-    const result = fn(data, context, fakeConsole);
+    // Same variables as in OrquestaFlow: 'item' and 'index' are the current loop element and its position
+    const fn = new Function('data', 'context', 'item', 'index', 'console', '"use strict";\n' + source);
+    const result = fn(data, context, context._item ?? null, context._index ?? null, fakeConsole);
     process.stdout.write(JSON.stringify({ ok: true, result: result === undefined ? null : result, logs }));
   } catch (err) {
     process.stdout.write(JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) }));
@@ -1082,7 +1089,8 @@ process.stdin.on('end', () => {
 def run_js(ctx, script_file, data):
     """
     Ejecuta una transformación JavaScript (carpeta transforms/) con Node.js 18+.
-    Dentro del script: 'data' es la entrada y 'context' los resultados de los pasos.
+    Dentro del script: 'data' es la entrada, 'context' los resultados de los pasos e
+    'item' / 'index' el elemento del bucle actual y su posición.
     """
     import shutil
     import subprocess

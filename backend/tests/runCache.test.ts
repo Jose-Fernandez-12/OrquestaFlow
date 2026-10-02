@@ -29,6 +29,6 @@ describe('findMissingInputs', () => {
 
 describe('withoutIterationKeys', () => {
   it('drops the variables of a loop iteration and keeps node results', () => {
-    expect(withoutIterationKeys({ _item: { x: 1 }, _index: 0, _total: 3, datos: [1, 2, 3] })).toEqual({ datos: [1, 2, 3] });
+    expect(withoutIterationKeys({ _item: { x: 1 }, _index: 0, _total: 3, _loops: [{ id: 'fe', current: 1, total: 3 }], datos: [1, 2, 3] })).toEqual({ datos: [1, 2, 3] });
   });
 });
