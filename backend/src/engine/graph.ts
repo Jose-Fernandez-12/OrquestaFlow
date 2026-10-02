@@ -64,26 +64,43 @@ export function normalizeEdges(nodes: any[], edges: any[]): any[] {
   });
 }
 
-// BFS from a forEach node to its paired "Fin de bucle" node
+/**
+ * BFS from a forEach node to its paired "Fin de bucle" node.
+ *
+ * Loops can be nested, so pairing works like parentheses: every forEach crossed on the way opens a
+ * level and every forEachEnd closes one; the pair is the first forEachEnd reached at level 0.
+ * In `A → B(forEach) → C → B_end → A_end`, A pairs with A_end and B with B_end.
+ */
 export function findForEachEndNode(forEachNodeId: string, adjList: Record<string, string[]>, nodes: any[]): string | null {
+  const typeOf = new Map(nodes.map(n => [n.id, n.type]));
   const visited = new Set<string>();
-  const queue = [...(adjList[forEachNodeId] || [])];
+  const queue: Array<[string, number]> = (adjList[forEachNodeId] || []).map(id => [id, 0]);
 
   while (queue.length > 0) {
-    const current = queue.shift()!;
-    if (visited.has(current)) continue;
-    visited.add(current);
+    const [current, depth] = queue.shift()!;
+    const key = `${current}@${depth}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
 
-    if (nodes.find(n => n.id === current)?.type === 'forEachEnd') return current;
+    const type = typeOf.get(current);
+    let nextDepth = depth;
+    if (type === 'forEachEnd') {
+      if (depth === 0) return current;
+      nextDepth = depth - 1;
+    } else if (type === 'forEach') {
+      if (current === forEachNodeId) continue; // cycle back to itself
+      nextDepth = depth + 1;
+    }
 
     for (const next of adjList[current] || []) {
-      if (!visited.has(next)) queue.push(next);
+      if (!visited.has(`${next}@${nextDepth}`)) queue.push([next, nextDepth]);
     }
   }
   return null;
 }
 
-// Node ids strictly between a forEach and its forEachEnd (both excluded)
+// Node ids strictly between a forEach and its forEachEnd (both excluded).
+// Includes any nested loop entirely: its forEach, its body and its forEachEnd.
 export function getForEachSubgraphNodes(
   forEachNodeId: string,
   forEachEndNodeId: string,

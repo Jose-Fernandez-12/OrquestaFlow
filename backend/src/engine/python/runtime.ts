@@ -247,6 +247,10 @@ def loop(ctx, loop_fn, collect=(), alias=None):
     items = items if isinstance(items, list) else ([] if items is None else [items])
     results = []
     ran_before = set(ctx.ran)
+    # In a nested loop these keys hold the outer loop's element: they are restored at the end
+    loop_keys = [k for k in ("_item", "item", "_index", "_total", alias) if k]
+    _missing = object()
+    saved = {k: ctx.get(k, _missing) for k in loop_keys}
     ctx.depth += 1
     for index, item in enumerate(items):
         ctx.ran = set(ran_before)
@@ -262,9 +266,11 @@ def loop(ctx, loop_fn, collect=(), alias=None):
             results.extend(_merge_with_item(item, row))
 
     ctx.depth -= 1
-    for key in ("_item", "item", "_index", "_total", alias):
-        if key:
+    for key in loop_keys:
+        if saved[key] is _missing:
             ctx.pop(key, None)
+        else:
+            ctx[key] = saved[key]
     ctx.ran = ran_before
     ctx[loop_fn.node_id] = results
     ctx[loop_fn.label] = results

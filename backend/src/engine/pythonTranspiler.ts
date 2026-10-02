@@ -132,10 +132,16 @@ function analyzeGraph(nodes: any[], rawEdges: any[]): FlowGraph {
   const loops = new Map<string, LoopInfo>();
   const loopOf = new Map<string, string>();
   const endOf = new Map<string, string>();
+  const bodySize = new Map<string, number>();
   for (const fe of nodes.filter(n => n.type === 'forEach')) {
     const endId = findForEachEndNode(fe.id, adjList, nodes);
     const bodyIds = endId ? getForEachSubgraphNodes(fe.id, endId, adjList) : [];
-    bodyIds.forEach(id => loopOf.set(id, fe.id));
+    bodySize.set(fe.id, bodyIds.length);
+    // With nested loops a node belongs to the innermost one (the smallest body containing it)
+    bodyIds.forEach(id => {
+      const owner = loopOf.get(id);
+      if (owner === undefined || bodySize.get(owner)! > bodyIds.length) loopOf.set(id, fe.id);
+    });
     if (endId) endOf.set(endId, fe.id);
     const bodyNodes = nodes.filter(n => bodyIds.includes(n.id));
     const bodyEdges = edges.filter(e => bodyIds.includes(e.source) && bodyIds.includes(e.target));
@@ -220,11 +226,13 @@ function placeholders(value: unknown): string[] {
 /** Placeholders the flow itself never produces: they are asked for when the script runs */
 function externalPlaceholders(fields: unknown[], nodeId: string, g: FlowGraph): string[] {
   const upstream = upstreamIds(nodeId, g);
-  const loopId = g.loopOf.get(nodeId);
+  // Enclosing loops, innermost first: an inner step can read the element of any outer loop
+  const loopIds: string[] = [];
+  for (let id = g.loopOf.get(nodeId); id && !loopIds.includes(id); id = g.loopOf.get(id)) loopIds.push(id);
   const known = (first: string) => {
     if (['_item', '_index', '_total', 'item', 'Variables', 'variables'].includes(first)) return true;
-    if (loopId && first === loopId) return true;
-    if (loopId && first === String(g.byId.get(loopId)?.data?.itemAlias || '').trim()) return true;
+    if (loopIds.includes(first)) return true;
+    if (loopIds.some(id => first === String(g.byId.get(id)?.data?.itemAlias || '').trim())) return true;
     return g.nodes.some(n => {
       if (!upstream.has(n.id)) return false;
       if (n.id === first || String(n.data?.label || '').trim() === first) return true;
@@ -897,12 +905,12 @@ export function transpileFlowToPython(
     }
   };
 
-  for (const n of g.mainOrder) {
-    if (n.type === 'start') continue;
+  // A node is emitted at the level of its innermost loop; a nested forEach opens its own `for` block
+  const emitNode = (n: any, indent: string) => {
     const loop = n.type === 'forEach' ? g.loops.get(n.id) : undefined;
     if (!loop || !loop.endId) {
-      emitRun(n, '    ');
-      continue;
+      emitRun(n, indent);
+      return;
     }
     gen.use('loop');
     const step = gen.steps.get(n.id)!;
@@ -915,21 +923,22 @@ export function transpileFlowToPython(
       })
       .filter(Boolean);
     const guard = gen.guard(n, maybeSkipped);
-    const indent = guard ? '        ' : '    ';
-    if (guard) mainLines.push(`    ${guard}`);
+    const forIndent = guard ? `${indent}    ` : indent;
+    if (guard) mainLines.push(`${indent}${guard}`);
     const alias = String(n.data?.itemAlias || '').trim();
     const loopArgs = [
       ...(collect.length ? [`collect=[${[...new Set(collect)].join(', ')}]`] : []),
       ...(alias ? [`alias=${pyStr(alias)}`] : []),
     ];
-    mainLines.push(`${indent.slice(4)}    for _ in loop(ctx, ${[step.fn, ...loopArgs].join(', ')}):`);
-    if (loop.body.length === 0) mainLines.push(`${indent}    pass`);
-    for (const b of loop.body) {
-      if (b.type === 'forEach') {
-        mainLines.push(`${indent}    # Bucle anidado '${pyComment(gen.label(b))}': no soportado en la exportación`);
-      }
-      emitRun(b, `${indent}    `);
-    }
+    mainLines.push(`${forIndent}for _ in loop(ctx, ${[step.fn, ...loopArgs].join(', ')}):`);
+    const ownBody = loop.body.filter(b => g.loopOf.get(b.id) === n.id);
+    if (ownBody.length === 0) mainLines.push(`${forIndent}    pass`);
+    for (const b of ownBody) emitNode(b, `${forIndent}    `);
+  };
+
+  for (const n of g.mainOrder) {
+    if (n.type === 'start') continue;
+    emitNode(n, '    ');
   }
 
   const startIds = nodes.filter(n => n.type === 'start').map(n => n.id);
@@ -939,7 +948,11 @@ export function transpileFlowToPython(
 
   // ── Assemble the script ──
   const now = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
-  const indentOf = (s: StepInfo) => (g.loopOf.has(s.node.id) ? '   ' : '');
+  const indentOf = (s: StepInfo) => {
+    let depth = 0;
+    for (let id = g.loopOf.get(s.node.id); id && depth < 20; id = g.loopOf.get(id)) depth++;
+    return '   '.repeat(depth);
+  };
   const width = Math.min(48, Math.max(...steps.map(s => (indentOf(s) + gen.label(s.node)).length), 10) + 2);
   const stepList = steps.map(s => {
     return `    ${String(s.number).padStart(2)}. ${(indentOf(s) + gen.label(s.node) + ' ').padEnd(width, '.')} ${s.kind}`;

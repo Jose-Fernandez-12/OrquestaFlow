@@ -91,6 +91,106 @@ describe('executeFlowEngine · forEach loop', () => {
   });
 });
 
+describe('executeFlowEngine · nested forEach loops', () => {
+  // Per station (EDS), one request per fleet of that station
+  const estaciones = [
+    { Eds: 'AMERICAS', IdEds: 2015, flotas: [{ id: 47092 }, { id: 47095 }] },
+    { Eds: 'SUBA', IdEds: 2016, flotas: [{ id: 47096 }] },
+  ];
+  const nestedFlow = (afterInner: any[] = [], afterInnerEdges: any[] = []) => ({
+    nodes: [
+      list('estaciones', estaciones),
+      { id: 'porEds', type: 'forEach', data: { label: 'porEds', iterateOver: '{{estaciones}}', itemAlias: 'eds' } },
+      { id: 'porFlota', type: 'forEach', data: { label: 'porFlota', iterateOver: '{{_item.flotas}}' } },
+      http('reporte', {
+        method: 'POST',
+        body: JSON.stringify({ idEds: '{{eds.IdEds}}', idFlota: '{{_item.id}}' }),
+      }),
+      { id: 'finFlota', type: 'forEachEnd', data: { label: 'finFlota' } },
+      ...afterInner,
+      { id: 'finEds', type: 'forEachEnd', data: { label: 'finEds' } },
+    ],
+    edges: [
+      edge('estaciones', 'porEds'),
+      edge('porEds', 'porFlota'),
+      edge('porFlota', 'reporte'),
+      edge('reporte', 'finFlota'),
+      ...(afterInnerEdges.length ? afterInnerEdges : [edge('finFlota', 'finEds')]),
+    ],
+  });
+
+  const mockReports = () => {
+    const fetchMock = vi.fn(async (_url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      return jsonResponse({ archivo: `reporte_${body.idEds}_${body.idFlota}.xlsx` });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  };
+
+  it('runs the inner loop for each element of the outer one', async () => {
+    const fetchMock = mockReports();
+    const { nodes, edges } = nestedFlow();
+    const { context, trace } = await runFlow(nodes, edges);
+
+    const sent = fetchMock.mock.calls.map(([, init]: any) => JSON.parse(init.body));
+    expect(sent).toEqual([
+      { idEds: 2015, idFlota: 47092 },
+      { idEds: 2015, idFlota: 47095 },
+      { idEds: 2016, idFlota: 47096 },
+    ]);
+    expect(trace.find(t => t.nodeId === 'reporte')?.runs).toBe(3);
+    // The outer end collects every inner row, each with its station and fleet
+    expect(context.finEds.map((r: any) => [r.Eds, r.id, r.archivo])).toEqual([
+      ['AMERICAS', 47092, 'reporte_2015_47092.xlsx'],
+      ['AMERICAS', 47095, 'reporte_2015_47095.xlsx'],
+      ['SUBA', 47096, 'reporte_2016_47096.xlsx'],
+    ]);
+  });
+
+  it('keeps the outer element available after the inner loop ends', async () => {
+    mockReports();
+    const { nodes, edges } = nestedFlow(
+      [transform('resumen', 'return { eds: item.Eds, reportes: {{finFlota}}.length };')],
+      [edge('finFlota', 'resumen'), edge('resumen', 'finEds')]
+    );
+    const { context } = await runFlow(nodes, edges);
+    expect(context.finEds.map((r: any) => [r.eds, r.reportes])).toEqual([
+      ['AMERICAS', 2],
+      ['SUBA', 1],
+    ]);
+  });
+
+  it('sends a mapped list or object as real JSON inside the body', async () => {
+    const fetchMock = mockReports();
+    await runFlow(
+      [
+        list('flotas', [{ id: 47092, nombreCompleto: 'CAPITALBUS' }]),
+        http('reporte', {
+          method: 'POST',
+          body: JSON.stringify({ idEds: 1, idFlota: '{{flotas}}', nota: 'flota {{flotas.nombreCompleto}}' }),
+        }),
+      ],
+      [edge('flotas', 'reporte')]
+    );
+    const [, init] = fetchMock.mock.calls[0] as any;
+    expect(JSON.parse(init.body)).toEqual({
+      idEds: 1,
+      idFlota: [{ id: 47092, nombreCompleto: 'CAPITALBUS' }],
+      nota: 'flota CAPITALBUS',
+    });
+  });
+
+  it('runs an outer element whose inner list is empty', async () => {
+    const fetchMock = mockReports();
+    const { nodes, edges } = nestedFlow();
+    nodes[0] = list('estaciones', [{ Eds: 'VACIA', IdEds: 1, flotas: [] }, estaciones[1]]);
+    const { context } = await runFlow(nodes, edges);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(context.finEds.map((r: any) => r.Eds)).toEqual(['VACIA', 'SUBA']);
+  });
+});
+
 describe('executeFlowEngine · retries', () => {
   it('retries an HTTP request that fails with 503 and succeeds', async () => {
     const fetchMock = vi.fn()
