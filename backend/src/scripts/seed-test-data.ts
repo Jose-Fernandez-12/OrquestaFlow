@@ -114,6 +114,32 @@ sys.exit(1)
 `,
   },
   {
+    file: 'test_pide_datos.py',
+    code: `"""Pide datos con input(): para probar la entrada desde la consola de Scripts."""
+nombre = input("¿Cómo te llamas? ")
+a = float(input("Primer número: "))
+b = float(input("Segundo número: "))
+print(f"Hola {nombre}, la suma es {a + b:g}")
+`,
+  },
+  {
+    file: 'test_pide_datos_node.js',
+    code: `// Igual que test_pide_datos.py pero en Node (readline), por si el servidor no tiene Python
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const ask = q => new Promise(resolve => rl.question(q, resolve));
+
+(async () => {
+  const nombre = await ask('¿Cómo te llamas? ');
+  const a = Number(await ask('Primer número: '));
+  const b = Number(await ask('Segundo número: '));
+  console.log(\`Hola \${nombre}, la suma es \${a + b}\`);
+  rl.close();
+  process.stdin.destroy(); // con la entrada en tubería, Node no termina hasta cerrarla
+})();
+`,
+  },
+  {
     file: 'test_lento.py',
     code: `"""Espera N segundos (arg 1, por defecto 90): para probar el timeout y el botón de detener."""
 import sys

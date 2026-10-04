@@ -1,46 +1,25 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { fetchScripts, executeScript } from '../../store/scriptSlice';
-import { Play, Code, Upload, Terminal, AlertCircle, CheckCircle2, Loader2, Calendar } from 'lucide-react';
+import { fetchScripts, type Script } from '../../store/scriptSlice';
+import { Play, Code, Upload, AlertCircle, CheckCircle2, Loader2, Calendar, FileCode2 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Card } from '../ui/card';
 import { Input } from '../ui/input';
-import { cn } from '../../lib/utils';
 import { getApiUrl } from '../../lib/api';
+import { ScriptConsoleModal } from './ScriptConsoleModal';
 
 export function ScriptsView() {
   const dispatch = useAppDispatch();
-  const { scripts, activeCount, executedToday, loading, executingId } = useAppSelector(state => state.scripts);
+  const { scripts, activeCount, executedToday, loading } = useAppSelector(state => state.scripts);
 
   const [filterText, setFilterText] = useState('');
   const [uploading, setUploading] = useState(false);
-  const [runLog, setRunLog] = useState<{ [id: string]: { success: boolean; output: string } }>({});
+  const [consoleFor, setConsoleFor] = useState<{ script: Script; autoRun: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     dispatch(fetchScripts());
   }, [dispatch]);
-
-  const handleRunScript = async (id: string) => {
-    try {
-      const res = await dispatch(executeScript(id)).unwrap();
-      setRunLog(prev => ({
-        ...prev,
-        [id]: {
-          success: res.result.success,
-          output: res.result.output || res.result.message || 'Script ejecutado sin logs de salida.'
-        }
-      }));
-    } catch (err: any) {
-      setRunLog(prev => ({
-        ...prev,
-        [id]: {
-          success: false,
-          output: err.message || 'Error al ejecutar'
-        }
-      }));
-    }
-  };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -139,9 +118,6 @@ export function ScriptsView() {
         ) : (
           <div className="grid grid-cols-2 gap-4">
             {filteredScripts.map(script => {
-              const isExecuting = executingId === script.id;
-              const log = runLog[script.id];
-
               return (
                 <Card key={script.id} className="p-5 flex flex-col justify-between gap-4">
                   <div>
@@ -163,32 +139,37 @@ export function ScriptsView() {
                     </div>
                   </div>
 
-                  {/* Terminal Log Output if executed */}
-                  {log && (
-                    <div className="bg-fg text-surface text-xs font-mono p-3 rounded border border-border overflow-x-auto max-h-[120px] flex flex-col gap-1">
-                      <div className={cn("font-semibold flex items-center gap-1.5", log.success ? "text-success" : "text-danger")}>
-                        {log.success ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
-                        {log.success ? 'Ejecución exitosa' : 'Ejecución fallida'}
-                      </div>
-                      <pre className="whitespace-pre-wrap opacity-80 mt-1 leading-normal">{log.output}</pre>
-                    </div>
-                  )}
-
-                  <div className="border-t border-border pt-4 flex items-center justify-between text-xs text-muted mt-auto">
-                    <span>
-                      Última ejecución:{' '}
-                      {script.last_run_at ? new Date(script.last_run_at).toLocaleString() : 'Nunca'}
+                  <div className="border-t border-border pt-4 flex items-center justify-between gap-2 text-xs text-muted mt-auto">
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      {script.last_run_status === 'completed' && <CheckCircle2 size={12} className="text-success shrink-0" />}
+                      {script.last_run_status && script.last_run_status !== 'completed' && <AlertCircle size={12} className="text-danger shrink-0" />}
+                      <span className="truncate">
+                        Última ejecución:{' '}
+                        {script.last_run_at ? new Date(script.last_run_at).toLocaleString() : 'Nunca'}
+                      </span>
                     </span>
-                    <Button
-                      variant="default"
-                      size="sm"
-                      onClick={() => handleRunScript(script.id)}
-                      disabled={isExecuting}
-                      className="gap-2 h-8"
-                    >
-                      {isExecuting ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-                      Ejecutar
-                    </Button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConsoleFor({ script, autoRun: false })}
+                        className="gap-2 h-8"
+                        title="Ver el código y la consola sin ejecutar"
+                      >
+                        <FileCode2 size={12} />
+                        Ver código
+                      </Button>
+                      <Button
+                        variant="default"
+                        size="sm"
+                        onClick={() => setConsoleFor({ script, autoRun: true })}
+                        className="gap-2 h-8"
+                        title="Ejecutar en la consola interactiva"
+                      >
+                        <Play size={12} />
+                        Ejecutar
+                      </Button>
+                    </div>
                   </div>
                 </Card>
               );
@@ -196,6 +177,15 @@ export function ScriptsView() {
           </div>
         )}
       </div>
+
+      {consoleFor && (
+        <ScriptConsoleModal
+          script={consoleFor.script}
+          autoRun={consoleFor.autoRun}
+          onClose={() => setConsoleFor(null)}
+          onFinished={() => dispatch(fetchScripts())}
+        />
+      )}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { getDb, closeDb } from './db/database.js';
 import { closeAllMssqlPools } from './engine/mssql.js';
 import { stopAllSchedulerJobs } from './engine/scheduler.js';
+import { stopAllScriptRuns } from './engine/scriptRunner.js';
 import { flowRoutes } from './routes/flows.js';
 import { queryRoutes } from './routes/queries.js';
 import { connectionRoutes } from './routes/connections.js';
@@ -101,6 +102,7 @@ async function start(): Promise<void> {
       app.log.info(`Received ${signal}, shutting down gracefully...`);
       try {
         stopAllSchedulerJobs();
+        stopAllScriptRuns();
         await closeAllMssqlPools();
         closeDb();
         await app.close();

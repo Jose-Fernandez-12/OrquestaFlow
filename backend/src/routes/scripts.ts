@@ -3,6 +3,10 @@ import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import {
+  startScriptRun, sendScriptInput, stopScriptRun, getScriptRun, getLatestScriptRun,
+  serializeRun, readScriptContent, scriptLanguage,
+} from '../engine/scriptRunner.js';
 
 export async function scriptRoutes(app: FastifyInstance): Promise<void> {
   // List all scripts
@@ -31,6 +35,17 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     return { data: script };
   });
 
+  // Source code of the script (read-only)
+  app.get<{ Params: { id: string } }>('/:id/content', async (request, reply) => {
+    const script = getDb().prepare('SELECT * FROM scripts WHERE id = ?').get(request.params.id) as any;
+    if (!script) return reply.status(404).send({ error: 'Script not found' });
+    try {
+      return { data: readScriptContent(script.file_path) };
+    } catch (err: any) {
+      return reply.status(404).send({ error: err.message });
+    }
+  });
+
   // Upload script
   const handleUpload = async (request: any, reply: any) => {
     const data = await request.file();
@@ -51,7 +66,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     db.prepare(`
       INSERT INTO scripts (id, name, description, file_path, language)
       VALUES (?, ?, ?, ?, ?)
-    `).run(id, name, '', `scripts/${fileName}`, 'python');
+    `).run(id, name, '', `scripts/${fileName}`, scriptLanguage(fileName));
 
     const script = db.prepare('SELECT * FROM scripts WHERE id = ?').get(id);
     return { data: script };
@@ -86,82 +101,71 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     return { data: script };
   });
 
-  // Execute script
+  // Execute script and wait for it to finish (no input: stdin is closed right away)
   app.post<{
     Params: { id: string };
     Body: { args?: string[] }
   }>('/:id/execute', async (request, reply) => {
-    const db = getDb();
-    const script = db.prepare('SELECT * FROM scripts WHERE id = ?').get(request.params.id) as Record<string, unknown> | undefined;
+    const script = getDb().prepare('SELECT * FROM scripts WHERE id = ?').get(request.params.id) as any;
     if (!script) return reply.status(404).send({ error: 'Script not found' });
 
-    const logId = uuid();
-    db.prepare(`
-      INSERT INTO execution_logs (id, target_type, target_id, status)
-      VALUES (?, 'script', ?, 'running')
-    `).run(logId, request.params.id);
-
-    const pythonPath = process.env.PYTHON_PATH || 'python';
-    const scriptPath = join(process.cwd(), 'uploads', script.file_path as string);
-    const args = request.body.args || [];
-
+    let run;
     try {
-      const { execFile } = await import('child_process');
-      const { promisify } = await import('util');
-      const execFileAsync = promisify(execFile);
+      run = await startScriptRun(script, { args: request.body?.args }).done;
+    } catch (err: any) {
+      return reply.status(404).send({ error: err.message });
+    }
+    const stdout = run.output.filter(c => c.stream === 'stdout').map(c => c.text).join('');
+    const stderr = run.output.filter(c => c.stream === 'stderr' || c.stream === 'system').map(c => c.text).join('');
+    const duration = (run.finishedAt ?? Date.now()) - run.startedAt;
 
-      let scriptTimeoutMs = 60000;
-      try {
-        const row = db.prepare("SELECT value FROM system_settings WHERE key = 'script_timeout_seconds'").get() as any;
-        if (row?.value) {
-          const s = parseInt(row.value, 10);
-          if (!isNaN(s) && s > 0) scriptTimeoutMs = s * 1000;
-        }
-      } catch {}
-
-      const startTime = Date.now();
-      const result = await execFileAsync(pythonPath, [scriptPath, ...args], {
-        timeout: scriptTimeoutMs,
-        maxBuffer: 10 * 1024 * 1024 // 10MB output
-      });
-      const duration = Date.now() - startTime;
-
-      db.prepare(`
-        UPDATE execution_logs
-        SET status = 'completed', duration_ms = ?, completed_at = datetime('now'),
-            result = ?
-        WHERE id = ?
-      `).run(duration, JSON.stringify({ stdout: result.stdout, stderr: result.stderr }), logId);
-
-      db.prepare("UPDATE scripts SET last_run_at = datetime('now'), last_run_status = 'completed' WHERE id = ?")
-        .run(request.params.id);
-
-      return {
-        data: {
-          logId,
-          status: 'completed',
-          duration,
-          stdout: result.stdout,
-          stderr: result.stderr
-        }
-      };
-    } catch (err: unknown) {
-      const error = err as Error & { stdout?: string; stderr?: string };
-      db.prepare(`
-        UPDATE execution_logs
-        SET status = 'error', completed_at = datetime('now'), error_message = ?
-        WHERE id = ?
-      `).run(error.message, logId);
-
-      db.prepare("UPDATE scripts SET last_run_at = datetime('now'), last_run_status = 'error' WHERE id = ?")
-        .run(request.params.id);
-
+    if (run.status !== 'completed') {
       return reply.status(500).send({
         error: 'Script execution failed',
-        message: error.message,
-        stdout: error.stdout || '',
-        stderr: error.stderr || ''
+        message: run.status === 'timeout' ? 'Tiempo límite superado' : `El script terminó con código ${run.exitCode}`,
+        stdout,
+        stderr
       });
     }
+    return { data: { logId: run.logId, status: 'completed', duration, stdout, stderr } };
+  });
+
+  // Start an interactive run: output arrives over Socket.IO ('script-output' / 'script-exit').
+  // The client may choose the runId so it can listen before the first line is printed.
+  app.post<{ Params: { id: string }; Body: { args?: string[]; runId?: string } }>('/:id/runs', async (request, reply) => {
+    const script = getDb().prepare('SELECT * FROM scripts WHERE id = ?').get(request.params.id) as any;
+    if (!script) return reply.status(404).send({ error: 'Script not found' });
+    try {
+      const run = startScriptRun(script, { args: request.body?.args, runId: request.body?.runId, interactive: true });
+      return { data: serializeRun(run) };
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message });
+    }
+  });
+
+  // Latest run of the script still in memory, to reattach a console opened mid-run
+  app.get<{ Params: { id: string } }>('/:id/runs/latest', async (request) => {
+    const run = getLatestScriptRun(request.params.id);
+    return { data: run ? serializeRun(run) : null };
+  });
+
+  app.get<{ Params: { runId: string } }>('/runs/:runId', async (request, reply) => {
+    const run = getScriptRun(request.params.runId);
+    if (!run) return reply.status(404).send({ error: 'Ejecución no encontrada' });
+    return { data: serializeRun(run) };
+  });
+
+  // Write a line to the script's stdin; eof closes it (like Ctrl+D in a terminal)
+  app.post<{ Params: { runId: string }; Body: { text?: string; eof?: boolean } }>('/runs/:runId/input', async (request, reply) => {
+    try {
+      sendScriptInput(request.params.runId, String(request.body?.text ?? ''), Boolean(request.body?.eof));
+      return { data: { ok: true } };
+    } catch (err: any) {
+      return reply.status(409).send({ error: err.message });
+    }
+  });
+
+  app.post<{ Params: { runId: string } }>('/runs/:runId/stop', async (request) => {
+    return { data: { stopped: stopScriptRun(request.params.runId) } };
   });
 }
