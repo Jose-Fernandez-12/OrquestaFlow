@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint src/",
+    "seed:test": "tsx src/scripts/seed-test-flows.ts",
+    "seed:data": "tsx src/scripts/seed-test-data.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
