@@ -6,7 +6,7 @@ import path from 'path';
 import JSZip from 'jszip';
 import { v4 as uuid } from 'uuid';
 import { getIo } from '../socket.js';
-import { runtimePaths, uvEnv, configuredPythonVersion, refreshEnvironment, type PythonEnvStatus } from './environment.js';
+import { runtimePaths, uvEnv, configuredPythonVersion, refreshEnvironment, stripAnsi, type PythonEnvStatus } from './environment.js';
 import { requirementName } from './pep723.js';
 
 /**
@@ -191,7 +191,8 @@ export function startEnvJob(
   jobs.set(job.jobId, job);
   activeJob = job;
 
-  const push = (stream: EnvJob['output'][number]['stream'], text: string) => {
+  const push = (stream: EnvJob['output'][number]['stream'], raw: string) => {
+    const text = stripAnsi(raw);
     if (!text) return;
     const chunk = { stream, text, ts: Date.now() };
     job.output.push(chunk);

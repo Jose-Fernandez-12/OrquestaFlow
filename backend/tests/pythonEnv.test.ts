@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseScriptMetadata, writeScriptMetadata, parseRequirementsText, pythonSatisfies, detectImports, moduleToPackage, requirementName } from '../src/engine/python/pep723';
-import { parseDryRun, decideEnvironment, depsHash, summarizeScriptEnvironment } from '../src/engine/python/scriptEnv';
+import { parseDryRun, decideEnvironment, depsHash, summarizeScriptEnvironment, missingPackages } from '../src/engine/python/scriptEnv';
 import { resolveInterpreter, runtimePaths, PythonNotReadyError, type PythonEnvStatus } from '../src/engine/python/environment';
 import { buildSetupSteps, uvAssetName, validateRequirementSpec, withRequirement, withoutRequirement } from '../src/engine/python/setup';
 
@@ -259,5 +259,16 @@ describe('parseRequirementsText', () => {
       'mipaquete @ https://x.org/mipaquete-1.0.whl',
     ]);
     expect(ignored.map(i => i.line)).toEqual(['-r otros.txt', '--index-url https://interno/simple', './libs/propia', 'https://x.org/paquete.whl']);
+  });
+});
+
+describe('uv output with colors', () => {
+  it('reads dry-run output that carries ANSI codes (FORCE_COLOR under concurrently)', () => {
+    const colored = '\x1b[2mResolved \x1b[1m1 package\x1b[0m\x1b[0m\n \x1b[32m+\x1b[39m \x1b[1mtabulate\x1b[0m\x1b[2m==0.10.0\x1b[0m\n';
+    expect(parseDryRun(colored, 0)).toEqual({ ok: true, installs: ['tabulate==0.10.0'], removals: [] });
+  });
+
+  it('lists declared packages that did not get installed', () => {
+    expect(missingPackages(['tabulate>=0.9', 'Rich', 'colorama; sys_platform == "win32"'], { rich: '13.0' })).toEqual(['tabulate']);
   });
 });

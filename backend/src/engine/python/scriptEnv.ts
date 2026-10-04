@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { getDb } from '../../db/database.js';
-import { runtimePaths, uvEnv, runCommand, refreshEnvironment, configuredPythonVersion, type PythonEnvStatus } from './environment.js';
+import { runtimePaths, uvEnv, runCommand, refreshEnvironment, configuredPythonVersion, stripAnsi, type PythonEnvStatus } from './environment.js';
 import { parseScriptMetadata, pythonSatisfies, requirementName, normalizePackageName, type ScriptMetadata } from './pep723.js';
 import { startEnvJob, type EnvJob } from './setup.js';
 
@@ -54,7 +54,8 @@ export function scriptEnvPaths(scriptId: string, paths = runtimePaths()) {
 export interface DryRunResult { ok: boolean; installs: string[]; removals: string[]; error?: string }
 
 /** Reads `uv pip install --dry-run` output: " + name==1.0" would be installed, " - name==0.9" removed */
-export function parseDryRun(output: string, exitCode: number | null): DryRunResult {
+export function parseDryRun(rawOutput: string, exitCode: number | null): DryRunResult {
+  const output = stripAnsi(rawOutput);
   const installs: string[] = [];
   const removals: string[] = [];
   for (const line of output.split(/\r?\n/)) {
@@ -150,6 +151,11 @@ export function scriptInterpreterEnv(scriptId: string | undefined, code: string)
 
 // ── preparing ──
 
+/** Declared packages that are not installed (entries with an environment marker are skipped: they may not apply) */
+export function missingPackages(dependencies: string[], resolved: Record<string, string>): string[] {
+  return dependencies.filter(d => !d.includes(';')).map(requirementName).filter(name => !(name in resolved));
+}
+
 function saveState(scriptId: string, state: ScriptEnvState | null) {
   getDb().prepare('UPDATE scripts SET env_state = ? WHERE id = ?').run(state ? JSON.stringify(state) : null, scriptId);
 }
@@ -216,7 +222,16 @@ export function prepareScriptEnvironment(script: { id: string; name?: string; fi
           log('El script vuelve al entorno compartido: se elimina su entorno propio.\n');
           fs.rmSync(own.dir, { recursive: true, force: true });
         }
-        const resolved = await installedVersions(uv, paths.venvPython, names);
+        let resolved = await installedVersions(uv, paths.venvPython, names);
+        // Never report ready with a declared package missing (e.g. if uv's report could not be read)
+        const missing = missingPackages(metadata.dependencies, resolved);
+        if (missing.length) {
+          log(`Faltan en el entorno compartido (${missing.join(', ')}): se instalan.\n`);
+          await run(uv, ['pip', 'install', '-r', reqFile, '--python', paths.venvPython]);
+          resolved = await installedVersions(uv, paths.venvPython, names);
+          const still = missingPackages(metadata.dependencies, resolved);
+          if (still.length) throw new Error(`No se pudieron instalar: ${still.join(', ')}`);
+        }
         saveState(script.id, { mode: 'compartido', hash, resolved, reason: null, pythonVersion: status.venv.version, preparedAt: Date.now() });
         log('\nListo: el script usa el entorno compartido.\n');
         return;
@@ -228,6 +243,8 @@ export function prepareScriptEnvironment(script: { id: string; name?: string; fi
       await run(uv, ['pip', 'install', '-r', reqFile, '--python', own.python]);
       const v = await runCommand(own.python, ['--version']);
       const resolved = await installedVersions(uv, own.python, names);
+      const missing = missingPackages(metadata.dependencies, resolved);
+      if (missing.length) throw new Error(`No se pudieron instalar en su entorno: ${missing.join(', ')}`);
       saveState(script.id, {
         mode: 'propio', hash, resolved, reason: decision.reason,
         pythonVersion: (v.stdout + v.stderr).match(/(\d+\.\d+\.\d+)/)?.[1] || python,

@@ -37,6 +37,7 @@ export function ScriptDependenciesTab({ scriptId, refreshKey, busy, onPrepare, o
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [replaceOnImport, setReplaceOnImport] = useState(false);
+  const [editingPython, setEditingPython] = useState(false);
   const [ignored, setIgnored] = useState<Array<{ line: string; reason: string }>>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -228,20 +229,33 @@ export function ScriptDependenciesTab({ scriptId, refreshKey, busy, onPrepare, o
         </div>
       )}
 
-      <div className="space-y-1">
-        <div className="font-semibold text-fg">Versión de Python (opcional)</div>
-        <div className="flex items-center gap-2">
-          <Input value={python} onChange={e => setPython(e.target.value)} placeholder={`>=3.11  (vacío = la del entorno base${info.sharedPythonVersion ? `, ${info.sharedPythonVersion}` : ''})`} className="h-8 min-h-0 text-xs font-mono flex-1" disabled={saving} />
-          <Button variant="default" size="sm" onClick={() => save(deps, python.trim())} disabled={saving || python.trim() === (info.requiresPython || '')} className="h-8 min-h-0 text-xs">
-            Guardar
-          </Button>
+      {/* Python version: only shown when the script asks for one or the user wants to change it */}
+      {info.requiresPython || editingPython ? (
+        <div className="space-y-1">
+          <div className="font-semibold text-fg">Versión de Python</div>
+          <div className="flex items-center gap-2">
+            <Input value={python} onChange={e => setPython(e.target.value)} placeholder=">=3.11" className="h-8 min-h-0 text-xs font-mono flex-1" disabled={saving} autoFocus={editingPython} />
+            <Button variant="default" size="sm" onClick={async () => { if (await save(deps, python.trim())) setEditingPython(false); }} disabled={saving || python.trim() === (info.requiresPython || '')} className="h-8 min-h-0 text-xs">
+              Guardar
+            </Button>
+            {info.requiresPython ? (
+              <Button variant="ghost" size="sm" onClick={async () => { setPython(''); if (await save(deps, '')) setEditingPython(false); }} disabled={saving} className="h-8 min-h-0 text-xs">
+                Usar la del entorno base
+              </Button>
+            ) : (
+              <Button variant="ghost" size="sm" onClick={() => { setPython(''); setEditingPython(false); }} className="h-8 min-h-0 text-xs">Cancelar</Button>
+            )}
+          </div>
+          <p className="text-[11px] text-muted">Una versión distinta de la del entorno base ({info.sharedPythonVersion || '—'}) hace que el script tenga su propio entorno.</p>
         </div>
-      </div>
+      ) : (
+        <div className="text-[11px] text-muted">
+          Python {info.sharedPythonVersion || 'del entorno base'} ·{' '}
+          <button type="button" onClick={() => setEditingPython(true)} className="text-accent hover:underline">usar otra versión</button>
+        </div>
+      )}
 
       {message && <p className="text-muted whitespace-pre-wrap break-words">{message}</p>}
-      <p className="text-[11px] text-muted leading-relaxed">
-        La lista se guarda en la cabecera <code className="font-mono"># /// script</code> del archivo (estándar PEP 723), así viaja con el script.
-      </p>
     </div>
   );
 }

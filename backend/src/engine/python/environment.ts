@@ -37,10 +37,17 @@ export function uvEnv(paths = runtimePaths()): Record<string, string> {
     UV_PYTHON_INSTALL_DIR: paths.pythonInstalls,
     UV_PYTHON_PREFERENCE: 'managed',
     UV_NO_PROGRESS: '1',
+    // Plain output: the dev server runs under concurrently, which sets FORCE_COLOR, and the ANSI codes
+    // would break parsing uv's output (an empty FORCE_COLOR counts as unset)
+    NO_COLOR: '1',
+    FORCE_COLOR: '',
     PYTHONUNBUFFERED: '1',
     PYTHONIOENCODING: 'utf-8',
   };
 }
+
+/** Removes ANSI color/style codes from command output */
+export const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
 export function configuredPythonVersion(): string {
   const version = String(getSystemSettingsFromDb().python_version || '').trim();
