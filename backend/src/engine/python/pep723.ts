@@ -1,4 +1,4 @@
-import { parse as parseToml } from 'smol-toml';
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
 /**
  * Inline script metadata (PEP 723): a script may declare its own dependencies in a comment block
@@ -48,6 +48,100 @@ export function parseScriptMetadata(code: string): MetadataResult {
     return { ok: false, error: '"requires-python" debe ser un texto, p. ej. ">=3.11".' };
   }
   return { ok: true, metadata: { dependencies: deps.map((d: string) => d.trim()).filter(Boolean), requiresPython: data['requires-python'] } };
+}
+
+/**
+ * Returns the code with its "# /// script" block set to these dependencies (other keys of an existing
+ * block are kept). With no dependencies and no requires-python the block is removed.
+ */
+export function writeScriptMetadata(code: string, metadata: ScriptMetadata): string {
+  const source = String(code || '');
+  const eol = source.includes('\r\n') ? '\r\n' : '\n';
+  const match = [...source.matchAll(BLOCK_RE)].find(m => m[1] === 'script');
+
+  let extra: Record<string, unknown> = {};
+  if (match) {
+    const parsed = parseScriptMetadata(source);
+    if (!parsed.ok) throw new Error(parsed.error);
+    try {
+      const toml = match[2].split(/\r?\n/).map(l => (l.startsWith('# ') ? l.slice(2) : l.slice(1))).join('\n');
+      const { dependencies: _d, 'requires-python': _r, ...rest } = parseToml(toml) as Record<string, unknown>;
+      extra = rest;
+    } catch { /* validated above */ }
+  }
+
+  const deps = metadata.dependencies.map(d => d.trim()).filter(Boolean);
+  const requires = metadata.requiresPython?.trim();
+  const empty = deps.length === 0 && !requires && Object.keys(extra).length === 0;
+
+  let block = '';
+  if (!empty) {
+    const data: Record<string, unknown> = {};
+    if (requires) data['requires-python'] = requires;
+    data.dependencies = deps;
+    Object.assign(data, extra);
+    const body = stringifyToml(data).trim().split('\n').map(l => (l ? `# ${l}` : '#'));
+    block = ['# /// script', ...body, '# ///'].join(eol);
+  }
+
+  if (match) {
+    const start = match.index!;
+    let end = start + match[0].length;
+    if (!block) {
+      // Drop the line break after the removed block and a blank line that only separated it
+      const after = source.slice(end).match(/^(\r?\n){1,2}/);
+      if (after) end += after[0].length;
+    }
+    return source.slice(0, start) + block + source.slice(end);
+  }
+  if (!block) return source;
+
+  // After a shebang / encoding line, which must stay first
+  const lines = source.split(/\r?\n/);
+  let insertAt = 0;
+  while (insertAt < lines.length && insertAt < 2 && /^#(!|.*coding[:=])/.test(lines[insertAt])) insertAt++;
+  const head = lines.slice(0, insertAt);
+  const rest = lines.slice(insertAt);
+  return [...head, block, ...(rest.length && rest[0].trim() !== '' ? [''] : []), ...rest].join(eol);
+}
+
+function versionTuple(v: string): number[] {
+  return v.split('.').map(n => parseInt(n, 10) || 0);
+}
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/** Whether a Python version such as "3.12.7" satisfies a requires-python specifier like ">=3.11,<3.14" */
+export function pythonSatisfies(version: string, spec: string | undefined): boolean {
+  if (!spec || !spec.trim()) return true;
+  const v = versionTuple(version);
+  return spec.split(',').map(s => s.trim()).filter(Boolean).every(clause => {
+    const m = clause.match(/^(~=|===|==|!=|<=|>=|<|>)\s*([\d.]+)(\.\*)?$/);
+    if (!m) return false;
+    const [, op, raw, wildcard] = m;
+    const target = versionTuple(raw);
+    const prefixMatch = () => target.every((n, i) => v[i] === n);
+    switch (op) {
+      case '==': case '===': return wildcard ? prefixMatch() : compareVersions(v, target) === 0;
+      case '!=': return wildcard ? !prefixMatch() : compareVersions(v, target) !== 0;
+      case '>=': return compareVersions(v, target) >= 0;
+      case '<=': return compareVersions(v, target) <= 0;
+      case '>': return compareVersions(v, target) > 0;
+      case '<': return compareVersions(v, target) < 0;
+      case '~=': {
+        // ~=3.11 → >=3.11, ==3.*   ~=3.11.2 → >=3.11.2, ==3.11.*
+        if (target.length < 2 || compareVersions(v, target) < 0) return false;
+        return target.slice(0, -1).every((n, i) => v[i] === n);
+      }
+      default: return false;
+    }
+  });
 }
 
 /** Top-level module names imported by the script (relative imports and docstrings ignored) */

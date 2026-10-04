@@ -137,7 +137,7 @@ export class PythonNotReadyError extends Error {
   }
 }
 
-export type InterpreterMode = 'aislado' | 'manual' | 'compartido' | 'sistema';
+export type InterpreterMode = 'propio' | 'manual' | 'compartido' | 'sistema';
 
 export interface ResolvedInterpreter {
   command: string;
@@ -161,10 +161,12 @@ function statusFromDisk(paths: ReturnType<typeof runtimePaths>): PythonEnvStatus
   };
 }
 
+const PENDING_NOTICE = 'Las dependencias del script cambiaron o aún no se han preparado: pulsa «Preparar entorno» en su pestaña Dependencias.';
+
 /**
  * Picks how to run a Python script:
- *   1. it declares dependencies (PEP 723) and uv is available → uv run --script (isolated)
- *   2. PYTHON_PATH is set → that interpreter
+ *   1. PYTHON_PATH is set → that interpreter
+ *   2. the script has its own environment (see scriptEnv.ts) → its python
  *   3. the shared venv exists → its python
  *   4. a system Python 3 → that one
  * and otherwise throws PythonNotReadyError.
@@ -172,7 +174,13 @@ function statusFromDisk(paths: ReturnType<typeof runtimePaths>): PythonEnvStatus
 export function resolveInterpreter(
   scriptPath: string,
   code: string,
-  options: { status?: PythonEnvStatus | null; env?: NodeJS.ProcessEnv; pythonVersion?: string; paths?: ReturnType<typeof runtimePaths> } = {}
+  options: {
+    status?: PythonEnvStatus | null;
+    env?: NodeJS.ProcessEnv;
+    paths?: ReturnType<typeof runtimePaths>;
+    /** From scriptInterpreterEnv(): the script's own venv and whether its dependencies must be prepared */
+    scriptEnv?: { python?: string; pending: boolean } | null;
+  } = {}
 ): ResolvedInterpreter {
   const paths = options.paths || runtimePaths();
   const status = options.status ?? cached ?? statusFromDisk(paths);
@@ -182,22 +190,10 @@ export function resolveInterpreter(
   const parsed = parseScriptMetadata(code);
   if (!parsed.ok) throw new Error(parsed.error);
   const metadata = parsed.metadata;
-
-  if (metadata && status.uv) {
-    // requires-python in the script wins over the configured version
-    const python = pythonPath || (metadata.requiresPython ? null : options.pythonVersion || configuredPythonVersion());
-    return {
-      command: status.uv.path,
-      args: ['run', '--script', '--quiet', ...(python ? ['--python', python] : []), scriptPath],
-      env,
-      mode: 'aislado',
-      metadata,
-      notice: 'Preparando las dependencias del script (la primera vez puede tardar)…',
-    };
-  }
-  const notice = metadata ? 'El script declara dependencias pero uv no está disponible: se ejecuta sin instalarlas. Prepara el entorno en Configuración → Entorno Python.' : undefined;
+  const notice = options.scriptEnv?.pending ? PENDING_NOTICE : undefined;
 
   if (pythonPath) return { command: pythonPath, args: ['-u', scriptPath], env, mode: 'manual', metadata, notice };
+  if (options.scriptEnv?.python) return { command: options.scriptEnv.python, args: ['-u', scriptPath], env, mode: 'propio', metadata, notice };
   if (status.venv) return { command: status.venv.python, args: ['-u', scriptPath], env, mode: 'compartido', metadata, notice };
   if (status.system) return { command: status.system.command, args: [...status.system.args, '-u', scriptPath], env, mode: 'sistema', metadata, notice };
   throw new PythonNotReadyError();

@@ -14,6 +14,7 @@ import type { ExecutionTracer } from './executionLog.js';
 import { instrumentTransformCode, type BreakpointResolution } from './transformDebug.js';
 import { resolveReferences, buildSqlPreview, describeQueryParams } from './debugPreview.js';
 import { resolveInterpreter } from './python/environment.js';
+import { scriptInterpreterEnv } from './python/scriptEnv.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -913,7 +914,7 @@ async function executeHttpNode(
 
 // Scraping script: a script registered in the Scripts section (by id or name) or, for older flows,
 // a file in the server's scripts/ folder
-export function resolveScrapingScript(scriptRef: string): { path: string; fileName: string } | null {
+export function resolveScrapingScript(scriptRef: string): { path: string; fileName: string; scriptId?: string } | null {
   const ref = String(scriptRef || '').trim();
   if (!ref) return null;
   try {
@@ -921,7 +922,7 @@ export function resolveScrapingScript(scriptRef: string): { path: string; fileNa
     if (row?.file_path) {
       const registered = path.join(process.cwd(), 'uploads', row.file_path);
       if (fs.existsSync(registered)) {
-        return { path: registered, fileName: path.basename(row.file_path).replace(/^[0-9a-f-]{36}_/, '') };
+        return { path: registered, fileName: path.basename(row.file_path).replace(/^[0-9a-f-]{36}_/, ''), scriptId: row.id };
       }
     }
   } catch { }
@@ -949,7 +950,8 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
   const selector = String(resolveTemplate(context, node.data?.selector || '') ?? '');
   const timeoutMs = Math.max(1, Number(getSystemSettingsFromDb().script_timeout_seconds) || 60) * 1000;
   // Same interpreter choice as the Scripts console: PEP 723 via uv, shared venv or system Python
-  const interpreter = resolveInterpreter(script.path, fs.readFileSync(script.path, 'utf-8'));
+  const scriptCode = fs.readFileSync(script.path, 'utf-8');
+  const interpreter = resolveInterpreter(script.path, scriptCode, { scriptEnv: scriptInterpreterEnv(script.scriptId, scriptCode) });
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {

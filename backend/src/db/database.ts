@@ -126,6 +126,13 @@ export async function initDb(): Promise<void> {
   } catch (e: any) {
     // Ignore if exists
   }
+  try {
+    // Python environment of each script (shared or its own), as JSON: see engine/python/scriptEnv.ts
+    wrappedDb.exec('ALTER TABLE scripts ADD COLUMN env_state TEXT;');
+    console.log('[DB] Migrated: added env_state to scripts');
+  } catch (e: any) {
+    // Ignore if exists
+  }
 
   try {
     wrappedDb.exec(`

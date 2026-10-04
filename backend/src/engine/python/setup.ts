@@ -138,7 +138,7 @@ export function withoutRequirement(text: string, name: string): string {
 
 // ── jobs ──
 
-export type EnvJobKind = 'setup' | 'add-package' | 'remove-package';
+export type EnvJobKind = 'setup' | 'add-package' | 'remove-package' | 'prepare-script';
 export interface EnvJob {
   jobId: string;
   kind: EnvJobKind;
@@ -147,6 +147,8 @@ export interface EnvJob {
   startedAt: number;
   finishedAt: number | null;
   error: string | null;
+  /** Script being prepared (prepare-script jobs) */
+  scriptId?: string;
 }
 
 const jobs = new Map<string, EnvJob>();
@@ -175,16 +177,17 @@ function runStreaming(command: string, args: string[], env: Record<string, strin
  * Starts a job. Only one environment job runs at a time: a second setup returns the running one,
  * anything else is refused. `onOutput` lets the CLI print the output as well.
  */
-function startJob(
+export function startEnvJob(
   kind: EnvJobKind,
   work: (ctx: { log: (text: string) => void; run: (command: string, args: string[]) => Promise<void> }) => Promise<void>,
-  onOutput?: (stream: string, text: string) => void
+  onOutput?: (stream: string, text: string) => void,
+  scriptId?: string
 ): EnvJob {
   if (activeJob) {
     if (kind === 'setup' && activeJob.kind === 'setup') return activeJob;
     throw new Error('Hay otra operación del entorno Python en curso. Espera a que termine.');
   }
-  const job: EnvJob = { jobId: uuid(), kind, status: 'running', output: [], startedAt: Date.now(), finishedAt: null, error: null };
+  const job: EnvJob = { jobId: uuid(), kind, status: 'running', output: [], startedAt: Date.now(), finishedAt: null, error: null, ...(scriptId ? { scriptId } : {}) };
   jobs.set(job.jobId, job);
   activeJob = job;
 
@@ -216,7 +219,7 @@ function startJob(
       job.finishedAt = Date.now();
       activeJob = null;
       await refreshEnvironment().catch(() => {});
-      emit('python-env-exit', { jobId: job.jobId, kind, status: job.status, error: job.error });
+      emit('python-env-exit', { jobId: job.jobId, kind, status: job.status, error: job.error, scriptId });
       setTimeout(() => jobs.delete(job.jobId), 30 * 60 * 1000).unref();
     }
   })();
@@ -232,7 +235,7 @@ export function waitForJob(job: EnvJob): Promise<EnvJob> {
 }
 
 export function runPythonSetup(onOutput?: (stream: string, text: string) => void): EnvJob {
-  return startJob('setup', async ({ log, run }) => {
+  return startEnvJob('setup', async ({ log, run }) => {
     const paths = runtimePaths();
     const pythonVersion = configuredPythonVersion();
     let status = await refreshEnvironment();
@@ -267,7 +270,7 @@ function requireReadyEnvironment(status: PythonEnvStatus | null): asserts status
 
 export function addPackage(spec: string): EnvJob {
   const clean = validateRequirementSpec(spec);
-  return startJob('add-package', async ({ log, run }) => {
+  return startEnvJob('add-package', async ({ log, run }) => {
     const paths = runtimePaths();
     const status = await refreshEnvironment();
     requireReadyEnvironment(status);
@@ -280,7 +283,7 @@ export function addPackage(spec: string): EnvJob {
 
 export function removePackage(name: string): EnvJob {
   const target = requirementName(name);
-  return startJob('remove-package', async ({ log, run }) => {
+  return startEnvJob('remove-package', async ({ log, run }) => {
     const paths = runtimePaths();
     const status = await refreshEnvironment();
     requireReadyEnvironment(status);

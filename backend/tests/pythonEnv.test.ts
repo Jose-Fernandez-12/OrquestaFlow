@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseScriptMetadata, detectImports, moduleToPackage, requirementName } from '../src/engine/python/pep723';
+import { parseScriptMetadata, writeScriptMetadata, pythonSatisfies, detectImports, moduleToPackage, requirementName } from '../src/engine/python/pep723';
+import { parseDryRun, decideEnvironment, depsHash, summarizeScriptEnvironment } from '../src/engine/python/scriptEnv';
 import { resolveInterpreter, runtimePaths, PythonNotReadyError, type PythonEnvStatus } from '../src/engine/python/environment';
 import { buildSetupSteps, uvAssetName, validateRequirementSpec, withRequirement, withoutRequirement } from '../src/engine/python/setup';
 
@@ -75,22 +76,22 @@ describe('resolveInterpreter', () => {
   const system = { command: 'python', args: [], version: '3.11.2' };
   const pep723 = '# /// script\n# dependencies = ["tabulate"]\n# ///\nimport tabulate\n';
   const plain = 'print("hola")\n';
-  const opts = (s: PythonEnvStatus, env: NodeJS.ProcessEnv = {}) => ({ status: s, env, paths, pythonVersion: '3.12' });
+  const opts = (s: PythonEnvStatus, env: NodeJS.ProcessEnv = {}, scriptEnv: { python?: string; pending: boolean } | null = null) =>
+    ({ status: s, env, paths, scriptEnv });
 
-  it('runs PEP 723 scripts with uv in an isolated environment', () => {
-    const r = resolveInterpreter('/s/a.py', pep723, opts(status({ uv, venv })));
-    expect(r.mode).toBe('aislado');
-    expect(r.command).toBe('/rt/bin/uv');
-    expect(r.args).toEqual(['run', '--script', '--quiet', '--python', '3.12', '/s/a.py']);
+  it('runs a script with its own environment when it has one', () => {
+    const r = resolveInterpreter('/s/a.py', pep723, opts(status({ uv, venv }), {}, { python: '/rt/envs/s1/bin/python', pending: false }));
+    expect(r).toMatchObject({ mode: 'propio', command: '/rt/envs/s1/bin/python', args: ['-u', '/s/a.py'] });
     expect(r.env.UV_CACHE_DIR).toBe(paths.cache);
     expect(r.metadata?.dependencies).toEqual(['tabulate']);
+    expect(r.notice).toBeUndefined();
   });
 
-  it('lets requires-python choose the version and PYTHON_PATH override it', () => {
-    const withRequires = '# /// script\n# requires-python = ">=3.13"\n# dependencies = []\n# ///\n';
-    expect(resolveInterpreter('/s/a.py', withRequires, opts(status({ uv }))).args).toEqual(['run', '--script', '--quiet', '/s/a.py']);
-    expect(resolveInterpreter('/s/a.py', pep723, opts(status({ uv }), { PYTHON_PATH: 'C:/Py/python.exe' })).args)
-      .toEqual(['run', '--script', '--quiet', '--python', 'C:/Py/python.exe', '/s/a.py']);
+  it('runs scripts with dependencies in the shared environment and warns when they were not prepared', () => {
+    const shared = resolveInterpreter('/s/a.py', pep723, opts(status({ uv, venv }), {}, { pending: false }));
+    expect(shared).toMatchObject({ mode: 'compartido', command: paths.venvPython });
+    const pending = resolveInterpreter('/s/a.py', pep723, opts(status({ uv, venv }), {}, { pending: true }));
+    expect(pending.notice).toMatch(/Preparar entorno/);
   });
 
   it('prefers PYTHON_PATH, then the shared venv, then the system Python for plain scripts', () => {
@@ -102,10 +103,9 @@ describe('resolveInterpreter', () => {
       .toMatchObject({ mode: 'sistema', command: 'py', args: ['-3', '-u', '/s/a.py'] });
   });
 
-  it('warns when a script declares dependencies but uv is missing', () => {
-    const r = resolveInterpreter('/s/a.py', pep723, opts(status({ venv })));
-    expect(r.mode).toBe('compartido');
-    expect(r.notice).toMatch(/uv no está disponible/);
+  it('lets PYTHON_PATH win over the script environment', () => {
+    expect(resolveInterpreter('/s/a.py', pep723, opts(status({ venv }), { PYTHON_PATH: '/opt/py' }, { python: '/own', pending: false })).mode)
+      .toBe('manual');
   });
 
   it('fails with a clear message when no Python is available', () => {
@@ -153,5 +153,82 @@ describe('setup', () => {
     expect(withRequirement(text, 'requests')).toBe('# comentario\r\npandas==2.0\r\n--index-url https://interno\r\nrequests\r\n');
     expect(withRequirement('', 'rich')).toBe('rich\n');
     expect(withoutRequirement(text, 'Pandas')).toBe('# comentario\r\n--index-url https://interno\r\n');
+  });
+});
+
+describe('writeScriptMetadata', () => {
+  it('adds a header after the shebang, replaces it and removes it when empty', () => {
+    const code = '#!/usr/bin/env python\nimport pandas\n';
+    const added = writeScriptMetadata(code, { dependencies: ['pandas', 'openpyxl>=3'] });
+    expect(added).toBe('#!/usr/bin/env python\n# /// script\n# dependencies = [ "pandas", "openpyxl>=3" ]\n# ///\n\nimport pandas\n');
+    expect(parseScriptMetadata(added)).toEqual({ ok: true, metadata: { dependencies: ['pandas', 'openpyxl>=3'], requiresPython: undefined } });
+
+    const replaced = writeScriptMetadata(added, { dependencies: ['pandas==2.2.3'], requiresPython: '>=3.11' });
+    expect(parseScriptMetadata(replaced)).toEqual({ ok: true, metadata: { dependencies: ['pandas==2.2.3'], requiresPython: '>=3.11' } });
+    expect(replaced.split('# /// script').length).toBe(2);
+
+    expect(writeScriptMetadata(replaced, { dependencies: [] })).toBe(code);
+  });
+
+  it('keeps other keys of the block and CRLF line endings', () => {
+    const code = '# /// script\r\n# dependencies = ["a"]\r\n# [tool.uv]\r\n# exclude-newer = "2024-01-01T00:00:00Z"\r\n# ///\r\nprint(1)\r\n';
+    const out = writeScriptMetadata(code, { dependencies: ['b'] });
+    expect(out).toContain('exclude-newer');
+    expect(out.includes('\n') && !/[^\r]\n/.test(out)).toBe(true);
+    expect(parseScriptMetadata(out)).toMatchObject({ ok: true, metadata: { dependencies: ['b'] } });
+  });
+});
+
+describe('pythonSatisfies', () => {
+  it('evaluates requires-python specifiers', () => {
+    expect(pythonSatisfies('3.12.7', '>=3.11')).toBe(true);
+    expect(pythonSatisfies('3.12.7', '>=3.11,<3.12')).toBe(false);
+    expect(pythonSatisfies('3.12.7', '==3.12.*')).toBe(true);
+    expect(pythonSatisfies('3.12.7', '!=3.12.*')).toBe(false);
+    expect(pythonSatisfies('3.12.7', '~=3.10')).toBe(true);
+    expect(pythonSatisfies('3.12.7', '~=3.10.1')).toBe(false);
+    expect(pythonSatisfies('3.12.7', undefined)).toBe(true);
+  });
+});
+
+describe('script environment decision', () => {
+  const meta = (dependencies: string[], requiresPython?: string) => ({ dependencies, requiresPython });
+
+  it('reads uv dry-run output', () => {
+    const out = 'Resolved 2 packages in 3ms\nWould uninstall 1 package\nWould install 2 packages\n - tabulate==0.9.0\n + tabulate==0.8.10\n + wcwidth==0.2.13\n';
+    expect(parseDryRun(out, 0)).toEqual({ ok: true, installs: ['tabulate==0.8.10', 'wcwidth==0.2.13'], removals: ['tabulate==0.9.0'] });
+    expect(parseDryRun('Would make no changes\n', 0)).toEqual({ ok: true, installs: [], removals: [] });
+    expect(parseDryRun('  × No solution found when resolving dependencies:\n  ╰─▶ Because foo==9 was not found...', 1).ok).toBe(false);
+  });
+
+  it('uses the shared environment when nothing or only new packages would be installed', () => {
+    expect(decideEnvironment(meta(['tabulate']), '3.12.7', { ok: true, installs: [], removals: [] }))
+      .toEqual({ mode: 'compartido', reason: null, install: [] });
+    expect(decideEnvironment(meta(['requests']), '3.12.7', { ok: true, installs: ['requests==2.32.3'], removals: [] }))
+      .toEqual({ mode: 'compartido', reason: null, install: ['requests==2.32.3'] });
+  });
+
+  it('gives the script its own environment when a shared version would change', () => {
+    const d = decideEnvironment(meta(['tabulate==0.8.10']), '3.12.7', { ok: true, installs: ['tabulate==0.8.10'], removals: ['tabulate==0.9.0'] });
+    expect(d.mode).toBe('propio');
+    expect(d.reason).toMatch(/tabulate 0\.9\.0 → 0\.8\.10/);
+  });
+
+  it('gives its own environment for another Python version or unresolvable dependencies', () => {
+    expect(decideEnvironment(meta([], '>=3.13'), '3.12.7', null)).toMatchObject({ mode: 'propio', reason: expect.stringMatching(/Python >=3\.13/) });
+    expect(decideEnvironment(meta(['x']), '3.12.7', { ok: false, installs: [], removals: [], error: 'conflicto' }).mode).toBe('propio');
+  });
+
+  it('summarizes what the card shows', () => {
+    const ready = { uv: { path: 'uv', version: '1', managed: true }, venv: { python: 'p', version: '3.12.7' }, system: null, packages: [], stdlib: null, checkedAt: 1 };
+    const header = '# /// script\n# dependencies = ["tabulate"]\n# ///\n';
+    const hash = depsHash({ dependencies: ['tabulate'] });
+    const shared = JSON.stringify({ mode: 'compartido', hash, resolved: { tabulate: '0.9.0' }, reason: null, pythonVersion: '3.12.7', preparedAt: 1 });
+    expect(summarizeScriptEnvironment('s', null, 'print(1)', ready).view).toBe('sin-dependencias');
+    expect(summarizeScriptEnvironment('s', null, header, ready)).toMatchObject({ view: 'pendiente', stale: true });
+    expect(summarizeScriptEnvironment('s', shared, header, ready)).toMatchObject({ view: 'compartido', stale: false });
+    expect(summarizeScriptEnvironment('s', shared, header.replace('tabulate', 'tabulate==0.8'), ready).view).toBe('pendiente');
+    expect(summarizeScriptEnvironment('s', shared, header, { ...ready, venv: null }).view).toBe('no-preparado');
+    expect(summarizeScriptEnvironment('s', null, '# /// script\n# dependencies = 1\n# ///\n', ready).view).toBe('invalido');
   });
 });

@@ -1,6 +1,24 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import { API_URL } from '../lib/api';
 
+export type ScriptEnvView = 'sin-dependencias' | 'compartido' | 'propio' | 'pendiente' | 'no-preparado' | 'invalido';
+
+/** Environment of a Python script (null for .js scripts) */
+export interface ScriptEnvSummary {
+  view: ScriptEnvView;
+  dependencies: string[];
+  requiresPython: string | null;
+  metadataError: string | null;
+  stale: boolean;
+  state: {
+    mode: 'compartido' | 'propio';
+    resolved: Record<string, string>;
+    reason: string | null;
+    pythonVersion: string;
+    preparedAt: number;
+  } | null;
+}
+
 export interface Script {
   id: string;
   name: string;
@@ -11,6 +29,7 @@ export interface Script {
   last_run_at: string | null;
   last_run_status: string | null;
   created_at: string;
+  env: ScriptEnvSummary | null;
 }
 
 interface ScriptState {

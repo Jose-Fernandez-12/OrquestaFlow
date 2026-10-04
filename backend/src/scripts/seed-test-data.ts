@@ -144,11 +144,24 @@ const ask = q => new Promise(resolve => rl.question(q, resolve));
     code: `# /// script
 # dependencies = ["tabulate>=0.9"]
 # ///
-"""Declara sus dependencias (PEP 723): corre con uv en un entorno aislado, sin tocar el compartido."""
-from tabulate import tabulate
+"""Declara tabulate sin versión fija: al prepararlo se instala en el entorno compartido."""
+from tabulate import tabulate, __version__
 
 filas = [["Teclado", 10, 45], ["Monitor", 3, 320], ["Laptop", 2, 980]]
 print(tabulate(filas, headers=["Producto", "Unidades", "Precio"], tablefmt="github"))
+print(f"tabulate {__version__}")
+`,
+  },
+  {
+    file: 'test_version_fija.py',
+    code: `# /// script
+# dependencies = ["tabulate==0.8.10"]
+# ///
+"""Pide una versión antigua de tabulate. Prepara antes «test pep723 tabla»: como esta versión
+cambiaría la del entorno compartido, este script recibe su propio entorno."""
+from tabulate import tabulate, __version__
+
+print(tabulate([["versión fija", __version__]], tablefmt="github"))
 `,
   },
   {

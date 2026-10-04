@@ -123,16 +123,17 @@ Solo hace falta si vas a ejecutar scripts Python (seccion Scripts o nodo Web Scr
 npm run python:setup    # o: npm run setup (dependencias de npm + Python en un paso)
 npm run python:status   # muestra que hay instalado
 ```
-Tambien puede hacerse desde **Configuracion → Entorno Python**.
+Tambien puede hacerse desde la seccion **Scripts** (boton «Preparar entorno base»).
 
-- **Entorno compartido:** los paquetes van en `backend/python-requirements.txt` (versionado). Se agregan desde Configuracion o editando el archivo y repitiendo `npm run python:setup`.
-- **Dependencias por script (PEP 723):** un script puede declararlas en su cabecera y corre en su propio entorno aislado, cacheado por uv:
+- **Dependencias de cada script:** se gestionan en la pestaña *Dependencias* del script y se guardan en su cabecera (estandar PEP 723), asi viajan con el archivo:
   ```python
   # /// script
   # dependencies = ["pandas>=2.2", "openpyxl"]
   # ///
   ```
-- **Orden de eleccion del interprete:** cabecera PEP 723 (con uv) → `PYTHON_PATH` → entorno compartido → Python del sistema.
+- **Entorno compartido o propio:** al preparar un script, uv comprueba si sus paquetes encajan en el entorno compartido. Si ya estan o solo hay que agregar paquetes nuevos, usa el compartido. Si alguna version fija cambiaria la que usan otros scripts (o pide otra version de Python), recibe su propio entorno en `backend/.runtime/envs/`. uv reutiliza las descargas entre entornos.
+- **Paquetes base:** `backend/python-requirements.txt` (versionado) lista los que se instalan siempre en el compartido; se gestionan en Scripts → *Gestionar*.
+- **Orden de eleccion del interprete:** `PYTHON_PATH` → entorno propio del script → entorno compartido → Python del sistema.
 - Los scripts `.js` se ejecutan con Node y no usan este entorno.
 
 ### 3. Iniciar el entorno de desarrollo

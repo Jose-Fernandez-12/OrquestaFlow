@@ -4,7 +4,8 @@ import type { ConsoleChunk } from '../ui/ConsoleOutput';
 
 export interface EnvJob {
   jobId: string;
-  kind: 'setup' | 'add-package' | 'remove-package';
+  kind: 'setup' | 'add-package' | 'remove-package' | 'prepare-script';
+  scriptId?: string;
   status: 'running' | 'completed' | 'error';
   output: Array<ConsoleChunk & { ts: number }>;
   error: string | null;
@@ -19,11 +20,15 @@ export interface PythonEnvState {
   runtimeDir: string;
   pendingSteps: Array<{ id: string; label: string }>;
   requirements: Array<{ name: string; spec: string; installed: string | null }>;
+  /** Everything installed in the shared environment, with the scripts that rely on each package */
+  packages: Array<{ name: string; version: string; usedBy: string[] }>;
+  ownEnvironments: number;
   activeJob: EnvJob | null;
 }
 
-export async function envRequest<T = any>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const res = await fetch(getApiUrl(`/python-env${path}`), {
+/** JSON request to /api + path; throws with the server's error message */
+export async function apiRequest<T = any>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  const res = await fetch(getApiUrl(path), {
     method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -32,6 +37,8 @@ export async function envRequest<T = any>(path: string, method = 'GET', body?: u
   if (!res.ok) throw new Error(json.error || `Error ${res.status}`);
   return json.data;
 }
+
+export const envRequest = <T = any>(path: string, method = 'GET', body?: unknown) => apiRequest<T>(`/python-env${path}`, method, body);
 
 /**
  * Starts (or attaches to) an environment job and follows its output live until it ends.

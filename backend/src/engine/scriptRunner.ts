@@ -6,6 +6,7 @@ import { getDb } from '../db/database.js';
 import { getSystemSettingsFromDb } from '../routes/settings.js';
 import { getIo } from './socket.js';
 import { resolveInterpreter } from './python/environment.js';
+import { scriptInterpreterEnv } from './python/scriptEnv.js';
 
 /**
  * Runs uploaded scripts as child processes with their stdin open, so a script that asks for input
@@ -73,9 +74,10 @@ export function readScriptContent(filePath: string): { content: string; truncate
 
 // .js keeps running with Node; Python goes through the managed environment (uv, shared venv or
 // system Python). Throws when no Python is ready, with the message to show the user.
-function commandFor(fullPath: string): { command: string; args: string[]; env: Record<string, string>; notice?: string } {
+function commandFor(fullPath: string, scriptId: string): { command: string; args: string[]; env: Record<string, string>; notice?: string } {
   if (scriptLanguage(fullPath) === 'javascript') return { command: process.execPath, args: [fullPath], env: {} };
-  const { command, args, env, notice } = resolveInterpreter(fullPath, fs.readFileSync(fullPath, 'utf-8'));
+  const code = fs.readFileSync(fullPath, 'utf-8');
+  const { command, args, env, notice } = resolveInterpreter(fullPath, code, { scriptEnv: scriptInterpreterEnv(scriptId, code) });
   return { command, args, env, notice };
 }
 
@@ -122,7 +124,7 @@ export function startScriptRun(
 
   const runId = options.runId && !runs.has(options.runId) ? options.runId : uuid();
   const args = (options.args || []).map(String);
-  const { command, args: baseArgs, env: interpreterEnv, notice } = commandFor(fullPath);
+  const { command, args: baseArgs, env: interpreterEnv, notice } = commandFor(fullPath, script.id);
   const db = getDb();
 
   let logId: string | null = null;

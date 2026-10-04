@@ -16,8 +16,7 @@ import {
   Radio,
   KeyRound,
   Bot,
-  PlugZap,
-  Terminal
+  PlugZap
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';
@@ -26,22 +25,19 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
 import { ConnectionsDataSettings } from './ConnectionsDataSettings';
-import { PythonEnvSettings } from './PythonEnvSettings';
 
-type SettingsTab = 'general' | 'timeouts' | 'connections' | 'python' | 'experimental';
+type SettingsTab = 'general' | 'timeouts' | 'connections' | 'experimental';
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Clock }> = [
   { id: 'general', label: 'General', icon: Sliders },
   { id: 'timeouts', label: 'Tiempos y reintentos', icon: Clock },
   { id: 'connections', label: 'Conexiones y datos', icon: PlugZap },
-  { id: 'python', label: 'Entorno Python', icon: Terminal },
   { id: 'experimental', label: 'Experimental', icon: FlaskConical },
 ];
 
 export function SettingsModal() {
   const dispatch = useAppDispatch();
   const isOpen = useAppSelector((state) => state.ui.settingsModalOpen);
-  const initialTab = useAppSelector((state) => state.ui.settingsInitialTab);
   const { settings, saving, loading } = useAppSelector((state) => state.settings);
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
@@ -55,9 +51,6 @@ export function SettingsModal() {
     }
   }, [isOpen, settings]);
 
-  useEffect(() => {
-    if (isOpen && initialTab && TABS.some(t => t.id === initialTab)) setActiveTab(initialTab as SettingsTab);
-  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 
@@ -285,18 +278,28 @@ export function SettingsModal() {
                   El archivo siempre incluye todas las filas.
                 </p>
               </div>
+
+              <div className="p-3.5 bg-bg rounded-md border border-border space-y-2">
+                <label className="text-xs font-semibold text-fg">Versión de Python de los scripts</label>
+                <select
+                  value={formData.python_version || '3.12'}
+                  onChange={(e) => handleChange('python_version', e.target.value)}
+                  className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-3 py-1.5 text-xs focus-visible:outline-none focus-visible:border-accent"
+                >
+                  {[...new Set(['3.10', '3.11', '3.12', '3.13', formData.python_version || '3.12'])].map(v => (
+                    <option key={v} value={v}>Python {v}{v === '3.12' ? ' (recomendado)' : ''}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-muted">
+                  La del entorno base que comparten los scripts Python. Tras cambiarla, pulsa «Gestionar → Comprobar y actualizar» en Scripts
+                  para recrear el entorno. Un script puede pedir otra versión en su pestaña Dependencias.
+                </p>
+              </div>
             </div>
           )}
 
           {activeTab === 'connections' && <ConnectionsDataSettings />}
 
-          {activeTab === 'python' && (
-            <PythonEnvSettings
-              pythonVersion={formData.python_version}
-              savedPythonVersion={settings.python_version}
-              onPythonVersionChange={v => handleChange('python_version', v)}
-            />
-          )}
 
           {activeTab === 'experimental' && (
             <div className="space-y-4">
