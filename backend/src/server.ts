@@ -9,6 +9,8 @@ import { getDb, closeDb } from './db/database.js';
 import { closeAllMssqlPools } from './engine/mssql.js';
 import { stopAllSchedulerJobs } from './engine/scheduler.js';
 import { stopAllScriptRuns } from './engine/scriptRunner.js';
+import { refreshEnvironment } from './engine/python/environment.js';
+import { pythonEnvRoutes } from './routes/pythonEnv.js';
 import { flowRoutes } from './routes/flows.js';
 import { queryRoutes } from './routes/queries.js';
 import { connectionRoutes } from './routes/connections.js';
@@ -36,6 +38,9 @@ async function start(): Promise<void> {
   // Initialize scheduler
   const { initScheduler } = await import('./engine/scheduler.js');
   await initScheduler();
+
+  // Detect uv / the shared venv / system Python in the background; scripts use the result
+  refreshEnvironment().catch(err => app.log.warn(err, 'No se pudo inspeccionar el entorno Python'));
 
   // Plugins
   await app.register(cors, {
@@ -80,6 +85,7 @@ async function start(): Promise<void> {
   await app.register(fileManagerRoutes, { prefix: '/api/file-manager' });
   await app.register(settingsRoutes, { prefix: '/api/settings' });
   await app.register(pythonExportRoutes, { prefix: '/api/flows' });
+  await app.register(pythonEnvRoutes, { prefix: '/api/python-env' });
 
   // Health check
   app.get('/api/health', async () => {

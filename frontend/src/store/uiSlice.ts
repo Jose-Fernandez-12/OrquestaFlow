@@ -10,6 +10,8 @@ interface UiState {
   queryModalMode: 'create' | 'edit';
   queryModalName: string;
   settingsModalOpen: boolean;
+  /** Tab to show when the settings open, e.g. 'python' from the Scripts console */
+  settingsInitialTab: string | null;
   helpModalOpen: boolean;
 }
 
@@ -23,6 +25,7 @@ const initialState: UiState = {
   queryModalMode: 'edit',
   queryModalName: '',
   settingsModalOpen: false,
+  settingsInitialTab: null,
   helpModalOpen: false,
 };
 
@@ -62,8 +65,9 @@ const uiSlice = createSlice({
     closeQueryModal(state) {
       state.queryModalOpen = false;
     },
-    openSettingsModal(state) {
+    openSettingsModal(state, action: PayloadAction<string | undefined>) {
       state.settingsModalOpen = true;
+      state.settingsInitialTab = action.payload ?? null;
     },
     closeSettingsModal(state) {
       state.settingsModalOpen = false;

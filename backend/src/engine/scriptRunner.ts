@@ -5,6 +5,7 @@ import { v4 as uuid } from 'uuid';
 import { getDb } from '../db/database.js';
 import { getSystemSettingsFromDb } from '../routes/settings.js';
 import { getIo } from './socket.js';
+import { resolveInterpreter } from './python/environment.js';
 
 /**
  * Runs uploaded scripts as child processes with their stdin open, so a script that asks for input
@@ -70,10 +71,12 @@ export function readScriptContent(filePath: string): { content: string; truncate
   };
 }
 
-// Python buffers stdout when it is not a terminal: -u makes prompts show up before input() blocks
-function commandFor(fullPath: string): { command: string; args: string[] } {
-  if (scriptLanguage(fullPath) === 'javascript') return { command: process.execPath, args: [fullPath] };
-  return { command: process.env.PYTHON_PATH || 'python', args: ['-u', fullPath] };
+// .js keeps running with Node; Python goes through the managed environment (uv, shared venv or
+// system Python). Throws when no Python is ready, with the message to show the user.
+function commandFor(fullPath: string): { command: string; args: string[]; env: Record<string, string>; notice?: string } {
+  if (scriptLanguage(fullPath) === 'javascript') return { command: process.execPath, args: [fullPath], env: {} };
+  const { command, args, env, notice } = resolveInterpreter(fullPath, fs.readFileSync(fullPath, 'utf-8'));
+  return { command, args, env, notice };
 }
 
 function emit(event: string, payload: Record<string, unknown>) {
@@ -119,7 +122,7 @@ export function startScriptRun(
 
   const runId = options.runId && !runs.has(options.runId) ? options.runId : uuid();
   const args = (options.args || []).map(String);
-  const { command, args: baseArgs } = commandFor(fullPath);
+  const { command, args: baseArgs, env: interpreterEnv, notice } = commandFor(fullPath);
   const db = getDb();
 
   let logId: string | null = null;
@@ -131,7 +134,7 @@ export function startScriptRun(
 
   const child = spawn(command, [...baseArgs, ...args], {
     cwd: path.dirname(fullPath),
-    env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+    env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', ...interpreterEnv },
     windowsHide: true,
   });
 
@@ -153,6 +156,7 @@ export function startScriptRun(
     outputBytes: 0,
   };
   runs.set(runId, run);
+  if (notice) push(run, 'system', `${notice}\n`);
 
   // Non-interactive runs (scheduler, API) get EOF right away, so input() fails instead of hanging
   if (!options.interactive) child.stdin.end();
@@ -173,13 +177,9 @@ export function startScriptRun(
     run.finishedAt = Date.now();
     if (spawnError) {
       run.status = 'error';
-      push(run, 'system', `No se pudo iniciar el intérprete (${spawnError.message}). Configura PYTHON_PATH en el servidor.\n`);
+      push(run, 'system', `No se pudo iniciar «${path.basename(command)}» (${spawnError.message}).\n`);
     } else if (run.status === 'running') {
       run.status = code === 0 ? 'completed' : 'error';
-    }
-    // 9009: Windows could not find the interpreter (often the Microsoft Store "python" alias)
-    if (code === 9009 && process.platform === 'win32') {
-      push(run, 'system', '\nPython no está instalado o no está en el PATH del servidor. Instálalo o configura PYTHON_PATH con la ruta a python.exe.\n');
     }
     const durationMs = run.finishedAt - run.startedAt;
 

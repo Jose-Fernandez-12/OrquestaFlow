@@ -12,8 +12,12 @@ import { cn } from '../../lib/utils';
 import { getApiUrl, SOCKET_URL } from '../../lib/api';
 import type { Script } from '../../store/scriptSlice';
 import { parseArgs } from './parseArgs';
+import { ConsoleOutput, type ConsoleStream } from '../ui/ConsoleOutput';
+import { ScriptDependencies } from './ScriptDependencies';
+import { useAppDispatch } from '../../store/hooks';
+import { openSettingsModal } from '../../store/uiSlice';
 
-type Stream = 'stdout' | 'stderr' | 'stdin' | 'system';
+type Stream = ConsoleStream;
 type RunStatus = 'running' | 'completed' | 'error' | 'cancelled' | 'timeout';
 
 interface Chunk { stream: Stream; text: string; ts: number }
@@ -27,13 +31,6 @@ interface ScriptConsoleModalProps {
   onClose: () => void;
   onFinished?: () => void;
 }
-
-const STREAM_STYLES: Record<Stream, string> = {
-  stdout: 'text-surface/90',
-  stderr: 'text-red-400',
-  stdin: 'text-sky-300',
-  system: 'text-surface/50 italic',
-};
 
 async function request<T = any>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(getApiUrl(path), body === undefined ? undefined : {
@@ -69,13 +66,13 @@ export function ScriptConsoleModal({ script, autoRun = false, onClose, onFinishe
   const [output, setOutput] = useState<Chunk[]>([]);
   const [inputText, setInputText] = useState('');
   const [ready, setReady] = useState(false);
+  const [depsRefresh, setDepsRefresh] = useState(0);
+  const dispatch = useAppDispatch();
 
   const runIdRef = useRef<string | null>(null);
   // Events that arrive while a snapshot of the run is being fetched, merged afterwards by timestamp
   const earlyEventsRef = useRef<Array<Chunk & { runId: string }> | null>([]);
-  const consoleRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const stickToBottomRef = useRef(true);
   const onFinishedRef = useRef(onFinished);
   onFinishedRef.current = onFinished;
 
@@ -85,7 +82,6 @@ export function ScriptConsoleModal({ script, autoRun = false, onClose, onFinishe
   const start = useCallback(async () => {
     const runId = uuidv4();
     runIdRef.current = runId;
-    stickToBottomRef.current = true;
     setOutput([]);
     setRun({ runId, status: 'running', exitCode: null, durationMs: null });
     try {
@@ -111,6 +107,7 @@ export function ScriptConsoleModal({ script, autoRun = false, onClose, onFinishe
       if (data.runId !== runIdRef.current) return;
       setRun({ runId: data.runId, status: data.status, exitCode: data.exitCode, durationMs: data.durationMs });
       onFinishedRef.current?.();
+      setDepsRefresh(n => n + 1);
     });
     return () => { socket.disconnect(); };
   }, []);
@@ -152,11 +149,6 @@ export function ScriptConsoleModal({ script, autoRun = false, onClose, onFinishe
     if (run?.status !== 'running') start();
   }, [ready, autoRun, run, start]);
 
-  useEffect(() => {
-    const el = consoleRef.current;
-    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [output]);
-
   const sendInput = async (eof = false) => {
     if (!run || !running) return;
     const text = inputText;
@@ -196,6 +188,14 @@ export function ScriptConsoleModal({ script, autoRun = false, onClose, onFinishe
           </Button>
           <Button variant="icon" size="icon" onClick={onClose} title="Cerrar (Esc)"><X size={16} /></Button>
         </div>
+
+        {code?.language === 'python' && (
+          <ScriptDependencies
+            scriptId={script.id}
+            refreshKey={depsRefresh}
+            onOpenSettings={() => { onClose(); dispatch(openSettingsModal('python')); }}
+          />
+        )}
 
         <div className={cn('flex-1 min-h-0 grid grid-cols-1', showCode && 'md:grid-cols-2')}>
           {/* Source code */}
@@ -240,27 +240,12 @@ export function ScriptConsoleModal({ script, autoRun = false, onClose, onFinishe
               <Button variant="icon" size="icon" onClick={() => setOutput([])} title="Limpiar consola"><Eraser size={14} /></Button>
             </div>
 
-            <div
-              ref={consoleRef}
-              onScroll={e => {
-                const el = e.currentTarget;
-                stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-              }}
+            <ConsoleOutput
+              chunks={output}
+              emptyText={running ? 'Esperando salida…' : 'Pulsa «Ejecutar» para iniciar el script. Lo que imprima aparecerá aquí en vivo.'}
               onClick={() => { if (running && !window.getSelection()?.toString()) inputRef.current?.focus(); }}
-              className="flex-1 min-h-0 overflow-auto bg-fg p-3 font-mono text-xs leading-relaxed"
-            >
-              {output.length === 0 ? (
-                <div className="text-surface/40">
-                  {running ? 'Esperando salida…' : 'Pulsa «Ejecutar» para iniciar el script. Lo que imprima aparecerá aquí en vivo.'}
-                </div>
-              ) : (
-                <pre className="whitespace-pre-wrap break-words">
-                  {output.map((c, i) => (
-                    <span key={i} className={STREAM_STYLES[c.stream]}>{c.stream === 'stdin' ? `› ${c.text}` : c.text}</span>
-                  ))}
-                </pre>
-              )}
-            </div>
+              className="flex-1 min-h-0"
+            />
 
             {/* stdin */}
             <div className="p-3 border-t border-border flex items-center gap-2">

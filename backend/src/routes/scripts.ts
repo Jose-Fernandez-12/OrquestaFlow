@@ -2,11 +2,13 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
 import { join } from 'path';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import {
   startScriptRun, sendScriptInput, stopScriptRun, getScriptRun, getLatestScriptRun,
-  serializeRun, readScriptContent, scriptLanguage,
+  serializeRun, readScriptContent, scriptLanguage, resolveScriptPath,
 } from '../engine/scriptRunner.js';
+import { getEnvironmentStatus, refreshEnvironment, resolveInterpreter, isStdlibModule } from '../engine/python/environment.js';
+import { parseScriptMetadata, detectImports, moduleToPackage, normalizePackageName, requirementName } from '../engine/python/pep723.js';
 
 export async function scriptRoutes(app: FastifyInstance): Promise<void> {
   // List all scripts
@@ -44,6 +46,48 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     } catch (err: any) {
       return reply.status(404).send({ error: err.message });
     }
+  });
+
+  // How a Python script would run and which of its imports are covered (null for .js scripts)
+  app.get<{ Params: { id: string } }>('/:id/requirements', async (request, reply) => {
+    const script = getDb().prepare('SELECT * FROM scripts WHERE id = ?').get(request.params.id) as any;
+    if (!script) return reply.status(404).send({ error: 'Script not found' });
+    const fullPath = resolveScriptPath(script.file_path);
+    if (scriptLanguage(fullPath) !== 'python') return { data: null };
+    if (!existsSync(fullPath)) return reply.status(404).send({ error: `No se encontró el archivo del script: ${script.file_path}` });
+
+    const code = readFileSync(fullPath, 'utf-8');
+    const status = getEnvironmentStatus() ?? await refreshEnvironment();
+    const parsed = parseScriptMetadata(code);
+    let mode: string;
+    try {
+      mode = resolveInterpreter(fullPath, code, { status }).mode;
+    } catch {
+      mode = parsed.ok ? 'no-preparado' : 'invalido';
+    }
+
+    const metadata = parsed.ok ? parsed.metadata : null;
+    const declared = new Set((metadata?.dependencies || []).map(requirementName));
+    const installed = new Set(status.packages.map(p => normalizePackageName(p.name)));
+    const imports = detectImports(code)
+      .filter(m => !isStdlibModule(m, status) && m !== 'orquesta')
+      .map(module => {
+        const pkg = moduleToPackage(module);
+        const name = normalizePackageName(pkg);
+        // Isolated scripts get only what they declare; the others use the shared venv (unknown for the system Python)
+        const covered = mode === 'aislado' ? declared.has(name) : mode === 'compartido' ? installed.has(name) : null;
+        return { module, package: pkg, covered };
+      });
+
+    return {
+      data: {
+        mode,
+        metadata,
+        metadataError: parsed.ok ? null : parsed.error,
+        imports,
+        environmentReady: Boolean(status.venv),
+      },
+    };
   });
 
   // Upload script
@@ -113,7 +157,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     try {
       run = await startScriptRun(script, { args: request.body?.args }).done;
     } catch (err: any) {
-      return reply.status(404).send({ error: err.message });
+      // Missing file or no Python ready
+      return reply.status(400).send({ error: err.message });
     }
     const stdout = run.output.filter(c => c.stream === 'stdout').map(c => c.text).join('');
     const stderr = run.output.filter(c => c.stream === 'stderr' || c.stream === 'system').map(c => c.text).join('');

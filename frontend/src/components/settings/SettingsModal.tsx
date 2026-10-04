@@ -16,7 +16,8 @@ import {
   Radio,
   KeyRound,
   Bot,
-  PlugZap
+  PlugZap,
+  Terminal
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';
@@ -25,19 +26,22 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
 import { ConnectionsDataSettings } from './ConnectionsDataSettings';
+import { PythonEnvSettings } from './PythonEnvSettings';
 
-type SettingsTab = 'general' | 'timeouts' | 'connections' | 'experimental';
+type SettingsTab = 'general' | 'timeouts' | 'connections' | 'python' | 'experimental';
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Clock }> = [
   { id: 'general', label: 'General', icon: Sliders },
   { id: 'timeouts', label: 'Tiempos y reintentos', icon: Clock },
   { id: 'connections', label: 'Conexiones y datos', icon: PlugZap },
+  { id: 'python', label: 'Entorno Python', icon: Terminal },
   { id: 'experimental', label: 'Experimental', icon: FlaskConical },
 ];
 
 export function SettingsModal() {
   const dispatch = useAppDispatch();
   const isOpen = useAppSelector((state) => state.ui.settingsModalOpen);
+  const initialTab = useAppSelector((state) => state.ui.settingsInitialTab);
   const { settings, saving, loading } = useAppSelector((state) => state.settings);
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
@@ -50,6 +54,10 @@ export function SettingsModal() {
       setHasChanges(false);
     }
   }, [isOpen, settings]);
+
+  useEffect(() => {
+    if (isOpen && initialTab && TABS.some(t => t.id === initialTab)) setActiveTab(initialTab as SettingsTab);
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 
@@ -281,6 +289,14 @@ export function SettingsModal() {
           )}
 
           {activeTab === 'connections' && <ConnectionsDataSettings />}
+
+          {activeTab === 'python' && (
+            <PythonEnvSettings
+              pythonVersion={formData.python_version}
+              savedPythonVersion={settings.python_version}
+              onPythonVersionChange={v => handleChange('python_version', v)}
+            />
+          )}
 
           {activeTab === 'experimental' && (
             <div className="space-y-4">

@@ -140,6 +140,18 @@ const ask = q => new Promise(resolve => rl.question(q, resolve));
 `,
   },
   {
+    file: 'test_pep723_tabla.py',
+    code: `# /// script
+# dependencies = ["tabulate>=0.9"]
+# ///
+"""Declara sus dependencias (PEP 723): corre con uv en un entorno aislado, sin tocar el compartido."""
+from tabulate import tabulate
+
+filas = [["Teclado", 10, 45], ["Monitor", 3, 320], ["Laptop", 2, 980]]
+print(tabulate(filas, headers=["Producto", "Unidades", "Precio"], tablefmt="github"))
+`,
+  },
+  {
     file: 'test_lento.py',
     code: `"""Espera N segundos (arg 1, por defecto 90): para probar el timeout y el botón de detener."""
 import sys

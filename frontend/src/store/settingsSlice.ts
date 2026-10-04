@@ -11,6 +11,8 @@ export interface SystemSettings {
   user_display_name: string;
   user_role_label: string;
   experimental_nodes_enabled: boolean;
+  /** Python minor version for the managed environment, e.g. "3.12" */
+  python_version: string;
 }
 
 export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -23,6 +25,7 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   user_display_name: 'Jose Fernandez',
   user_role_label: 'Administrador',
   experimental_nodes_enabled: false,
+  python_version: '3.12',
 };
 
 // Safe load from localStorage if available
