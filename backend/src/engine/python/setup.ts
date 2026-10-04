@@ -202,7 +202,9 @@ export function startEnvJob(
     log: (text: string) => push('system', text),
     run: async (command: string, args: string[]) => {
       push('system', `$ ${path.basename(command)} ${args.join(' ')}\n`);
-      const code = await runStreaming(command, args, uvEnv(), push);
+      // uv writes its normal progress (Resolved…, Downloading…) to stderr: shown as regular output,
+      // a failure is still reported by the exit code and the final error line
+      const code = await runStreaming(command, args, uvEnv(), (_stream, text) => push('stdout', text));
       if (code !== 0) throw new Error(`«${path.basename(command)} ${args[0]}» terminó con código ${code}`);
     },
   };

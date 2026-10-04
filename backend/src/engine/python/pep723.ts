@@ -144,6 +144,37 @@ export function pythonSatisfies(version: string, spec: string | undefined): bool
   });
 }
 
+/**
+ * Reads a requirements.txt: one requirement per line, comments and continuation lines allowed.
+ * pip options (-r, -e, --index-url…), local paths and bare URLs cannot go in a PEP 723 header, so
+ * they are returned as ignored with the reason. A package listed twice keeps its last line.
+ */
+export function parseRequirementsText(text: string): { specs: string[]; ignored: Array<{ line: string; reason: string }> } {
+  const ignored: Array<{ line: string; reason: string }> = [];
+  const byName = new Map<string, string>();
+  const joined = String(text || '').replace(/^﻿/, '').replace(/\\\r?\n/g, ' ');
+
+  for (const raw of joined.split(/\r?\n/)) {
+    const line = raw.replace(/(^|\s)#.*$/, '').trim();
+    if (!line) continue;
+    if (line.startsWith('-')) {
+      ignored.push({ line, reason: 'Opción de pip: no se admite en las dependencias del script' });
+      continue;
+    }
+    const spec = line.replace(/\s--hash[=\s]\S+/g, '').replace(/\s+/g, ' ').trim();
+    if (/^(\.|\/|[A-Za-z]:[\\/])/.test(spec) || (/:\/\//.test(spec) && !/\s@\s/.test(spec))) {
+      ignored.push({ line, reason: 'Ruta local o URL sin nombre de paquete' });
+      continue;
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*/.test(spec)) {
+      ignored.push({ line, reason: 'No parece un paquete' });
+      continue;
+    }
+    byName.set(requirementName(spec), spec);
+  }
+  return { specs: [...byName.values()], ignored };
+}
+
 /** Top-level module names imported by the script (relative imports and docstrings ignored) */
 export function detectImports(code: string): string[] {
   const found = new Set<string>();

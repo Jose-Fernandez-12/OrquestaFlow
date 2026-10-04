@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Plus, Trash2, Wrench, RefreshCw, Loader2, ScanSearch, Terminal, Info } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Plus, Trash2, Wrench, RefreshCw, Loader2, ScanSearch, Terminal, Info, FileUp } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
@@ -36,6 +36,28 @@ export function ScriptDependenciesTab({ scriptId, refreshKey, busy, onPrepare, o
   const [python, setPython] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [replaceOnImport, setReplaceOnImport] = useState(false);
+  const [ignored, setIgnored] = useState<Array<{ line: string; reason: string }>>([]);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const importFile = async (file: File) => {
+    setSaving(true);
+    setMessage(null);
+    setIgnored([]);
+    try {
+      const result = await apiRequest<{ imported: number; ignored: Array<{ line: string; reason: string }> }>(
+        `/scripts/${scriptId}/dependencies/import`, 'POST', { text: await file.text(), mode: replaceOnImport ? 'replace' : 'merge' },
+      );
+      setIgnored(result.ignored);
+      setMessage(`${result.imported} paquete(s) importados de ${file.name}. Se instalarán al preparar el entorno o al ejecutarlo.`);
+      onChanged();
+      await load();
+    } catch (err: any) {
+      setMessage(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -130,7 +152,7 @@ export function ScriptDependenciesTab({ scriptId, refreshKey, busy, onPrepare, o
       <div className="space-y-2">
         <div className="font-semibold text-fg">Paquetes que necesita</div>
         {deps.length === 0 ? (
-          <p className="text-muted">No declara paquetes. Agrégalos aquí o detéctalos a partir de sus <code className="font-mono">import</code>.</p>
+          <p className="text-muted">No declara paquetes. Importa su requirements.txt, agrégalos uno a uno o detéctalos a partir de sus <code className="font-mono">import</code>.</p>
         ) : (
           <div className="rounded-md border border-border divide-y divide-border">
             <div className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)_28px] gap-2 px-3 py-1.5 text-[11px] text-muted">
@@ -171,6 +193,24 @@ export function ScriptDependenciesTab({ scriptId, refreshKey, busy, onPrepare, o
             {saving ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />} Agregar
           </Button>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input ref={fileRef} type="file" accept=".txt" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ''; }} />
+          <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()} disabled={saving} className="h-8 min-h-0 gap-1.5 text-xs">
+            <FileUp size={12} /> Importar requirements.txt
+          </Button>
+          {deps.length > 0 && (
+            <label className="flex items-center gap-1.5 text-[11px] text-muted">
+              <input type="checkbox" checked={replaceOnImport} onChange={e => setReplaceOnImport(e.target.checked)} />
+              Reemplazar la lista actual
+            </label>
+          )}
+        </div>
+        {ignored.length > 0 && (
+          <div className="p-2.5 rounded-md border border-warn/40 bg-warn/10 text-[11px] space-y-0.5">
+            <div className="font-medium">No se importaron:</div>
+            {ignored.map(i => <div key={i.line}><code className="font-mono">{i.line}</code> <span className="text-muted">— {i.reason}</span></div>)}
+          </div>
+        )}
         <p className="text-[11px] text-muted flex items-start gap-1.5 leading-relaxed">
           <Info size={12} className="shrink-0 mt-0.5" />
           Sin versión fija usa la que ya esté en el entorno compartido. Con una versión fija que choque con la compartida, el script recibe su propio entorno.

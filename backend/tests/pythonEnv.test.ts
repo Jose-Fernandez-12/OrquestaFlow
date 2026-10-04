@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseScriptMetadata, writeScriptMetadata, pythonSatisfies, detectImports, moduleToPackage, requirementName } from '../src/engine/python/pep723';
+import { parseScriptMetadata, writeScriptMetadata, parseRequirementsText, pythonSatisfies, detectImports, moduleToPackage, requirementName } from '../src/engine/python/pep723';
 import { parseDryRun, decideEnvironment, depsHash, summarizeScriptEnvironment } from '../src/engine/python/scriptEnv';
 import { resolveInterpreter, runtimePaths, PythonNotReadyError, type PythonEnvStatus } from '../src/engine/python/environment';
 import { buildSetupSteps, uvAssetName, validateRequirementSpec, withRequirement, withoutRequirement } from '../src/engine/python/setup';
@@ -230,5 +230,34 @@ describe('script environment decision', () => {
     expect(summarizeScriptEnvironment('s', shared, header.replace('tabulate', 'tabulate==0.8'), ready).view).toBe('pendiente');
     expect(summarizeScriptEnvironment('s', shared, header, { ...ready, venv: null }).view).toBe('no-preparado');
     expect(summarizeScriptEnvironment('s', null, '# /// script\n# dependencies = 1\n# ///\n', ready).view).toBe('invalido');
+  });
+});
+
+describe('parseRequirementsText', () => {
+  it('reads requirements and explains what cannot go in the header', () => {
+    const text = [
+      '﻿# dependencias del reporte',
+      'pandas==2.2.3  # fija',
+      'openpyxl>=3.1 ; python_version >= "3.9"',
+      'requests \\',
+      '  >=2.31',
+      'numpy==1.26.4 --hash=sha256:abc',
+      '-r otros.txt',
+      '--index-url https://interno/simple',
+      './libs/propia',
+      'https://x.org/paquete.whl',
+      'mipaquete @ https://x.org/mipaquete-1.0.whl',
+      'pandas==2.2.2',
+      '',
+    ].join('\r\n');
+    const { specs, ignored } = parseRequirementsText(text);
+    expect(specs).toEqual([
+      'pandas==2.2.2',
+      'openpyxl>=3.1 ; python_version >= "3.9"',
+      'requests >=2.31',
+      'numpy==1.26.4',
+      'mipaquete @ https://x.org/mipaquete-1.0.whl',
+    ]);
+    expect(ignored.map(i => i.line)).toEqual(['-r otros.txt', '--index-url https://interno/simple', './libs/propia', 'https://x.org/paquete.whl']);
   });
 });

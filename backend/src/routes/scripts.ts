@@ -8,7 +8,7 @@ import {
   serializeRun, readScriptContent, scriptLanguage, resolveScriptPath,
 } from '../engine/scriptRunner.js';
 import { getEnvironmentStatus, refreshEnvironment, isStdlibModule, type PythonEnvStatus } from '../engine/python/environment.js';
-import { parseScriptMetadata, writeScriptMetadata, detectImports, moduleToPackage, normalizePackageName, requirementName } from '../engine/python/pep723.js';
+import { parseScriptMetadata, writeScriptMetadata, parseRequirementsText, detectImports, moduleToPackage, normalizePackageName, requirementName } from '../engine/python/pep723.js';
 import { summarizeScriptEnvironment, prepareScriptEnvironment, removeScriptEnvironment, scriptEnvPaths } from '../engine/python/scriptEnv.js';
 import { validateRequirementSpec } from '../engine/python/setup.js';
 
@@ -28,12 +28,13 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       SELECT COUNT(*) as count FROM execution_logs
       WHERE target_type = 'script' AND started_at >= date('now')
     `).get() as { count: number };
+    const activeSchedules = db.prepare("SELECT COUNT(*) as count FROM schedules WHERE target_type = 'script' AND is_active = 1").get() as { count: number };
     const status = getEnvironmentStatus() ?? await refreshEnvironment();
 
     return {
       data: rows.map(({ env_state, ...row }) => ({ ...row, env: envSummary({ ...row, env_state }, status) })),
       meta: {
-        activeCount: rows.length,
+        activeCount: activeSchedules.count,
         executedToday: todayLogs.count
       }
     };
@@ -113,6 +114,39 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     }
     const status = getEnvironmentStatus() ?? await refreshEnvironment();
     return { data: summarizeScriptEnvironment(script.id, script.env_state, readFileSync(fullPath, 'utf-8'), status) };
+  });
+
+  // Import a requirements.txt into the script's header: 'merge' adds/updates packages, 'replace' sets the list
+  app.post<{ Params: { id: string }; Body: { text?: string; mode?: 'merge' | 'replace' } }>('/:id/dependencies/import', async (request, reply) => {
+    const script = getDb().prepare('SELECT * FROM scripts WHERE id = ?').get(request.params.id) as any;
+    if (!script) return reply.status(404).send({ error: 'Script not found' });
+    const fullPath = resolveScriptPath(script.file_path);
+    if (scriptLanguage(fullPath) !== 'python') return reply.status(400).send({ error: 'Solo los scripts Python tienen dependencias.' });
+
+    const { specs, ignored } = parseRequirementsText(String(request.body?.text ?? ''));
+    if (specs.length === 0 && ignored.length === 0) return reply.status(400).send({ error: 'El archivo no contiene paquetes.' });
+
+    const code = readFileSync(fullPath, 'utf-8');
+    const current = parseScriptMetadata(code);
+    if (!current.ok) return reply.status(400).send({ error: current.error });
+    const existing = current.metadata?.dependencies || [];
+    const imported = new Map(specs.map(s => [requirementName(s), s]));
+    const dependencies = request.body?.mode === 'replace'
+      ? specs
+      : [...existing.map(d => imported.get(requirementName(d)) ?? d), ...specs.filter(s => !existing.some(d => requirementName(d) === requirementName(s)))];
+    try {
+      writeFileSync(fullPath, writeScriptMetadata(code, { dependencies, requiresPython: current.metadata?.requiresPython }));
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message });
+    }
+    const status = getEnvironmentStatus() ?? await refreshEnvironment();
+    return {
+      data: {
+        imported: specs.length,
+        ignored,
+        env: summarizeScriptEnvironment(script.id, script.env_state, readFileSync(fullPath, 'utf-8'), status),
+      },
+    };
   });
 
   // Prepare the script's environment (shared or its own); output over Socket.IO like the base setup
