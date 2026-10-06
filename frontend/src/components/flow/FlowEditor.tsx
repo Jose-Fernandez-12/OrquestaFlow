@@ -1565,7 +1565,7 @@ function FlowCanvas() {
               nodesConnectable={!isLocked}
               elementsSelectable={true}
               fitView
-              className="bg-bg"
+              className="bg-bg select-none"
               proOptions={{ hideAttribution: true }}
             >
               <Background gap={16} size={1} color="#e5e5e5" />

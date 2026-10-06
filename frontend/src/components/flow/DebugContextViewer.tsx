@@ -52,6 +52,8 @@ export interface HttpRequestPreview {
   iteration?: {
     current: number;
     total: number;
+    // Enclosing loops of a nested forEach, outermost first
+    outer?: Array<{ label: string; current: number; total: number }>;
   };
   item?: any;
 }
@@ -66,6 +68,8 @@ export interface HttpResponsePreview {
   iteration?: {
     current: number;
     total: number;
+    // Enclosing loops of a nested forEach, outermost first
+    outer?: Array<{ label: string; current: number; total: number }>;
   };
 }
 

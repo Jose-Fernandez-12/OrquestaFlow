@@ -1,0 +1,14 @@
+# Paquetes del entorno Python compartido de OrquestaFlow (backend/.runtime/venv).
+#
+# - Un paquete por línea, con versión fija si quieres resultados reproducibles: pandas==2.2.3
+# - Se instalan con «npm run python:setup» o desde Configuración → Entorno Python.
+# - Un script que necesite versiones propias puede declararlas en su cabecera (PEP 723):
+#     # /// script
+#     # dependencies = ["pandas>=2.2"]
+#     # ///
+#   y se ejecuta en su propio entorno aislado, sin depender de este archivo.
+#
+# Ejemplos (quita el # para activarlos):
+# pandas==2.2.3
+# openpyxl==3.1.5
+# requests==2.32.3

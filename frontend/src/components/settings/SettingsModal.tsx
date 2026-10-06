@@ -51,6 +51,7 @@ export function SettingsModal() {
     }
   }, [isOpen, settings]);
 
+
   if (!isOpen) return null;
 
   const handleChange = (key: keyof SystemSettings, value: any) => {
@@ -277,10 +278,28 @@ export function SettingsModal() {
                   El archivo siempre incluye todas las filas.
                 </p>
               </div>
+
+              <div className="p-3.5 bg-bg rounded-md border border-border space-y-2">
+                <label className="text-xs font-semibold text-fg">Versión de Python de los scripts</label>
+                <select
+                  value={formData.python_version || '3.12'}
+                  onChange={(e) => handleChange('python_version', e.target.value)}
+                  className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-3 py-1.5 text-xs focus-visible:outline-none focus-visible:border-accent"
+                >
+                  {[...new Set(['3.10', '3.11', '3.12', '3.13', formData.python_version || '3.12'])].map(v => (
+                    <option key={v} value={v}>Python {v}{v === '3.12' ? ' (recomendado)' : ''}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-muted">
+                  La del entorno base que comparten los scripts Python. Tras cambiarla, pulsa «Gestionar → Comprobar y actualizar» en Scripts
+                  para recrear el entorno. Un script puede pedir otra versión en su pestaña Dependencias.
+                </p>
+              </div>
             </div>
           )}
 
           {activeTab === 'connections' && <ConnectionsDataSettings />}
+
 
           {activeTab === 'experimental' && (
             <div className="space-y-4">

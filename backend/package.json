@@ -8,6 +8,10 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint src/",
+    "seed:test": "tsx src/scripts/seed-test-flows.ts",
+    "seed:data": "tsx src/scripts/seed-test-data.ts",
+    "python:setup": "tsx src/scripts/python-setup.ts",
+    "python:status": "tsx src/scripts/python-setup.ts --status",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -26,6 +30,7 @@
     "jszip": "^3.10.1",
     "mssql": "^11.0.1",
     "node-cron": "^3.0.3",
+    "smol-toml": "^1.9.0",
     "socket.io": "^4.8.1",
     "sql.js": "^1.14.2",
     "uuid": "^11.1.0"

@@ -13,6 +13,8 @@ import { getRetryPolicy, runWithRetry, isAbortError, isRetryableStatus, HTTP_NOD
 import type { ExecutionTracer } from './executionLog.js';
 import { instrumentTransformCode, type BreakpointResolution } from './transformDebug.js';
 import { resolveReferences, buildSqlPreview, describeQueryParams } from './debugPreview.js';
+import { resolveInterpreter } from './python/environment.js';
+import { scriptInterpreterEnv } from './python/scriptEnv.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -912,7 +914,7 @@ async function executeHttpNode(
 
 // Scraping script: a script registered in the Scripts section (by id or name) or, for older flows,
 // a file in the server's scripts/ folder
-export function resolveScrapingScript(scriptRef: string): { path: string; fileName: string } | null {
+export function resolveScrapingScript(scriptRef: string): { path: string; fileName: string; scriptId?: string } | null {
   const ref = String(scriptRef || '').trim();
   if (!ref) return null;
   try {
@@ -920,7 +922,7 @@ export function resolveScrapingScript(scriptRef: string): { path: string; fileNa
     if (row?.file_path) {
       const registered = path.join(process.cwd(), 'uploads', row.file_path);
       if (fs.existsSync(registered)) {
-        return { path: registered, fileName: path.basename(row.file_path).replace(/^[0-9a-f-]{36}_/, '') };
+        return { path: registered, fileName: path.basename(row.file_path).replace(/^[0-9a-f-]{36}_/, ''), scriptId: row.id };
       }
     }
   } catch { }
@@ -947,14 +949,18 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
   const url = String(resolveTemplate(context, node.data?.url || '') ?? '');
   const selector = String(resolveTemplate(context, node.data?.selector || '') ?? '');
   const timeoutMs = Math.max(1, Number(getSystemSettingsFromDb().script_timeout_seconds) || 60) * 1000;
+  // Same interpreter choice as the Scripts console: PEP 723 via uv, shared venv or system Python
+  const scriptCode = fs.readFileSync(script.path, 'utf-8');
+  const interpreter = resolveInterpreter(script.path, scriptCode, { scriptEnv: scriptInterpreterEnv(script.scriptId, scriptCode) });
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       return reject(new Error('Ejecución detenida por el usuario'));
     }
 
-    const py = spawn(process.env.PYTHON_PATH || 'python', [script.path], {
-      env: { ...process.env, SCRAPING_URL: url, SCRAPING_SELECTOR: selector, PYTHONIOENCODING: 'utf-8' },
+    const py = spawn(interpreter.command, interpreter.args, {
+      env: { ...process.env, ...interpreter.env, SCRAPING_URL: url, SCRAPING_SELECTOR: selector },
+      windowsHide: true,
     });
     let stdout = '';
     let stderr = '';
@@ -977,7 +983,7 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
 
     py.on('error', err => {
       clearTimeout(timer);
-      reject(new Error(`Web scraping: no se pudo ejecutar Python (${err.message}). Configura PYTHON_PATH en el servidor.`));
+      reject(new Error(`Web scraping: no se pudo ejecutar «${path.basename(interpreter.command)}» (${err.message}).`));
     });
     py.stdout.on('data', data => stdout += data.toString());
     py.stderr.on('data', data => stderr += data.toString());
