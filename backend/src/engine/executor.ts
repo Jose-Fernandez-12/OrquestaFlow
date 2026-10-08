@@ -8,7 +8,7 @@ import mssql from 'mssql';
 import ExcelJS from 'exceljs';
 import { parseExcelOrCsvFile } from '../routes/files.js';
 import { getSystemSettingsFromDb } from '../routes/settings.js';
-import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes } from './graph.js';
+import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes, getWaitDependencies, findWaitDeadlocks, WAIT_NODE_TYPE } from './graph.js';
 import { getRetryPolicy, runWithRetry, isAbortError, isRetryableStatus, HTTP_NODE_TYPES, RETRYABLE_NODE_TYPES, type RetryPolicy } from './retry.js';
 import type { ExecutionTracer } from './executionLog.js';
 import { instrumentTransformCode, type BreakpointResolution } from './transformDebug.js';
@@ -212,6 +212,25 @@ export async function executeFlowEngine(
     }
   }
 
+  // "Esperar nodo": the awaited nodes become extra inputs of the wait node, so Kahn holds it (and
+  // everything after it) until they finish. Added after the loop pairing above so they never alter
+  // it; nodes inside a loop body are managed by their forEach and cannot be awaited from outside.
+  const waitDependencies = getWaitDependencies(nodes).filter(
+    d => !forEachManagedNodeIds.has(d.source) && !forEachManagedNodeIds.has(d.target)
+  );
+  const waitDeadlocks = findWaitDeadlocks(normalizedEdges, waitDependencies);
+  if (waitDeadlocks.length > 0) {
+    activeFlowExecutions.delete(flowId);
+    const describe = (id: string) => nodes.find(n => n.id === id)?.data?.label || id;
+    throw new Error(
+      `Bloqueo en "Esperar nodo": ${waitDeadlocks.map(d => `"${describe(d.target)}" espera a "${describe(d.source)}", que se ejecuta después de él`).join('; ')}.`
+    );
+  }
+  for (const dep of waitDependencies) {
+    adjList[dep.source].push(dep.target);
+    inDegree[dep.target] = (inDegree[dep.target] || 0) + 1;
+  }
+
   const systemSettings = getSystemSettingsFromDb();
   const experimentalEnabled = systemSettings.experimental_nodes_enabled;
   const disabledExperimental = nodes.find(n => EXPERIMENTAL_NODE_TYPES.includes(n.type));
@@ -289,6 +308,27 @@ export async function executeFlowEngine(
                 throw new Error('Ejecución detenida por el usuario');
               }
 
+              // Its real inputs all came from branches not taken: only the awaited nodes arrived,
+              // which must not bring this branch back to life
+              if (node.type === WAIT_NODE_TYPE) {
+                const realInputs = normalizedEdges.filter(e => e.target === node.id);
+                const inactiveInput = (e: any) =>
+                  skippedNodes.has(e.source) ||
+                  (nodes.find(n => n.id === e.source)?.type === 'conditionalBranch' &&
+                    !edgeFollowsBranch(e, context[e.source]?.selectedHandle));
+                if (realInputs.length > 0 && realInputs.every(inactiveInput)) {
+                  skippedNodes.add(node.id);
+                  completedNodes.add(node.id);
+                  notifyProgress(node.id, 'completed', { skipped: true, reason: 'Rama condicional no seleccionada' });
+                  const branchState: BranchSkipState = {
+                    inDegree, initialInDegree, skippedIncoming, skippedNodes, completedNodes,
+                    adjList, notify: notifyProgress
+                  };
+                  for (const next of adjList[node.id] || []) skipIncomingEdge(next, branchState);
+                  return;
+                }
+              }
+
               const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(node.type);
               const currentExec = activeFlowExecutions.get(flowId);
               if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
@@ -353,6 +393,9 @@ export async function executeFlowEngine(
                           output = context[timerUpstreamIds[0]];
                         }
                       }
+                      break;
+                    case WAIT_NODE_TYPE:
+                      output = executeWaitNode(node, context, edges, nodes);
                       break;
                     case 'dataSource':
                     case 'fileSource':
@@ -1731,6 +1774,17 @@ async function executeTimerNode(
   };
 }
 
+// "Esperar nodo": the engine already held it until the awaited nodes finished, so it only lets the
+// data of its real input pass through (the awaited nodes are not data sources).
+function executeWaitNode(node: any, context: Record<string, any>, edges: any[], nodes: any[]) {
+  const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+  if (upstreamIds.length > 0 && context[upstreamIds[0]]) {
+    return context[upstreamIds[0]];
+  }
+  const waitedFor = Array.isArray(node.data?.waitForNodeIds) ? node.data.waitForNodeIds : [];
+  return { success: true, waitedFor, msg: `Espera completada (${waitedFor.length} nodo${waitedFor.length === 1 ? '' : 's'})` };
+}
+
 // Helper to trace back through timers/delays to find the real upstream data sources
 function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[] = []): string[] {
   const incomingEdges = (edges || []).filter(e => e.target === nodeId);
@@ -1743,7 +1797,7 @@ function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[]
       continue;
     }
 
-    if (sourceNode.type === 'timer' || sourceNode.type === 'delay' || sourceNode.type === 'conditionalBranch') {
+    if (sourceNode.type === 'timer' || sourceNode.type === 'delay' || sourceNode.type === 'conditionalBranch' || sourceNode.type === WAIT_NODE_TYPE) {
       const upstreamSources = getEffectiveDataSources(sourceNode.id, edges, nodes);
       result.push(...upstreamSources);
     } else if (sourceNode.type !== 'start') {
@@ -1778,7 +1832,7 @@ async function executeDataSourceNode(
       : Object.keys(context).filter(k => {
         if (k === 'start' || k === node.id) return false;
         const n = (nodes || []).find(nodeItem => nodeItem.id === k);
-        return n?.type !== 'timer' && n?.type !== 'delay';
+        return n?.type !== 'timer' && n?.type !== 'delay' && n?.type !== WAIT_NODE_TYPE;
       });
 
     const contextResults: any[][] = [];
@@ -2285,6 +2339,10 @@ async function executeForEachNode(
                             output = localContext[timerUpstreamIds[0]];
                           }
                         }
+                        break;
+                      case WAIT_NODE_TYPE:
+                        // Inside a loop body the order is already set by the iteration itself
+                        output = executeWaitNode(subNode, localContext, edges, nodes);
                         break;
                       case 'dataSource':
                       case 'fileSource':

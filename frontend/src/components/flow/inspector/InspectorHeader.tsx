@@ -4,7 +4,7 @@ import { TYPE_LABELS, TYPE_COLORS, TYPE_BG_COLORS } from './types';
 import {
   Play, Globe, Code, FileOutput, Database, Clock,
   FileSpreadsheet, List, Repeat, Square, Check, Loader2, X,
-  Pause, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal, Copy, StickyNote
+  Pause, Hourglass, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal, Copy, StickyNote
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -20,6 +20,7 @@ export const TYPE_ICONS: Record<string, React.ElementType> = {
   query: Database,
   timer: Clock,
   delay: Clock,
+  waitFor: Hourglass,
   dataSource: FileSpreadsheet,
   fileSource: FileSpreadsheet,
   dataList: List,

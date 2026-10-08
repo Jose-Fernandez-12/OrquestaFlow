@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { configReferencesNode, normalizeEdges, findForEachEndNode, getForEachSubgraphNodes, isBranchHandle } from '../src/engine/graph';
+import { configReferencesNode, normalizeEdges, findForEachEndNode, getForEachSubgraphNodes, isBranchHandle, getWaitDependencies, findWaitDeadlocks } from '../src/engine/graph';
 
 describe('configReferencesNode', () => {
   it('detects templates that reference the node', () => {
@@ -131,5 +131,34 @@ describe('isBranchHandle', () => {
     expect(isBranchHandle('default')).toBe(true);
     expect(isBranchHandle(null)).toBe(false);
     expect(isBranchHandle('out')).toBe(false);
+  });
+});
+
+describe('getWaitDependencies / findWaitDeadlocks', () => {
+  const nodes = [
+    { id: 'a', type: 'dataList', data: {} },
+    { id: 'd', type: 'dataList', data: {} },
+    { id: 'nota', type: 'note', data: {} },
+    { id: 'w', type: 'waitFor', data: { waitForNodeIds: ['d', 'd', 'nota', 'w', 'borrado', 7] } },
+    { id: 'b', type: 'dataList', data: {} },
+  ];
+
+  it('turns the awaited ids into implicit edges, ignoring duplicates, notes, itself and missing nodes', () => {
+    expect(getWaitDependencies(nodes)).toEqual([{ source: 'd', target: 'w' }]);
+  });
+
+  it('does not treat the awaited ids as data references (no edge is flipped)', () => {
+    const edges = [{ id: 'e', source: 'd', target: 'w' }];
+    expect(normalizeEdges(nodes, edges)).toEqual(edges);
+  });
+
+  it('finds no deadlock when the awaited node is independent', () => {
+    const edges = [{ source: 'a', target: 'd' }, { source: 'a', target: 'w' }, { source: 'w', target: 'b' }];
+    expect(findWaitDeadlocks(edges, getWaitDependencies(nodes))).toEqual([]);
+  });
+
+  it('finds the deadlock when the awaited node runs after the wait, directly or through other nodes', () => {
+    const edges = [{ source: 'a', target: 'w' }, { source: 'w', target: 'b' }, { source: 'b', target: 'd' }];
+    expect(findWaitDeadlocks(edges, getWaitDependencies(nodes))).toEqual([{ source: 'd', target: 'w' }]);
   });
 });

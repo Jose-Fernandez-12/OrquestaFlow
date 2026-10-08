@@ -473,3 +473,99 @@ describe('executeFlowEngine · multi-sheet export', () => {
     expect(sheets[1].rows).toBe(1);
   });
 });
+
+describe('executeFlowEngine · Esperar nodo', () => {
+  const wait = (id: string, waitFor: string[]) => ({ id, type: 'waitFor', data: { label: id, waitForNodeIds: waitFor } });
+  const timer1s = (id: string) => ({ id, type: 'timer', data: { label: id, duration: 1, unit: 'seconds' } });
+  const completionOrder = (events: Array<{ nodeId: string; status: string }>) =>
+    events.filter(e => e.status === 'completed').map(e => e.nodeId);
+  const branch = (id: string) => ({
+    id,
+    type: 'conditionalBranch',
+    data: { label: id, mode: 'if_else', conditions: [{ id: 'r1', left: '{{ventas.total}}', operator: 'gt', right: '100' }] },
+  });
+
+  it('holds the branches after it until the awaited node, which is not connected to them, finishes', async () => {
+    const { context, events } = await runFlow(
+      [
+        start, list('a', [{ n: 1 }, { n: 2 }]),
+        timer1s('espera_d'), list('d', [{ validado: true }]),
+        wait('w', ['d']), transform('b', 'return data.length;'), transform('c', 'return "c";'),
+      ],
+      [
+        edge('start', 'a'),
+        edge('a', 'espera_d'), edge('espera_d', 'd'), // D takes a second
+        edge('a', 'w'), edge('w', 'b'), edge('w', 'c'),
+      ]
+    );
+    const order = completionOrder(events);
+    expect(order.indexOf('d')).toBeLessThan(order.indexOf('w'));
+    expect(order.indexOf('w')).toBeLessThan(order.indexOf('b'));
+    expect(order.indexOf('w')).toBeLessThan(order.indexOf('c'));
+    // The wait lets the data of A through: B still reads A, not D
+    expect(context.b).toBe(2);
+    expect(context.c).toBe('c');
+  });
+
+  it('without the wait node the branches do not wait for the slow node', async () => {
+    const { events } = await runFlow(
+      [
+        start, list('a', [{ n: 1 }]), timer1s('espera_d'), list('d', [{ validado: true }]),
+        transform('b', 'return 1;'), transform('c', 'return 2;'),
+      ],
+      [edge('start', 'a'), edge('a', 'espera_d'), edge('espera_d', 'd'), edge('a', 'b'), edge('a', 'c')]
+    );
+    const order = completionOrder(events);
+    expect(order.indexOf('b')).toBeLessThan(order.indexOf('d'));
+    expect(order.indexOf('c')).toBeLessThan(order.indexOf('d'));
+  });
+
+  it('waits for several nodes and ignores ids of nodes that no longer exist', async () => {
+    const { context, events } = await runFlow(
+      [
+        start, list('a', [{ n: 1 }]), timer1s('t'), list('d1', [{ x: 1 }]), list('d2', [{ x: 2 }]),
+        wait('w', ['d1', 'd2', 'borrado']), transform('b', 'return "ok";'),
+      ],
+      [edge('start', 'a'), edge('a', 't'), edge('t', 'd1'), edge('a', 'd2'), edge('a', 'w'), edge('w', 'b')]
+    );
+    const order = completionOrder(events);
+    expect(order.indexOf('d1')).toBeLessThan(order.indexOf('b'));
+    expect(order.indexOf('d2')).toBeLessThan(order.indexOf('b'));
+    expect(context.b).toBe('ok');
+  });
+
+  it('refuses to run when the awaited node runs after the wait (they would wait for each other)', async () => {
+    await expect(
+      runFlow(
+        [start, list('a', [{ n: 1 }]), wait('w', ['b']), transform('b', 'return 1;')],
+        [edge('start', 'a'), edge('a', 'w'), edge('w', 'b')]
+      )
+    ).rejects.toThrow(/Bloqueo en "Esperar nodo"/);
+  });
+
+  it('keeps going when the awaited node was skipped by a branch', async () => {
+    const { context, trace } = await runFlow(
+      [
+        list('ventas', [{ total: 50 }]), branch('br'), list('d', [{ x: 1 }]),
+        wait('w', ['d']), transform('b', 'return "b";'),
+      ],
+      [edge('ventas', 'br'), edge('br', 'd', { sourceHandle: 'true' }), edge('ventas', 'w'), edge('w', 'b')]
+    );
+    expect(trace.find(t => t.nodeId === 'd')?.status).toBe('skipped');
+    expect(context.b).toBe('b');
+  });
+
+  it('skips the wait when its own input comes from a branch not taken, even if the awaited node ran', async () => {
+    const { context, trace } = await runFlow(
+      [
+        list('ventas', [{ total: 250 }]), branch('br'), list('d', [{ x: 1 }]),
+        wait('w', ['d']), transform('b', 'return "b";'),
+      ],
+      [edge('ventas', 'br'), edge('br', 'd', { sourceHandle: 'true' }), edge('br', 'w', { sourceHandle: 'false' }), edge('w', 'b')]
+    );
+    expect(context.d).toBeDefined();
+    expect(trace.find(t => t.nodeId === 'w')?.status).toBe('skipped');
+    expect(trace.find(t => t.nodeId === 'b')?.status).toBe('skipped');
+    expect(context.b).toBeUndefined();
+  });
+});

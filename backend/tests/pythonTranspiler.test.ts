@@ -170,6 +170,26 @@ describe('transpileFlowToPython', () => {
     expect(withNote.readmeMd).toContain('> antes del cierre');
   });
 
+  it('orders an "Esperar nodo" after the awaited node without turning it into a data input', () => {
+    const waited = transpileFlowToPython('Con espera', {
+      nodes: [
+        n('start', 'start'),
+        n('a', 'dataList', { label: 'Origen', items: '[{"x": 1}]' }),
+        n('w', 'waitFor', { label: 'Esperar validacion', waitForNodeIds: ['d', 'borrado'] }),
+        n('b', 'jsonTransform', { label: 'Rama B', transformType: 'javascript', expression: 'return data;' }),
+        n('d', 'dataList', { label: 'Validacion', items: '[]' }),
+      ],
+      edges: [e('start', 'a'), e('a', 'w'), e('w', 'b'), e('a', 'd')],
+    }, { queries: {} });
+    const calls = [...waited.script.matchAll(/^ {4}run\(ctx, (\w+)\)/gm)].map(m => m[1]);
+    expect(calls.indexOf('validacion')).toBeGreaterThan(-1);
+    expect(calls.indexOf('validacion')).toBeLessThan(calls.indexOf('esperar_validacion'));
+    expect(waited.script).toContain('espera a: Validacion');
+    // B reads the data of A through the wait, not the awaited node
+    expect(waited.script).toMatch(/def rama_b\(ctx\):[\s\S]*?ctx\.output_of\("a"\)/);
+    expect(waited.script).not.toContain('no se puede exportar');
+  });
+
   it('returns an empty package for a flow without nodes', () => {
     const empty = transpileFlowToPython('Vacío', { nodes: [], edges: [] }, { queries: {} });
     expect(empty.script).toContain('no tiene nodos');

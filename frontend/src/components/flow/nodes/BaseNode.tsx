@@ -5,6 +5,7 @@ import {
   Loader2,
   X,
   Clock,
+  Hourglass,
   FileSpreadsheet,
   Eye,
   Pause,
@@ -69,6 +70,7 @@ const typeIcons: Record<string, React.ElementType> = {
   query: Database,
   timer: Clock,
   delay: Clock,
+  waitFor: Hourglass,
   dataSource: FileSpreadsheet,
   fileSource: FileSpreadsheet,
   dataList: List,
@@ -93,6 +95,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
   const timerState = useAppSelector(state => state.flows.nodeTimers[id]);
   const retryState = useAppSelector(state => state.flows.nodeRetries?.[id]);
   const issues = useNodeIssues(id);
+  const waitCount = type === 'waitFor' && Array.isArray(data.waitForNodeIds) ? data.waitForNodeIds.length : 0;
 
   // A failure tolerated by "continue on error": the node is marked but the flow went on
   const continuedAfterError = hasError && Boolean(nodeResult?.continued);
@@ -112,6 +115,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     query: 'text-cyan-600',
     timer: 'text-amber-600',
     delay: 'text-amber-600',
+    waitFor: 'text-orange-600',
     dataSource: 'text-emerald-600',
     fileSource: 'text-emerald-600',
     dataList: 'text-violet-600',
@@ -135,6 +139,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     query: 'Consulta DB',
     timer: 'Pausa programada',
     delay: 'Pausa programada',
+    waitFor: 'Esperar nodo',
     dataSource: 'Obtener datos (Excel/CSV)',
     fileSource: 'Obtener datos (Excel/CSV)',
     dataList: 'Lista de datos',
@@ -362,6 +367,22 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
                 Pausa: {data.duration || 10} {data.unit === 'minutes' ? 'min' : data.unit === 'hours' ? 'h' : 's'}
               </div>
             )
+          ) : type === 'waitFor' ? (
+            <div className={cn('text-xs truncate flex items-center gap-1.5', executing ? 'text-orange-600 font-medium' : 'text-muted')}>
+              {executing && (
+                <span className="relative flex h-1.5 w-1.5 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-orange-500"></span>
+                </span>
+              )}
+              <span className="truncate">
+                {skipped
+                  ? 'Omitido · rama no tomada'
+                  : waitCount === 0
+                    ? 'Sin nodos que esperar'
+                    : `${executing ? 'Esperando a' : 'Espera a'} ${waitCount} nodo${waitCount === 1 ? '' : 's'}`}
+              </span>
+            </div>
           ) : (
             <div className="text-xs text-muted truncate flex items-center gap-1.5">
               <span className="truncate">

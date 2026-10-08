@@ -88,3 +88,37 @@ describe('validateFlow', () => {
     expect(messagesFor(validateFlow(nodes, edges), 'api')).toEqual([]);
   });
 });
+
+describe('validateFlow · Esperar nodo', () => {
+  const list = (id: string) => n(id, 'dataList', { items: '[]' });
+
+  it('accepts a wait for an independent node', () => {
+    const nodes = [n('start', 'start'), list('a'), list('d'), n('w', 'waitFor', { waitForNodeIds: ['d'] }), list('b')];
+    const edges = [e('start', 'a'), e('a', 'd'), e('a', 'w'), e('w', 'b')];
+    expect(validateFlow(nodes, edges)).toEqual([]);
+  });
+
+  it('warns when nothing is selected, the awaited node is gone or there is no input', () => {
+    const nodes = [n('start', 'start'), list('a'), n('w1', 'waitFor', { waitForNodeIds: [] }), n('w2', 'waitFor', { waitForNodeIds: ['borrado'] })];
+    const issues = validateFlow(nodes, [e('start', 'a'), e('a', 'w1'), e('w1', 'w2')]);
+    expect(messagesFor(issues, 'w1')).toEqual(['warning: No hay nodos seleccionados: no esperará a nada.']);
+    expect(messagesFor(issues, 'w2')).toEqual(['warning: Espera a un nodo que ya no existe; se ignorará.']);
+    const noInput = validateFlow([n('start', 'start'), n('w', 'waitFor', { waitForNodeIds: ['start'] }), list('b')], [e('start', 'b'), e('w', 'b')]);
+    expect(messagesFor(noInput, 'w')).toContain('warning: No tiene una entrada conectada: no hay datos que dejar pasar.');
+  });
+
+  it('flags as an error a node that runs after the wait (mutual deadlock)', () => {
+    const nodes = [n('start', 'start'), list('a'), n('w', 'waitFor', { waitForNodeIds: ['b'] }), list('b')];
+    const issues = validateFlow(nodes, [e('start', 'a'), e('a', 'w'), e('w', 'b')]);
+    expect(messagesFor(issues, 'w')).toEqual([expect.stringMatching(/^error: Esperar a "b": Este nodo se ejecuta después/)]);
+  });
+
+  it('warns that waiting for a node inside a loop is ignored', () => {
+    const nodes = [
+      n('start', 'start'), n('loop', 'forEach', { iterateOver: '{{a}}' }), list('dentro'), n('fin', 'forEachEnd'),
+      list('a'), n('w', 'waitFor', { waitForNodeIds: ['dentro'] }),
+    ];
+    const edges = [e('start', 'a'), e('a', 'loop'), e('loop', 'dentro'), e('dentro', 'fin'), e('a', 'w')];
+    expect(messagesFor(validateFlow(nodes, edges), 'w')).toEqual([expect.stringMatching(/^warning: Esperar a "dentro": Dentro de un bucle/)]);
+  });
+});
