@@ -123,8 +123,9 @@ export async function executeFlowEngine(
   const abortController = new AbortController();
   const mode = options?.mode || 'normal';
 
-  // Track active execution in memory
-  activeFlowExecutions.set(flowId, {
+  // Track active execution in memory. Everything below works on this run's own state: a node of a
+  // previous run that is still finishing (e.g. a query) must never touch the state of a newer run
+  const execution: ActiveExecutionState = {
     flowId,
     startTime: Date.now(),
     status: 'running',
@@ -133,13 +134,14 @@ export async function executeFlowEngine(
     resumeResolvers: {},
     nodes: {},
     abortController
-  });
+  };
+  activeFlowExecutions.set(flowId, execution);
+  const forgetExecution = () => {
+    if (activeFlowExecutions.get(flowId) === execution) activeFlowExecutions.delete(flowId);
+  };
 
   const notifyProgress = (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => {
-    const current = activeFlowExecutions.get(flowId);
-    if (current) {
-      current.nodes[nodeId] = { status, result };
-    }
+    execution.nodes[nodeId] = { status, result };
     options?.tracer?.record(nodeId, status, result);
     if (onNodeProgress) {
       onNodeProgress(nodeId, status, result);
@@ -220,7 +222,7 @@ export async function executeFlowEngine(
   );
   const waitDeadlocks = findWaitDeadlocks(normalizedEdges, waitDependencies);
   if (waitDeadlocks.length > 0) {
-    activeFlowExecutions.delete(flowId);
+    forgetExecution();
     const describe = (id: string) => nodes.find(n => n.id === id)?.data?.label || id;
     throw new Error(
       `Bloqueo en "Esperar nodo": ${waitDeadlocks.map(d => `"${describe(d.target)}" espera a "${describe(d.source)}", que se ejecuta después de él`).join('; ')}.`
@@ -235,7 +237,7 @@ export async function executeFlowEngine(
   const experimentalEnabled = systemSettings.experimental_nodes_enabled;
   const disabledExperimental = nodes.find(n => EXPERIMENTAL_NODE_TYPES.includes(n.type));
   if (disabledExperimental && !experimentalEnabled) {
-    activeFlowExecutions.delete(flowId);
+    forgetExecution();
     throw new Error(
       `El flujo usa el nodo experimental "${disabledExperimental.data?.label || disabledExperimental.type}". Habilita los nodos experimentales en Configuración para ejecutarlo.`
     );
@@ -281,12 +283,11 @@ export async function executeFlowEngine(
       for (const nodeId of runningPromises.keys()) {
         notifyProgress(nodeId, 'error', { error: 'Nodo detenido' });
       }
-      reject(new Error(activeFlowExecutions.get(flowId)?.cancelReason || 'Ejecución detenida por el usuario'));
+      reject(new Error(execution.cancelReason || 'Ejecución detenida por el usuario'));
     });
 
     const checkAndRun = () => {
-      const current = activeFlowExecutions.get(flowId);
-      if (hasError || current?.status === 'cancelled' || abortController.signal.aborted) {
+      if (hasError || execution.status === 'cancelled' || abortController.signal.aborted) {
         return; // Stop triggering new nodes if flow failed or cancelled
       }
 
@@ -330,7 +331,7 @@ export async function executeFlowEngine(
               }
 
               const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(node.type);
-              const currentExec = activeFlowExecutions.get(flowId);
+              const currentExec = execution;
               if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
                 notifyProgress(node.id, 'paused', { context: { ...context }, ...buildDebugPreview(node, context, normalizedEdges, nodes) });
                 await new Promise<void>((resolve) => {
@@ -562,11 +563,10 @@ export async function executeFlowEngine(
               checkAndRun();
             }).catch(err => {
               runningPromises.delete(node.id);
-              const current = activeFlowExecutions.get(flowId);
-              if (current && current.status !== 'cancelled') {
-                current.status = 'error';
+              if (execution.status !== 'cancelled') {
+                execution.status = 'error';
               }
-              scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
+              scheduleExecutionCleanup(flowId, execution);
               reject(err);
             });
           }
@@ -574,11 +574,9 @@ export async function executeFlowEngine(
       });
 
       if (allDone && runningPromises.size === 0) {
-        const current = activeFlowExecutions.get(flowId);
-        if (current && current.status !== 'cancelled') {
-          current.status = 'completed';
-        }
-        scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
+        // Not cancelled: checkAndRun returned at the top otherwise, and nothing can stop it in between
+        execution.status = 'completed';
+        scheduleExecutionCleanup(flowId, execution);
         resolve(context);
       }
     };
@@ -1953,7 +1951,8 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
     result = await executeSqliteQuery(connection.host, sqlText, params);
   } else {
     const { executeMssqlQuery } = await import('./mssql.js');
-    result = await executeMssqlQuery(connectionId, sqlText, params);
+    // The signal cancels the query on the server when the flow is stopped
+    result = await executeMssqlQuery(connectionId, sqlText, params, { signal });
   }
   if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
 

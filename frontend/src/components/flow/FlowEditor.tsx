@@ -882,7 +882,11 @@ function FlowCanvas() {
     nodeIds: string[],
     opts: { mode?: 'normal' | 'debug'; title: string; showResultOf?: string }
   ) => {
-    if (!currentFlow || testingNodeId || partialRunIds || isLiveExecuting) return;
+    if (!currentFlow) return;
+    if (testingNodeId || partialRunIds || isLiveExecuting) {
+      dispatch(showToast('Hay una ejecución en curso: espera a que termine o detenla antes de ejecutar nodos sueltos.'));
+      return;
+    }
     const runIds = nodeIds.filter(id => nodes.some(n => n.id === id && n.type !== 'note'));
     if (runIds.length === 0) return;
     const mode = opts.mode || 'normal';
