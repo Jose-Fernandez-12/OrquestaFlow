@@ -333,7 +333,20 @@ export async function executeFlowEngine(
               const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(node.type);
               const currentExec = execution;
               if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
-                notifyProgress(node.id, 'paused', { context: { ...context }, ...buildDebugPreview(node, context, normalizedEdges, nodes) });
+                const preview = node.type === WAIT_NODE_TYPE
+                  ? {
+                      nodePreview: {
+                        kind: 'wait',
+                        waitedFor: describeWaitedNodes(node, nodes, id =>
+                          skippedNodes.has(id) ? 'skipped'
+                            : errorNodes.has(id) ? 'error'
+                            : completedNodes.has(id) ? 'completed'
+                            : forEachManagedNodeIds.has(id) ? 'ignored'
+                            : 'pending'),
+                      },
+                    }
+                  : buildDebugPreview(node, context, normalizedEdges, nodes);
+                notifyProgress(node.id, 'paused', { context: { ...context }, ...preview });
                 await new Promise<void>((resolve) => {
                   if (currentExec.resumeResolvers) {
                     currentExec.resumeResolvers[node.id] = () => resolve();
@@ -1781,6 +1794,19 @@ function executeWaitNode(node: any, context: Record<string, any>, edges: any[], 
   }
   const waitedFor = Array.isArray(node.data?.waitForNodeIds) ? node.data.waitForNodeIds : [];
   return { success: true, waitedFor, msg: `Espera completada (${waitedFor.length} nodo${waitedFor.length === 1 ? '' : 's'})` };
+}
+
+// Debug preview of "Esperar nodo": every node it was holding for and how each one ended.
+// 'ignored' = the node lives inside a loop body, which the wait cannot see from outside.
+type WaitedNodeState = 'completed' | 'skipped' | 'error' | 'ignored' | 'pending';
+function describeWaitedNodes(node: any, nodes: any[], stateOf: (id: string) => WaitedNodeState) {
+  const ids: string[] = Array.isArray(node.data?.waitForNodeIds) ? node.data.waitForNodeIds : [];
+  return ids.flatMap(id => {
+    const target = nodes.find(n => n.id === id);
+    // Ids of nodes that were deleted are ignored by the engine too
+    if (!target) return [];
+    return [{ id, label: String(target.data?.label || target.type), state: stateOf(id) }];
+  });
 }
 
 // Helper to trace back through timers/delays to find the real upstream data sources

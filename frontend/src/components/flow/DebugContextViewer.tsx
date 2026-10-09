@@ -29,6 +29,7 @@ import {
   History,
   Terminal,
   Database,
+  Hourglass,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -40,6 +41,7 @@ import { ConsoleLogList, type ConsoleLogEntry } from './debug/ConsoleLogList';
 import { buildTransformSteps, type TransformTrace } from './debug/transformTrace';
 import { QueryPreviewPanel, type QueryPreview } from './debug/QueryPreviewPanel';
 import { ResolvedReferences, type ResolvedReference } from './debug/ResolvedReferences';
+import { WaitPreviewPanel, type WaitPreview } from './debug/WaitPreviewPanel';
 
 export interface HttpRequestPreview {
   method: string;
@@ -87,7 +89,7 @@ interface DebugContextViewerProps {
   bannerOnly?: boolean;
 }
 
-type ModalTab = 'request' | 'response' | 'query' | 'input' | 'console' | 'output';
+type ModalTab = 'request' | 'response' | 'query' | 'wait' | 'input' | 'console' | 'output';
 
 export function DebugContextViewer({
   node,
@@ -159,6 +161,7 @@ export function DebugContextViewer({
 
   const currentNodePreview = allNodePreviews[node.id]?.nodePreview;
   const queryPreview: QueryPreview | null = currentNodePreview?.kind === 'query' ? currentNodePreview : null;
+  const waitPreview: WaitPreview | null = currentNodePreview?.kind === 'wait' ? currentNodePreview : null;
   const effectiveOutput = useMemo(() => {
     if (currentNodePreview?.kind === 'transform_result') {
       return currentNodePreview.output;
@@ -245,6 +248,8 @@ export function DebugContextViewer({
       setActiveTab('request');
     } else if (queryPreview) {
       setActiveTab('query');
+    } else if (waitPreview) {
+      setActiveTab('wait');
     } else if (hasStepper || nodeLogs.length > 0) {
       setActiveTab('console');
     } else if (effectiveOutput !== undefined) {
@@ -252,7 +257,7 @@ export function DebugContextViewer({
     } else {
       setActiveTab('input');
     }
-  }, [responsePreview, requestPreview, queryPreview, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
+  }, [responsePreview, requestPreview, queryPreview, waitPreview, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
 
   // STRICT GRAPH ISOLATION:
   // Traverse backwards along incoming edges to find ONLY real ancestor nodes that lead into this node
@@ -770,6 +775,29 @@ export function DebugContextViewer({
             </div>
           )}
 
+          {waitPreview && (
+            <div className="flex items-center justify-between gap-2 text-muted">
+              <span className="truncate text-fg/80 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                <span>
+                  Espera lista
+                  <span className="font-mono text-[10px] text-muted">
+                    {' '}({waitPreview.waitedFor.filter(n => n.state === 'completed').length}/{waitPreview.waitedFor.length} terminaron)
+                  </span>
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => openModalWithTab('wait')}
+                className="text-accent hover:underline text-[10px] shrink-0 font-medium cursor-pointer flex items-center gap-1"
+                title="Ver los nodos que esperaba y cómo terminó cada uno"
+              >
+                <Hourglass size={11} />
+                <span>Ver espera</span>
+              </button>
+            </div>
+          )}
+
           {upstreamAncestorNodes.length > 0 && (
             <div className="flex items-center justify-between text-muted border-t border-border/20 pt-1">
               <span className="truncate max-w-[180px]">
@@ -1077,6 +1105,25 @@ export function DebugContextViewer({
                 </button>
               )}
 
+              {waitPreview && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('wait')}
+                  className={cn(
+                    "px-3.5 py-2.5 text-xs font-medium border-b-2 flex items-center gap-2 transition-colors cursor-pointer",
+                    activeTab === 'wait'
+                      ? "border-accent text-accent font-semibold"
+                      : "border-transparent text-muted hover:text-fg"
+                  )}
+                >
+                  <Hourglass size={14} />
+                  <span>Espera</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-accent/10 text-accent font-semibold">
+                    {waitPreview.waitedFor.length}
+                  </span>
+                </button>
+              )}
+
               {upstreamAncestorNodes.length > 0 && (
                 <button
                   type="button"
@@ -1271,6 +1318,7 @@ export function DebugContextViewer({
             )}
 
             {activeTab === 'query' && queryPreview && <QueryPreviewPanel preview={queryPreview} />}
+            {activeTab === 'wait' && waitPreview && <WaitPreviewPanel preview={waitPreview} />}
 
             {/* TAB 2: SERVER RESPONSE (Status, Headers, Body or Loading State) */}
             {activeTab === 'response' && isSending && isViewingActiveIter && !effectiveResponse && (
