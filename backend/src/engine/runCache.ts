@@ -13,7 +13,7 @@ export interface RunCache {
   skipped: string[];
 }
 
-const PASS_THROUGH_TYPES = ['timer', 'delay', 'conditionalBranch'];
+const PASS_THROUGH_TYPES = ['timer', 'delay', 'conditionalBranch', 'waitFor'];
 
 // Variables of the current loop iteration: they belong to one moment of a run, never to its results.
 // Left in the context, an HTTP node would think it runs inside a loop and send a single request.

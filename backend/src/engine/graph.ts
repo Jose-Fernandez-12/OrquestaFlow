@@ -9,8 +9,70 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Keys that hold free text or layout, never a reference to another node
-const NON_REFERENCE_KEYS = new Set(['label', 'description', 'notes']);
+// Keys that hold free text or layout, never a reference to another node.
+// `waitForNodeIds` lists the nodes a "Esperar nodo" waits for: it is an ordering rule, not a data
+// reference, so it must never make normalizeEdges flip an edge.
+const NON_REFERENCE_KEYS = new Set(['label', 'description', 'notes', 'waitForNodeIds']);
+
+/** Type of the "Esperar nodo" node: lets its branch continue only after other nodes have finished. */
+export const WAIT_NODE_TYPE = 'waitFor';
+
+export interface WaitDependency {
+  /** Node that must finish first */
+  source: string;
+  /** The "Esperar nodo" that waits for it */
+  target: string;
+}
+
+/**
+ * Implicit edges of every "Esperar nodo": `waitForNodeIds` -> the wait node.
+ * They only order the execution; they carry no data, so they are never part of the drawn edges.
+ * Ids that no longer exist (deleted nodes), notes and the node itself are ignored.
+ */
+export function getWaitDependencies(nodes: any[]): WaitDependency[] {
+  const runnable = new Set(nodes.filter(n => n.type !== 'note').map(n => n.id));
+  const deps: WaitDependency[] = [];
+  for (const node of nodes) {
+    if (node.type !== WAIT_NODE_TYPE) continue;
+    const ids: unknown[] = Array.isArray(node.data?.waitForNodeIds) ? node.data.waitForNodeIds : [];
+    for (const source of new Set(ids)) {
+      if (typeof source === 'string' && source !== node.id && runnable.has(source)) {
+        deps.push({ source, target: node.id });
+      }
+    }
+  }
+  return deps;
+}
+
+/**
+ * Wait dependencies that can never be satisfied: the awaited node (transitively) runs after the
+ * wait node, so both would wait for each other forever.
+ */
+export function findWaitDeadlocks(edges: any[], deps: WaitDependency[]): WaitDependency[] {
+  const adj = new Map<string, string[]>();
+  const link = (from: string, to: string) => {
+    const list = adj.get(from);
+    if (list) list.push(to);
+    else adj.set(from, [to]);
+  };
+  edges.forEach(e => link(e.source, e.target));
+  deps.forEach(d => link(d.source, d.target));
+
+  // A dependency source -> target deadlocks when target already reaches source
+  const reaches = (from: string, goal: string): boolean => {
+    const seen = new Set<string>();
+    const stack = [from];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (id === goal) return true;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      stack.push(...(adj.get(id) || []));
+    }
+    return false;
+  };
+  return deps.filter(d => reaches(d.target, d.source));
+}
 
 /**
  * True when a node's configuration points at `nodeId`: either a field whose whole value is the id

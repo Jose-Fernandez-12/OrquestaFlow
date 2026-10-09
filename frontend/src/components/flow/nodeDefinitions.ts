@@ -121,7 +121,7 @@ export const HTTP_NODE_TYPES = ['httpGet', 'httpPost', 'httpRequest'];
 export const RETRYABLE_NODE_TYPES = [...HTTP_NODE_TYPES, 'scraping', 'query', 'oauth2Connector', 'aiChatCompletion'];
 
 /** Control-flow nodes: continuing past a failure would leave the graph in an undefined state */
-export const NO_CONTINUE_NODE_TYPES = ['start', 'forEach', 'forEachEnd', 'conditionalBranch'];
+export const NO_CONTINUE_NODE_TYPES = ['start', 'forEach', 'forEachEnd', 'conditionalBranch', 'waitFor'];
 
 export const supportsRetries = (type?: string) => !!type && RETRYABLE_NODE_TYPES.includes(type);
 export const supportsContinueOnError = (type?: string) => !!type && !NO_CONTINUE_NODE_TYPES.includes(type);
