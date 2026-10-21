@@ -1,5 +1,6 @@
 import type { Node, Edge } from '@xyflow/react';
 import { getBranchOutputs, getConditionRules, isBranchHandle } from '../nodeDefinitions';
+import { getWaitIssue } from '../waitForUtils';
 
 export type IssueLevel = 'error' | 'warning';
 
@@ -139,6 +140,21 @@ export function validateFlow(nodes: Node[], edges: Edge[]): FlowIssue[] {
         })();
         if (!reachesEnd) add(node.id, 'error', 'El bucle no llega a un nodo "Fin de bucle".');
         if (!text(data.iterateOver) && incoming(node.id).length === 0) add(node.id, 'error', 'El bucle no tiene una lista que recorrer.');
+        break;
+      }
+      case 'waitFor': {
+        const ids: string[] = Array.isArray(data.waitForNodeIds) ? data.waitForNodeIds : [];
+        const existing = ids.filter(id => nodes.some(n => n.id === id && n.type !== 'note'));
+        if (ids.length === 0) add(node.id, 'warning', 'No hay nodos seleccionados: no esperará a nada.', true);
+        else if (existing.length < ids.length) add(node.id, 'warning', 'Espera a un nodo que ya no existe; se ignorará.', true);
+        if (incoming(node.id).length === 0) add(node.id, 'warning', 'No tiene una entrada conectada: no hay datos que dejar pasar.');
+        for (const id of existing) {
+          const issue = getWaitIssue(node.id, id, nodes, edges);
+          if (!issue) continue;
+          const name = String(nodes.find(n => n.id === id)?.data?.label || id);
+          // A deadlock never finishes and the engine refuses to start; a loop makes the wait a no-op
+          add(node.id, issue.startsWith('Este nodo') ? 'error' : 'warning', `Esperar a "${name}": ${issue}`, true);
+        }
         break;
       }
       case 'scraping':

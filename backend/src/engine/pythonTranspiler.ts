@@ -7,7 +7,7 @@
  * (templates, HTTP with retries, SQL, exports, conditions...) live in orquesta_runtime.py.
  */
 
-import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes } from './graph.js';
+import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes, getWaitDependencies, WAIT_NODE_TYPE } from './graph.js';
 import { PYTHON_RUNTIME } from './python/runtime.js';
 import { envKey, pyCall, pyComment, pyIdentifier, pyLiteral, pyStr, slugify, type PyArg } from './python/pyCode.js';
 
@@ -155,7 +155,9 @@ function analyzeGraph(nodes: any[], rawEdges: any[]): FlowGraph {
   // Main DAG: loop bodies run inside their loop; the end node waits for its forEach
   const mainEdges = edges
     .filter(e => !loopOf.has(e.source) && !loopOf.has(e.target))
-    .concat([...endOf.entries()].map(([endId, feId]) => ({ source: feId, target: endId })));
+    .concat([...endOf.entries()].map(([endId, feId]) => ({ source: feId, target: endId })))
+    // "Esperar nodo": only orders the steps; it is not a data edge, so it stays out of `edges`
+    .concat(getWaitDependencies(nodes).filter(d => !loopOf.has(d.source) && !loopOf.has(d.target)));
   const mainOrder = kahnOrder(nodes, mainEdges, new Set(loopOf.keys()));
 
   return { nodes, edges, byId, mainOrder, loops, loopOf, endOf };
@@ -169,7 +171,7 @@ function effectiveSources(nodeId: string, g: FlowGraph, seen = new Set<string>()
   for (const e of g.edges.filter(e => e.target === nodeId)) {
     const src = g.byId.get(e.source);
     if (!src) continue;
-    if (['timer', 'delay', 'conditionalBranch'].includes(src.type)) result.push(...effectiveSources(src.id, g, seen));
+    if (['timer', 'delay', 'conditionalBranch', WAIT_NODE_TYPE].includes(src.type)) result.push(...effectiveSources(src.id, g, seen));
     else if (src.type !== 'start') result.push(src.id);
   }
   return [...new Set(result)];
@@ -359,6 +361,7 @@ class Generator {
       case 'dataList': return this.dataListBody(node);
       case 'variables': return this.variablesBody(node);
       case 'timer': case 'delay': return this.timerBody(node);
+      case WAIT_NODE_TYPE: return this.waitBody(node);
       case 'forEach': return this.forEachBody(node);
       case 'forEachEnd': {
         this.use('loop_results');
@@ -634,6 +637,17 @@ class Generator {
     return [`return pause(${seconds}, ${input.expr})  # deja pasar: ${pyComment(input.comment)}`];
   }
 
+  waitBody(node: any): string[] {
+    const waited = (Array.isArray(node.data?.waitForNodeIds) ? node.data.waitForNodeIds : [])
+      .filter((id: string) => this.g.byId.has(id))
+      .map((id: string) => this.label(this.g.byId.get(id)));
+    const note = waited.length ? `espera a: ${pyComment(waited.join(', '))}` : 'no espera a ningún nodo';
+    // Python runs the steps in order, so the awaited steps have already run; the data just passes through
+    if (!effectiveSources(node.id, this.g).length) return [`return {}  # ${note}`];
+    const input = this.inputExpr(node);
+    return [`return ${input.expr}  # ${note}; deja pasar: ${pyComment(input.comment)}`];
+  }
+
   forEachBody(node: any): string[] {
     const expr = String(node.data?.iterateOver || '').trim();
     if (expr) {
@@ -793,6 +807,7 @@ class Generator {
       case 'dataList': return 'Lista de datos';
       case 'variables': return 'Variables';
       case 'timer': case 'delay': return 'Pausa';
+      case WAIT_NODE_TYPE: return 'Esperar nodo';
       case 'forEach': return 'Bucle';
       case 'forEachEnd': return 'Fin de bucle';
       case 'conditionalBranch': return data.mode === 'switch' ? 'Switch' : 'Condición Sí/No';

@@ -13,6 +13,7 @@ export interface SystemSettingsMap {
   user_display_name: string;
   user_role_label: string;
   experimental_nodes_enabled: boolean;
+  python_version: string;
   [key: string]: any;
 }
 
@@ -25,7 +26,8 @@ export const DEFAULT_SETTINGS: SystemSettingsMap = {
   table_preview_row_limit: 500,
   user_display_name: 'Jose Fernandez',
   user_role_label: 'Administrador',
-  experimental_nodes_enabled: false
+  experimental_nodes_enabled: false,
+  python_version: '3.12'
 };
 
 const BOOLEAN_SETTINGS = ['experimental_nodes_enabled'];
@@ -74,6 +76,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       'table_preview_row_limit',
       'user_display_name',
       'user_role_label',
+      'python_version',
       ...BOOLEAN_SETTINGS
     ];
 
@@ -89,6 +92,10 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         } else if (k === 'http_max_retries') {
           const num = Math.max(0, Math.min(5, parseInt(stringValue, 10) || 0));
           stringValue = String(num);
+        } else if (k === 'python_version') {
+          // Minor version that uv installs for the shared environment, e.g. 3.12
+          if (!/^3\.\d{1,2}$/.test(stringValue.trim())) continue;
+          stringValue = stringValue.trim();
         } else if (BOOLEAN_SETTINGS.includes(k)) {
           stringValue = v === true || v === 'true' ? 'true' : 'false';
         }

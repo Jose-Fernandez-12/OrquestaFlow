@@ -8,11 +8,13 @@ import mssql from 'mssql';
 import ExcelJS from 'exceljs';
 import { parseExcelOrCsvFile } from '../routes/files.js';
 import { getSystemSettingsFromDb } from '../routes/settings.js';
-import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes } from './graph.js';
+import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes, getWaitDependencies, findWaitDeadlocks, WAIT_NODE_TYPE } from './graph.js';
 import { getRetryPolicy, runWithRetry, isAbortError, isRetryableStatus, HTTP_NODE_TYPES, RETRYABLE_NODE_TYPES, type RetryPolicy } from './retry.js';
 import type { ExecutionTracer } from './executionLog.js';
 import { instrumentTransformCode, type BreakpointResolution } from './transformDebug.js';
 import { resolveReferences, buildSqlPreview, describeQueryParams } from './debugPreview.js';
+import { resolveInterpreter } from './python/environment.js';
+import { scriptInterpreterEnv } from './python/scriptEnv.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -121,8 +123,9 @@ export async function executeFlowEngine(
   const abortController = new AbortController();
   const mode = options?.mode || 'normal';
 
-  // Track active execution in memory
-  activeFlowExecutions.set(flowId, {
+  // Track active execution in memory. Everything below works on this run's own state: a node of a
+  // previous run that is still finishing (e.g. a query) must never touch the state of a newer run
+  const execution: ActiveExecutionState = {
     flowId,
     startTime: Date.now(),
     status: 'running',
@@ -131,13 +134,14 @@ export async function executeFlowEngine(
     resumeResolvers: {},
     nodes: {},
     abortController
-  });
+  };
+  activeFlowExecutions.set(flowId, execution);
+  const forgetExecution = () => {
+    if (activeFlowExecutions.get(flowId) === execution) activeFlowExecutions.delete(flowId);
+  };
 
   const notifyProgress = (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => {
-    const current = activeFlowExecutions.get(flowId);
-    if (current) {
-      current.nodes[nodeId] = { status, result };
-    }
+    execution.nodes[nodeId] = { status, result };
     options?.tracer?.record(nodeId, status, result);
     if (onNodeProgress) {
       onNodeProgress(nodeId, status, result);
@@ -210,11 +214,30 @@ export async function executeFlowEngine(
     }
   }
 
+  // "Esperar nodo": the awaited nodes become extra inputs of the wait node, so Kahn holds it (and
+  // everything after it) until they finish. Added after the loop pairing above so they never alter
+  // it; nodes inside a loop body are managed by their forEach and cannot be awaited from outside.
+  const waitDependencies = getWaitDependencies(nodes).filter(
+    d => !forEachManagedNodeIds.has(d.source) && !forEachManagedNodeIds.has(d.target)
+  );
+  const waitDeadlocks = findWaitDeadlocks(normalizedEdges, waitDependencies);
+  if (waitDeadlocks.length > 0) {
+    forgetExecution();
+    const describe = (id: string) => nodes.find(n => n.id === id)?.data?.label || id;
+    throw new Error(
+      `Bloqueo en "Esperar nodo": ${waitDeadlocks.map(d => `"${describe(d.target)}" espera a "${describe(d.source)}", que se ejecuta después de él`).join('; ')}.`
+    );
+  }
+  for (const dep of waitDependencies) {
+    adjList[dep.source].push(dep.target);
+    inDegree[dep.target] = (inDegree[dep.target] || 0) + 1;
+  }
+
   const systemSettings = getSystemSettingsFromDb();
   const experimentalEnabled = systemSettings.experimental_nodes_enabled;
   const disabledExperimental = nodes.find(n => EXPERIMENTAL_NODE_TYPES.includes(n.type));
   if (disabledExperimental && !experimentalEnabled) {
-    activeFlowExecutions.delete(flowId);
+    forgetExecution();
     throw new Error(
       `El flujo usa el nodo experimental "${disabledExperimental.data?.label || disabledExperimental.type}". Habilita los nodos experimentales en Configuración para ejecutarlo.`
     );
@@ -260,12 +283,11 @@ export async function executeFlowEngine(
       for (const nodeId of runningPromises.keys()) {
         notifyProgress(nodeId, 'error', { error: 'Nodo detenido' });
       }
-      reject(new Error(activeFlowExecutions.get(flowId)?.cancelReason || 'Ejecución detenida por el usuario'));
+      reject(new Error(execution.cancelReason || 'Ejecución detenida por el usuario'));
     });
 
     const checkAndRun = () => {
-      const current = activeFlowExecutions.get(flowId);
-      if (hasError || current?.status === 'cancelled' || abortController.signal.aborted) {
+      if (hasError || execution.status === 'cancelled' || abortController.signal.aborted) {
         return; // Stop triggering new nodes if flow failed or cancelled
       }
 
@@ -287,10 +309,44 @@ export async function executeFlowEngine(
                 throw new Error('Ejecución detenida por el usuario');
               }
 
+              // Its real inputs all came from branches not taken: only the awaited nodes arrived,
+              // which must not bring this branch back to life
+              if (node.type === WAIT_NODE_TYPE) {
+                const realInputs = normalizedEdges.filter(e => e.target === node.id);
+                const inactiveInput = (e: any) =>
+                  skippedNodes.has(e.source) ||
+                  (nodes.find(n => n.id === e.source)?.type === 'conditionalBranch' &&
+                    !edgeFollowsBranch(e, context[e.source]?.selectedHandle));
+                if (realInputs.length > 0 && realInputs.every(inactiveInput)) {
+                  skippedNodes.add(node.id);
+                  completedNodes.add(node.id);
+                  notifyProgress(node.id, 'completed', { skipped: true, reason: 'Rama condicional no seleccionada' });
+                  const branchState: BranchSkipState = {
+                    inDegree, initialInDegree, skippedIncoming, skippedNodes, completedNodes,
+                    adjList, notify: notifyProgress
+                  };
+                  for (const next of adjList[node.id] || []) skipIncomingEdge(next, branchState);
+                  return;
+                }
+              }
+
               const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(node.type);
-              const currentExec = activeFlowExecutions.get(flowId);
+              const currentExec = execution;
               if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
-                notifyProgress(node.id, 'paused', { context: { ...context }, ...buildDebugPreview(node, context, normalizedEdges, nodes) });
+                const preview = node.type === WAIT_NODE_TYPE
+                  ? {
+                      nodePreview: {
+                        kind: 'wait',
+                        waitedFor: describeWaitedNodes(node, nodes, id =>
+                          skippedNodes.has(id) ? 'skipped'
+                            : errorNodes.has(id) ? 'error'
+                            : completedNodes.has(id) ? 'completed'
+                            : forEachManagedNodeIds.has(id) ? 'ignored'
+                            : 'pending'),
+                      },
+                    }
+                  : buildDebugPreview(node, context, normalizedEdges, nodes);
+                notifyProgress(node.id, 'paused', { context: { ...context }, ...preview });
                 await new Promise<void>((resolve) => {
                   if (currentExec.resumeResolvers) {
                     currentExec.resumeResolvers[node.id] = () => resolve();
@@ -351,6 +407,9 @@ export async function executeFlowEngine(
                           output = context[timerUpstreamIds[0]];
                         }
                       }
+                      break;
+                    case WAIT_NODE_TYPE:
+                      output = executeWaitNode(node, context, edges, nodes);
                       break;
                     case 'dataSource':
                     case 'fileSource':
@@ -517,11 +576,10 @@ export async function executeFlowEngine(
               checkAndRun();
             }).catch(err => {
               runningPromises.delete(node.id);
-              const current = activeFlowExecutions.get(flowId);
-              if (current && current.status !== 'cancelled') {
-                current.status = 'error';
+              if (execution.status !== 'cancelled') {
+                execution.status = 'error';
               }
-              scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
+              scheduleExecutionCleanup(flowId, execution);
               reject(err);
             });
           }
@@ -529,11 +587,9 @@ export async function executeFlowEngine(
       });
 
       if (allDone && runningPromises.size === 0) {
-        const current = activeFlowExecutions.get(flowId);
-        if (current && current.status !== 'cancelled') {
-          current.status = 'completed';
-        }
-        scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
+        // Not cancelled: checkAndRun returned at the top otherwise, and nothing can stop it in between
+        execution.status = 'completed';
+        scheduleExecutionCleanup(flowId, execution);
         resolve(context);
       }
     };
@@ -912,7 +968,7 @@ async function executeHttpNode(
 
 // Scraping script: a script registered in the Scripts section (by id or name) or, for older flows,
 // a file in the server's scripts/ folder
-export function resolveScrapingScript(scriptRef: string): { path: string; fileName: string } | null {
+export function resolveScrapingScript(scriptRef: string): { path: string; fileName: string; scriptId?: string } | null {
   const ref = String(scriptRef || '').trim();
   if (!ref) return null;
   try {
@@ -920,7 +976,7 @@ export function resolveScrapingScript(scriptRef: string): { path: string; fileNa
     if (row?.file_path) {
       const registered = path.join(process.cwd(), 'uploads', row.file_path);
       if (fs.existsSync(registered)) {
-        return { path: registered, fileName: path.basename(row.file_path).replace(/^[0-9a-f-]{36}_/, '') };
+        return { path: registered, fileName: path.basename(row.file_path).replace(/^[0-9a-f-]{36}_/, ''), scriptId: row.id };
       }
     }
   } catch { }
@@ -947,14 +1003,18 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
   const url = String(resolveTemplate(context, node.data?.url || '') ?? '');
   const selector = String(resolveTemplate(context, node.data?.selector || '') ?? '');
   const timeoutMs = Math.max(1, Number(getSystemSettingsFromDb().script_timeout_seconds) || 60) * 1000;
+  // Same interpreter choice as the Scripts console: PEP 723 via uv, shared venv or system Python
+  const scriptCode = fs.readFileSync(script.path, 'utf-8');
+  const interpreter = resolveInterpreter(script.path, scriptCode, { scriptEnv: scriptInterpreterEnv(script.scriptId, scriptCode) });
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       return reject(new Error('Ejecución detenida por el usuario'));
     }
 
-    const py = spawn(process.env.PYTHON_PATH || 'python', [script.path], {
-      env: { ...process.env, SCRAPING_URL: url, SCRAPING_SELECTOR: selector, PYTHONIOENCODING: 'utf-8' },
+    const py = spawn(interpreter.command, interpreter.args, {
+      env: { ...process.env, ...interpreter.env, SCRAPING_URL: url, SCRAPING_SELECTOR: selector },
+      windowsHide: true,
     });
     let stdout = '';
     let stderr = '';
@@ -977,7 +1037,7 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
 
     py.on('error', err => {
       clearTimeout(timer);
-      reject(new Error(`Web scraping: no se pudo ejecutar Python (${err.message}). Configura PYTHON_PATH en el servidor.`));
+      reject(new Error(`Web scraping: no se pudo ejecutar «${path.basename(interpreter.command)}» (${err.message}).`));
     });
     py.stdout.on('data', data => stdout += data.toString());
     py.stderr.on('data', data => stderr += data.toString());
@@ -1725,6 +1785,30 @@ async function executeTimerNode(
   };
 }
 
+// "Esperar nodo": the engine already held it until the awaited nodes finished, so it only lets the
+// data of its real input pass through (the awaited nodes are not data sources).
+function executeWaitNode(node: any, context: Record<string, any>, edges: any[], nodes: any[]) {
+  const upstreamIds = getEffectiveDataSources(node.id, edges, nodes);
+  if (upstreamIds.length > 0 && context[upstreamIds[0]]) {
+    return context[upstreamIds[0]];
+  }
+  const waitedFor = Array.isArray(node.data?.waitForNodeIds) ? node.data.waitForNodeIds : [];
+  return { success: true, waitedFor, msg: `Espera completada (${waitedFor.length} nodo${waitedFor.length === 1 ? '' : 's'})` };
+}
+
+// Debug preview of "Esperar nodo": every node it was holding for and how each one ended.
+// 'ignored' = the node lives inside a loop body, which the wait cannot see from outside.
+type WaitedNodeState = 'completed' | 'skipped' | 'error' | 'ignored' | 'pending';
+function describeWaitedNodes(node: any, nodes: any[], stateOf: (id: string) => WaitedNodeState) {
+  const ids: string[] = Array.isArray(node.data?.waitForNodeIds) ? node.data.waitForNodeIds : [];
+  return ids.flatMap(id => {
+    const target = nodes.find(n => n.id === id);
+    // Ids of nodes that were deleted are ignored by the engine too
+    if (!target) return [];
+    return [{ id, label: String(target.data?.label || target.type), state: stateOf(id) }];
+  });
+}
+
 // Helper to trace back through timers/delays to find the real upstream data sources
 function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[] = []): string[] {
   const incomingEdges = (edges || []).filter(e => e.target === nodeId);
@@ -1737,7 +1821,7 @@ function getEffectiveDataSources(nodeId: string, edges: any[] = [], nodes: any[]
       continue;
     }
 
-    if (sourceNode.type === 'timer' || sourceNode.type === 'delay' || sourceNode.type === 'conditionalBranch') {
+    if (sourceNode.type === 'timer' || sourceNode.type === 'delay' || sourceNode.type === 'conditionalBranch' || sourceNode.type === WAIT_NODE_TYPE) {
       const upstreamSources = getEffectiveDataSources(sourceNode.id, edges, nodes);
       result.push(...upstreamSources);
     } else if (sourceNode.type !== 'start') {
@@ -1772,7 +1856,7 @@ async function executeDataSourceNode(
       : Object.keys(context).filter(k => {
         if (k === 'start' || k === node.id) return false;
         const n = (nodes || []).find(nodeItem => nodeItem.id === k);
-        return n?.type !== 'timer' && n?.type !== 'delay';
+        return n?.type !== 'timer' && n?.type !== 'delay' && n?.type !== WAIT_NODE_TYPE;
       });
 
     const contextResults: any[][] = [];
@@ -1893,7 +1977,8 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
     result = await executeSqliteQuery(connection.host, sqlText, params);
   } else {
     const { executeMssqlQuery } = await import('./mssql.js');
-    result = await executeMssqlQuery(connectionId, sqlText, params);
+    // The signal cancels the query on the server when the flow is stopped
+    result = await executeMssqlQuery(connectionId, sqlText, params, { signal });
   }
   if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
 
@@ -2279,6 +2364,10 @@ async function executeForEachNode(
                             output = localContext[timerUpstreamIds[0]];
                           }
                         }
+                        break;
+                      case WAIT_NODE_TYPE:
+                        // Inside a loop body the order is already set by the iteration itself
+                        output = executeWaitNode(subNode, localContext, edges, nodes);
                         break;
                       case 'dataSource':
                       case 'fileSource':

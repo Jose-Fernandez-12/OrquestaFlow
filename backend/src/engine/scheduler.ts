@@ -3,9 +3,7 @@ import cronParser from 'cron-parser';
 import { getDb } from '../db/database.js';
 import { executeFlowEngine, activeFlowExecutions } from './executor.js';
 import { ExecutionTracer, startExecutionLog, finishExecutionLog, isCancellationError } from './executionLog.js';
-import { spawn } from 'child_process';
-import path from 'path';
-import fs from 'fs';
+import { startScriptRun } from './scriptRunner.js';
 
 const activeJobs: Record<string, cron.ScheduledTask> = {};
 const runningJobIds = new Set<string>();
@@ -153,27 +151,12 @@ async function runScriptById(scriptId: string) {
   const script = db.prepare('SELECT * FROM scripts WHERE id = ?').get(scriptId) as any;
   if (!script) throw new Error('Script not found');
 
-  // Robust path resolution checking uploads, root and scripts directories
-  let scriptPath = script.file_path;
-  if (!path.isAbsolute(scriptPath)) {
-    const candidatePaths = [
-      path.join(process.cwd(), 'uploads', scriptPath),
-      path.join(process.cwd(), scriptPath),
-      path.join(process.cwd(), 'scripts', scriptPath),
-    ];
-    const found = candidatePaths.find(p => fs.existsSync(p));
-    scriptPath = found || candidatePaths[0];
+  // The schedule writes its own execution log; the run is still visible live in the Scripts console
+  const run = await startScriptRun(script, { log: false }).done;
+  if (run.status !== 'completed') {
+    const stderr = run.output.filter(c => c.stream === 'stderr' || c.stream === 'system').map(c => c.text).join('').trim();
+    throw new Error(`El script terminó con código ${run.exitCode}${stderr ? `: ${stderr.slice(-500)}` : ''}`);
   }
-
-  if (!fs.existsSync(scriptPath)) throw new Error(`Script file not found at: ${scriptPath}`);
-
-  return new Promise<void>((resolve, reject) => {
-    const py = spawn('python', [scriptPath]);
-    py.on('close', code => {
-      if (code !== 0) reject(new Error(`Script exited with code ${code}`));
-      else resolve();
-    });
-  });
 }
 
 // Reschedules or stops a job dynamically

@@ -65,3 +65,6 @@ ANALISIS_Y_ESCALABILIDAD.md
 ORIGINAL_REQUEST.md
 PROJECT.md
 
+
+# Entorno Python gestionado (uv, Python portátil, venv, caché)
+backend/.runtime/

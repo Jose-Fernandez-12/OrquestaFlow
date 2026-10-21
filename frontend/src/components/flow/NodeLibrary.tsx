@@ -6,6 +6,7 @@ import {
   FileOutput,
   Database,
   Clock,
+  Hourglass,
   FileSpreadsheet,
   List,
   Repeat,
@@ -51,6 +52,7 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
       { type: 'forEach', label: 'Para cada elemento', icon: Repeat, desc: 'Inicio de bucle iterativo' },
       { type: 'forEachEnd', label: 'Fin de bucle', icon: Square, desc: 'Cierre del bucle forEach' },
       { type: 'timer', label: 'Temporizador', icon: Clock, desc: 'Pausar ciclo por tiempo' },
+      { type: 'waitFor', label: 'Esperar nodo', icon: Hourglass, desc: 'Retener una rama hasta que otro nodo termine' },
     ],
   },
   {

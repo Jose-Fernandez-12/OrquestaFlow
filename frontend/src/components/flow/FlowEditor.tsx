@@ -155,7 +155,6 @@ function FlowCanvas() {
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
   }, [selectedNodeId]);
-  const isInternalSelectionChangeRef = useRef(false);
 
   const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
   const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode);
@@ -191,11 +190,7 @@ function FlowCanvas() {
         }
         return n;
       });
-      if (hasChanges) {
-        isInternalSelectionChangeRef.current = true;
-        return updated;
-      }
-      return nds;
+      return hasChanges ? updated : nds;
     });
   }, [selectedNodeId, setNodes]);
   const [editingName, setEditingName] = useState(currentFlow?.name || '');
@@ -357,6 +352,10 @@ function FlowCanvas() {
   // Connect socket.io for real-time progress and synchronize active execution state
   useEffect(() => {
     if (!flowId) return;
+
+    // Execution state and selection are global in Redux: drop whatever the previously open flow left
+    dispatch(resetNodeStates());
+    dispatch(selectNode(null));
 
     // Query active execution state on mount (syncs if execution started from catalog or earlier)
     fetch(getApiUrl(`/flows/${flowId}/execution-state`))
@@ -539,7 +538,8 @@ function FlowCanvas() {
     if (currentFlow && currentFlow.definition) {
       try {
         const def = JSON.parse(currentFlow.definition);
-        setNodes(def.nodes || []);
+        // Older saves stored the canvas selection; a flow always opens with nothing selected
+        setNodes((def.nodes || []).map((n: Node) => (n.selected || n.dragging ? { ...n, selected: false, dragging: false } : n)));
         const loadedEdges = (def.edges || []).map((e: Edge) => ({
           ...e,
           markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
@@ -638,10 +638,6 @@ function FlowCanvas() {
   );
 
   const onSelectionChange = useCallback(({ nodes: selNodes }: { nodes: Node[] }) => {
-    if (isInternalSelectionChangeRef.current) {
-      isInternalSelectionChangeRef.current = false;
-      return;
-    }
     if (selNodes.length === 1) {
       if (selNodes[0].id !== selectedNodeIdRef.current) {
         dispatch(selectNode(selNodes[0].id));
@@ -882,7 +878,11 @@ function FlowCanvas() {
     nodeIds: string[],
     opts: { mode?: 'normal' | 'debug'; title: string; showResultOf?: string }
   ) => {
-    if (!currentFlow || testingNodeId || partialRunIds || isLiveExecuting) return;
+    if (!currentFlow) return;
+    if (testingNodeId || partialRunIds || isLiveExecuting) {
+      dispatch(showToast('Hay una ejecución en curso: espera a que termine o detenla antes de ejecutar nodos sueltos.'));
+      return;
+    }
     const runIds = nodeIds.filter(id => nodes.some(n => n.id === id && n.type !== 'note'));
     if (runIds.length === 0) return;
     const mode = opts.mode || 'normal';
@@ -1565,7 +1565,7 @@ function FlowCanvas() {
               nodesConnectable={!isLocked}
               elementsSelectable={true}
               fitView
-              className="bg-bg"
+              className="bg-bg select-none"
               proOptions={{ hideAttribution: true }}
             >
               <Background gap={16} size={1} color="#e5e5e5" />

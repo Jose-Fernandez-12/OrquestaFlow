@@ -57,26 +57,26 @@ export function describeMssqlCredentials(
   return { source: 'env', key, variables };
 }
 
-// Create connection config from SQLite database entry
-function buildMssqlConfig(connection: any) {
-  const { user, password } = resolveMssqlCredentials(connection);
-
-  // Dynamic timeouts from system_settings with defaults
-  let connTimeoutMs = 30000;
-  let reqTimeoutMs = 300000;
+/** Timeouts from Configuración (system_settings), read again on every query so changes apply at once. */
+export function readMssqlTimeouts(): { connectionMs: number; requestMs: number } {
+  let connectionMs = 30000;
+  let requestMs = 300000;
   try {
     const db = getDb();
-    const connSetting = db.prepare("SELECT value FROM system_settings WHERE key = 'mssql_connection_timeout_seconds'").get() as any;
-    if (connSetting?.value) {
-      const parsed = parseInt(connSetting.value, 10);
-      if (!isNaN(parsed) && parsed > 0) connTimeoutMs = parsed * 1000;
-    }
-    const reqSetting = db.prepare("SELECT value FROM system_settings WHERE key = 'mssql_request_timeout_seconds'").get() as any;
-    if (reqSetting?.value) {
-      const parsed = parseInt(reqSetting.value, 10);
-      if (!isNaN(parsed) && parsed > 0) reqTimeoutMs = parsed * 1000;
-    }
+    const read = (key: string) => {
+      const row = db.prepare('SELECT value FROM system_settings WHERE key = ?').get(key) as any;
+      const parsed = parseInt(row?.value, 10);
+      return !isNaN(parsed) && parsed > 0 ? parsed * 1000 : null;
+    };
+    connectionMs = read('mssql_connection_timeout_seconds') ?? connectionMs;
+    requestMs = read('mssql_request_timeout_seconds') ?? requestMs;
   } catch {}
+  return { connectionMs, requestMs };
+}
+
+// Create connection config from SQLite database entry
+function buildMssqlConfig(connection: any, connectionTimeoutMs: number) {
+  const { user, password } = resolveMssqlCredentials(connection);
 
   return {
     user,
@@ -88,34 +88,49 @@ function buildMssqlConfig(connection: any) {
       encrypt: connection.host.includes('.database.windows.net') || false, // Azure SQL requires encryption
       trustServerCertificate: true,
     },
-    connectionTimeout: connTimeoutMs,
-    requestTimeout: reqTimeoutMs,
+    connectionTimeout: connectionTimeoutMs,
+    // 0 = no driver timeout. A pool keeps the config it was created with, so a timeout here would
+    // ignore later changes in Configuración and would not count the wait for a free connection.
+    // executeMssqlQuery enforces the current request timeout on each query instead.
+    requestTimeout: 0,
   };
 }
 
-// Global cache for connection pools to avoid reconnecting and destroying pools per query
-const poolCache = new Map<string, mssql.ConnectionPool>();
+// Global cache for connection pools to avoid reconnecting and destroying pools per query.
+// The promise is cached so concurrent queries share one pool instead of each opening its own.
+const poolCache = new Map<string, { pool: Promise<mssql.ConnectionPool>; connectionTimeout: number }>();
 
 async function getOrCreatePool(config: any): Promise<mssql.ConnectionPool> {
   const cacheKey = `${config.server}:${config.port || 1433}:${config.database}:${config.user}`;
-  let pool = poolCache.get(cacheKey);
+  const cached = poolCache.get(cacheKey);
 
-  if (!pool || !pool.connected) {
-    if (pool) {
-      try {
-        await pool.close();
-      } catch {}
-    }
-    pool = await new mssql.ConnectionPool(config).connect();
-    poolCache.set(cacheKey, pool);
+  if (cached && cached.connectionTimeout === config.connectionTimeout) {
+    try {
+      const pool = await cached.pool;
+      if (pool.connected) return pool;
+    } catch {}
   }
+  // Another query already replaced it while this one waited
+  const current = poolCache.get(cacheKey);
+  if (current && current !== cached) return getOrCreatePool(config);
 
+  if (cached) {
+    poolCache.delete(cacheKey);
+    // close() waits for the queries still running on the old pool before closing it
+    cached.pool.then(pool => pool.close()).catch(() => {});
+  }
+  const pool = new mssql.ConnectionPool(config).connect();
+  poolCache.set(cacheKey, { pool, connectionTimeout: config.connectionTimeout });
+  pool.catch(() => {
+    if (poolCache.get(cacheKey)?.pool === pool) poolCache.delete(cacheKey);
+  });
   return pool;
 }
 
 export async function closeAllMssqlPools(): Promise<void> {
-  for (const [key, pool] of poolCache.entries()) {
+  for (const [key, entry] of poolCache.entries()) {
     try {
+      const pool = await entry.pool;
       if (pool.connected) {
         await pool.close();
       }
@@ -164,21 +179,66 @@ export function cancelMssqlQuery(executionId: string): boolean {
   return true;
 }
 
-export async function executeMssqlQuery(connectionId: string, sqlText: string, params: Record<string, any> = {}, executionId?: string) {
+export interface MssqlQueryOptions {
+  /** Registers the request so cancelMssqlQuery(executionId) can stop it (SQL editor) */
+  executionId?: string;
+  /** Cancels the query on the server when aborted (flow stopped) */
+  signal?: AbortSignal;
+}
+
+export async function executeMssqlQuery(
+  connectionId: string,
+  sqlText: string,
+  params: Record<string, any> = {},
+  options: string | MssqlQueryOptions = {}
+) {
+  const { executionId, signal }: MssqlQueryOptions = typeof options === 'string' ? { executionId: options } : options;
+  const stoppedByUser = () => new Error('Ejecución detenida por el usuario');
+  if (signal?.aborted) throw stoppedByUser();
+
   const db = getDb();
   const connInfo = db.prepare('SELECT * FROM connections WHERE id = ?').get(connectionId) as any;
   if (!connInfo) {
     throw new Error(`Connection not found: ${connectionId}`);
   }
 
-  const config = buildMssqlConfig(connInfo);
-  
+  // The time limit covers the whole query, including the wait for a free connection of the pool
+  const timeouts = readMssqlTimeouts();
+  const startedAt = Date.now();
+  const config = buildMssqlConfig(connInfo, timeouts.connectionMs);
+
   // Connect and run query using cached pool
   const pool = await getOrCreatePool(config);
+  if (signal?.aborted) throw stoppedByUser();
   const request = pool.request();
   if (executionId) {
     registerActiveMssqlRequest(executionId, request);
   }
+
+  // Timeout or stop: cancel the query on the server (attention) and fail right away, without waiting
+  // for the server to confirm, so the node never stays running past its limit
+  let stopError: Error | null = null;
+  let rejectStop: (err: Error) => void = () => {};
+  const stopped = new Promise<never>((_, reject) => { rejectStop = reject; });
+  stopped.catch(() => {});
+  const stop = (err: Error) => {
+    if (stopError) return;
+    stopError = err;
+    try {
+      request.cancel();
+    } catch {}
+    rejectStop(err);
+  };
+  const seconds = Math.round(timeouts.requestMs / 1000);
+  const timer = setTimeout(() => {
+    const err: any = new Error(
+      `La consulta superó el tiempo límite de ${seconds} s (Configuración › SQL Server) y se canceló en el servidor.`
+    );
+    err.code = 'ETIMEOUT';
+    stop(err);
+  }, Math.max(0, timeouts.requestMs - (Date.now() - startedAt)));
+  const onAbort = () => stop(stoppedByUser());
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
     // Map named parameters from :param to MS SQL format (@param)
@@ -237,13 +297,20 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
     console.log("EXECUTING SQL:", parsedSql);
     console.log("PARAMETERS:", request.parameters);
 
-    const result = await request.query(parsedSql);
+    const running = request.query(parsedSql);
+    // Once stopped, the late "Canceled" error of the query is expected and not reported
+    running.catch(() => {});
+    const result = await Promise.race([running, stopped]);
     return {
       columns: result.recordset && result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [],
       rows: result.recordset || [],
       rowCount: result.rowsAffected[0] || 0
     };
   } catch (err: any) {
+    if (stopError) {
+      console.log(`Query stopped for ${executionId || connectionId}: ${(stopError as Error).message}`);
+      throw stopError;
+    }
     if (err && (err.code === 'ECANCEL' || err.message?.includes('Canceled') || err.message?.includes('cancelled') || err.message?.includes('abort'))) {
       console.log(`Query execution cancelled for ${executionId || connectionId}`);
     } else {
@@ -251,6 +318,8 @@ export async function executeMssqlQuery(connectionId: string, sqlText: string, p
     }
     throw err;
   } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
     if (executionId) {
       unregisterActiveMssqlRequest(executionId, request);
     }
