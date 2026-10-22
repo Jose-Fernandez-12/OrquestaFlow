@@ -9,6 +9,7 @@ export const ExportNode = React.memo((props: any) => <BaseNode {...props} type="
 export const QueryNode = React.memo((props: any) => <BaseNode {...props} type="query" />);
 export const TimerNode = React.memo((props: any) => <BaseNode {...props} type="timer" />);
 export const WaitForNode = React.memo((props: any) => <BaseNode {...props} type="waitFor" />);
+export const RunScriptNode = React.memo((props: any) => <BaseNode {...props} type="runScript" />);
 export const DataSourceNode = React.memo((props: any) => <BaseNode {...props} type="dataSource" />);
 export const DataListNode = React.memo((props: any) => <BaseNode {...props} type="dataList" />);
 export const VariablesNode = React.memo((props: any) => <BaseNode {...props} type="variables" />);
@@ -31,6 +32,7 @@ export const nodeTypes = {
   timer: TimerNode,
   delay: TimerNode,
   waitFor: WaitForNode,
+  runScript: RunScriptNode,
   dataSource: DataSourceNode,
   fileSource: DataSourceNode,
   dataList: DataListNode,

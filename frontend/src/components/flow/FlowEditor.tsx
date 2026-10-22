@@ -88,6 +88,7 @@ import {
   setNodeProgress,
   setNodeTimer,
   setNodeRetry,
+  setNodeScriptRun,
   resetNodeStates,
   clearNodeStates,
   setNodePaused,
@@ -375,6 +376,9 @@ function FlowCanvas() {
                 dispatch(setNodeExecuting(nodeId));
               } else if (nodeInfo.status === 'error') {
                 dispatch(setNodeError({ nodeId, error: nodeInfo.result }));
+              } else if (nodeInfo.status === 'progress' && nodeInfo.result?.scriptRun) {
+                dispatch(setNodeExecuting(nodeId));
+                dispatch(setNodeScriptRun({ nodeId, ...nodeInfo.result.scriptRun }));
               } else if (nodeInfo.status === 'progress' && nodeInfo.current && nodeInfo.total) {
                 dispatch(setNodeProgress({ nodeId, current: nodeInfo.current, total: nodeInfo.total }));
               }
@@ -421,6 +425,8 @@ function FlowCanvas() {
         } else if (data.status === 'progress') {
           if (data.result?.retry) {
             dispatch(setNodeRetry({ nodeId: data.nodeId, ...data.result.retry }));
+          } else if (data.result?.scriptRun) {
+            dispatch(setNodeScriptRun({ nodeId: data.nodeId, ...data.result.scriptRun }));
           } else if (data.current !== undefined && data.total !== undefined) {
             dispatch(setNodeProgress({ nodeId: data.nodeId, current: data.current, total: data.total }));
           }

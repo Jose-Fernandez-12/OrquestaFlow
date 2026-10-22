@@ -9,6 +9,7 @@
 
 import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes, getWaitDependencies, WAIT_NODE_TYPE } from './graph.js';
 import { PYTHON_RUNTIME } from './python/runtime.js';
+import { RUN_SCRIPT_NODE_TYPE, splitArgs } from './scriptNode.js';
 import { envKey, pyCall, pyComment, pyIdentifier, pyLiteral, pyStr, slugify, type PyArg } from './python/pyCode.js';
 
 export interface TranspilerConnectionInfo {
@@ -374,6 +375,7 @@ class Generator {
       case 'oauth2Connector': return this.oauthBody(node);
       case 'aiChatCompletion': return this.aiBody(node);
       case 'scraping': return this.scrapingBody(node);
+      case RUN_SCRIPT_NODE_TYPE: return this.runScriptBody(node);
       default:
         this.use('log');
         return [
@@ -783,9 +785,7 @@ class Generator {
       return [`log.warning(${pyStr(`El nodo '${this.label(node)}' no tiene un script de scraping asignado.`)})`, 'return {}'];
     }
     this.use('run_script');
-    const found = this.ctx.scripts?.[name];
-    const fileName = found?.fileName || name;
-    if (found && !this.scriptFiles.some(f => f.fileName === found.fileName)) this.scriptFiles.push(found);
+    const { fileName, found } = this.shipScript(name);
     const args: PyArg[] = ['ctx', pyStr(`scripts/${fileName}`)];
     if (node.data?.url) args.push(['url', pyStr(String(node.data.url))]);
     if (node.data?.selector) args.push(['selector', pyStr(String(node.data.selector))]);
@@ -793,6 +793,60 @@ class Generator {
       ...(found ? [] : [`# El script '${pyComment(name)}' no estaba en el servidor: cópialo en la carpeta scripts/`]),
       `return ${pyCall('run_script', args, 0, 'return ')}`,
     ];
+  }
+
+  /** Script file shipped in scripts/ for a node that references a script of the Scripts section */
+  shipScript(ref: string): { fileName: string; found: boolean } {
+    const found = this.ctx.scripts?.[ref];
+    if (found && !this.scriptFiles.some(f => f.fileName === found.fileName)) this.scriptFiles.push(found);
+    return { fileName: found?.fileName || ref, found: Boolean(found) };
+  }
+
+  runScriptBody(node: any): string[] {
+    const data = node.data || {};
+    const ref = String(data.script || '').trim();
+    if (!ref) {
+      this.use('log');
+      return [`log.warning(${pyStr(`El nodo '${this.label(node)}' no tiene un script asignado.`)})`, 'return {}'];
+    }
+    this.use('run_user_script');
+    const { fileName, found } = this.shipScript(ref);
+    const lines: string[] = found ? [] : [`# El script '${pyComment(ref)}' no estaba en el servidor: cópialo en la carpeta scripts/`];
+    const args: PyArg[] = ['ctx', pyStr(`scripts/${fileName}`)];
+    if (Array.isArray(data.argList)) {
+      // One dict per row: the runtime applies the same rules as the engine (empty rows are not sent)
+      const rows = data.argList
+        .map((r: any) => {
+          const row: Record<string, string> = { flag: String(r?.flag ?? '').trim(), value: String(r?.value ?? '') };
+          if (r?.kind === 'switch') row.kind = 'switch';
+          if (r?.list === 'separate') row.list = 'separate';
+          return row;
+        })
+        .filter((r: Record<string, string>) => r.flag || r.value.trim());
+      if (rows.length) args.push(['arg_list', pyLiteral(rows, 4)]);
+    } else {
+      const argv = splitArgs(String(data.args ?? ''));
+      if (argv.length) args.push(['args', `[${argv.map(pyStr).join(', ')}]`]);
+    }
+
+    const mode = data.inputMode === 'file' || data.inputMode === 'stdin' ? data.inputMode : 'none';
+    if (mode !== 'none') {
+      const inputData = String(data.inputData ?? '').trim();
+      if (inputData) {
+        this.use('resolve');
+        lines.push(`data = resolve(ctx, ${pyStr(inputData)})`);
+      } else {
+        const input = this.inputExpr(node);
+        lines.push(`data = ${input.expr}${input.comment ? `  # ${pyComment(input.comment)}` : ''}`);
+      }
+      args.push(['data', 'data'], ['input_mode', pyStr(mode)]);
+      if (data.inputFormat === 'lines') args.push(['input_format', pyStr('lines')]);
+      if (String(data.inputField ?? '').trim()) args.push(['input_field', pyStr(String(data.inputField).trim())]);
+    }
+    const timeout = Number(data.timeoutSeconds);
+    if (Number.isFinite(timeout) && timeout > 0) args.push(['timeout', String(timeout)]);
+    lines.push(`return ${pyCall('run_user_script', args, 0, 'return ')}`);
+    return lines;
   }
 
   kindOf(node: any): string {
@@ -816,6 +870,7 @@ class Generator {
       case 'oauth2Connector': return 'OAuth2';
       case 'aiChatCompletion': return 'IA';
       case 'scraping': return 'Web scraping';
+      case RUN_SCRIPT_NODE_TYPE: return 'Ejecutar script';
       default: return node.type;
     }
   }
@@ -1106,7 +1161,9 @@ function buildReadme(flowName: string, slug: string, now: string, gen: Generator
   ];
   if (gen.sqlFiles.length) lines.push('- `queries/` — una consulta `.sql` por cada nodo de base de datos.');
   if (gen.jsFiles.length) lines.push('- `transforms/` — el código JavaScript de cada transformación.');
-  if (gen.imports.has('run_script')) lines.push('- `scripts/` — los scripts de Python de los nodos de web scraping (deben imprimir JSON por consola).');
+  if (gen.imports.has('run_script') || gen.imports.has('run_user_script')) {
+    lines.push('- `scripts/` — los scripts de los nodos de web scraping y Ejecutar script (devuelven su resultado en JSON por consola o en ORQUESTA_OUTPUT_FILE).');
+  }
 
   lines.push(
     '',

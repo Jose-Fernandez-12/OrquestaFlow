@@ -115,10 +115,22 @@ function armTimeout(run: ActiveRun) {
 const joinStream = (run: ScriptRun, stream: ScriptStream) =>
   run.output.filter(c => c.stream === stream).map(c => c.text).join('').slice(-MAX_LOGGED_CHARS);
 
-export function startScriptRun(
-  script: { id: string; file_path: string },
-  options: { args?: string[]; runId?: string; interactive?: boolean; log?: boolean } = {}
-): ScriptRun {
+export interface ScriptRunOptions {
+  args?: string[];
+  runId?: string;
+  interactive?: boolean;
+  log?: boolean;
+  /** Text written to stdin before closing it (non-interactive runs only) */
+  stdin?: string;
+  /** Extra environment variables for the script */
+  env?: Record<string, string>;
+  /** Inactivity limit; defaults to the system setting script_timeout_seconds */
+  timeoutMs?: number;
+  /** trigger_type of the history entry; defaults to 'manual' (interactive) or 'api' */
+  trigger?: string;
+}
+
+export function startScriptRun(script: { id: string; file_path: string }, options: ScriptRunOptions = {}): ScriptRun {
   const fullPath = resolveScriptPath(script.file_path);
   if (!fs.existsSync(fullPath)) throw new Error(`No se encontró el archivo del script: ${script.file_path}`);
 
@@ -131,12 +143,12 @@ export function startScriptRun(
   if (options.log !== false) {
     logId = uuid();
     db.prepare(`INSERT INTO execution_logs (id, target_type, target_id, status, trigger_type) VALUES (?, 'script', ?, 'running', ?)`)
-      .run(logId, script.id, options.interactive ? 'manual' : 'api');
+      .run(logId, script.id, options.trigger ?? (options.interactive ? 'manual' : 'api'));
   }
 
   const child = spawn(command, [...baseArgs, ...args], {
     cwd: path.dirname(fullPath),
-    env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', ...interpreterEnv },
+    env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', ...interpreterEnv, ...options.env },
     windowsHide: true,
   });
 
@@ -154,14 +166,16 @@ export function startScriptRun(
     done: new Promise(resolve => { resolveDone = resolve; }),
     child,
     timer: null,
-    timeoutMs: Math.max(1, Number(getSystemSettingsFromDb().script_timeout_seconds) || 60) * 1000,
+    timeoutMs: options.timeoutMs && options.timeoutMs > 0
+      ? options.timeoutMs
+      : Math.max(1, Number(getSystemSettingsFromDb().script_timeout_seconds) || 60) * 1000,
     outputBytes: 0,
   };
   runs.set(runId, run);
   if (notice) push(run, 'system', `${notice}\n`);
 
   // Non-interactive runs (scheduler, API) get EOF right away, so input() fails instead of hanging
-  if (!options.interactive) child.stdin.end();
+  if (!options.interactive) child.stdin.end(options.stdin ?? undefined);
   child.stdin.on('error', () => { /* process exited while writing */ });
 
   child.stdout.setEncoding('utf-8');

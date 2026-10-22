@@ -11,6 +11,7 @@ import { getEnvironmentStatus, refreshEnvironment, isStdlibModule, type PythonEn
 import { parseScriptMetadata, writeScriptMetadata, parseRequirementsText, detectImports, moduleToPackage, normalizePackageName, requirementName } from '../engine/python/pep723.js';
 import { summarizeScriptEnvironment, prepareScriptEnvironment, removeScriptEnvironment, scriptEnvPaths } from '../engine/python/scriptEnv.js';
 import { validateRequirementSpec } from '../engine/python/setup.js';
+import { detectScriptArguments } from '../engine/scriptNode.js';
 
 // Environment summary of a Python script (null for .js or a missing file)
 function envSummary(row: any, status: PythonEnvStatus | null) {
@@ -57,6 +58,16 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     } catch (err: any) {
       return reply.status(404).send({ error: err.message });
     }
+  });
+
+  // Arguments the script declares with argparse (read from the source; [] for .js or none found)
+  app.get<{ Params: { id: string } }>('/:id/arguments', async (request, reply) => {
+    const script = getDb().prepare('SELECT * FROM scripts WHERE id = ?').get(request.params.id) as any;
+    if (!script) return reply.status(404).send({ error: 'Script not found' });
+    const fullPath = resolveScriptPath(script.file_path);
+    if (!existsSync(fullPath)) return reply.status(404).send({ error: `No se encontró el archivo del script: ${script.file_path}` });
+    if (scriptLanguage(fullPath) !== 'python') return { data: [] };
+    return { data: detectScriptArguments(readFileSync(fullPath, 'utf-8')) };
   });
 
   // Dependencies of a Python script, its environment and the imports it does not declare (null for .js)

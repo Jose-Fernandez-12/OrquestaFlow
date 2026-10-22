@@ -919,6 +919,142 @@ def run_script(ctx, script_file, url="", selector="", timeout=600):
         return {"output": proc.stdout}
 
 
+def _script_arg(value):
+    """Texto de un argumento: una lista de valores simples va como 'a,b,c'; objetos como JSON."""
+    if isinstance(value, list) and all(not isinstance(v, (dict, list)) for v in value):
+        return ",".join(to_text(v) for v in value)
+    return to_text(value)
+
+
+def _script_input(data, input_format, field):
+    rows = unwrap(data)
+    if isinstance(rows, dict):
+        rows = next((rows[k] for k in ("rows", "data", "items") if isinstance(rows.get(k), list)), rows)
+    if input_format == "json":
+        return json.dumps(rows, ensure_ascii=False, indent=2, default=_json_default)
+    lines = []
+    for row in rows if isinstance(rows, list) else ([] if rows is None else [rows]):
+        if isinstance(row, dict):
+            row = row.get(field) if field else next(iter(row.values()), None)
+        text = _script_arg(row)
+        if text != "":
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def _script_result(stdout, written):
+    if written and written.strip():
+        return json.loads(written)
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+        if isinstance(value, (dict, list)):
+            return value
+    except ValueError:
+        pass
+    last = [line.strip() for line in text.splitlines() if line.strip()][-1]
+    if last[:1] in ("{", "["):
+        try:
+            return json.loads(last)
+        except ValueError:
+            pass
+    return None
+
+
+def _script_value(scope, text):
+    exact = _TEMPLATE.fullmatch(text.strip())
+    if exact:
+        return resolve_path(scope, exact.group(1))
+    return _TEMPLATE.sub(lambda m: _script_arg(resolve_path(scope, m.group(1))), text)
+
+
+def _script_rows(scope, rows):
+    """
+    Argumentos definidos uno por fila (opción + valor). Una fila cuyo valor queda vacío no se envía;
+    'switch' es una opción sin valor; list='separate' envía un argumento por elemento de la lista.
+    """
+    argv = []
+    for row in rows:
+        flag = (row.get("flag") or "").strip()
+        raw = row.get("value") or ""
+        if row.get("kind") == "switch":
+            if flag and (not raw.strip() or _script_arg(_script_value(scope, raw)).strip().lower()
+                         not in ("", "false", "0", "no", "off", "null", "none")):
+                argv.append(flag)
+            continue
+        if not raw.strip():
+            continue
+        value = _script_value(scope, raw)
+        if isinstance(value, list) and row.get("list") == "separate":
+            values = [v for v in (_script_arg(x) for x in value) if v != ""]
+        else:
+            values = [v for v in [_script_arg(value)] if v != ""]
+        if not values:
+            continue
+        if flag.endswith("="):
+            argv.append(flag + ",".join(values))
+        else:
+            argv.extend(([flag] if flag else []) + values)
+    return argv
+
+
+def run_user_script(ctx, script_file, args=(), data=None, input_mode="none", input_format="json",
+                    input_field="", timeout=600, arg_list=None):
+    """
+    Nodo Ejecutar script: ejecuta un script de la carpeta scripts/ con argumentos que admiten
+    {{plantillas}} y, si se pide, los datos del nodo anterior en un archivo temporal
+    (ORQUESTA_INPUT_FILE, también como {{_inputFile}}) o por la entrada estándar.
+    El resultado es el JSON que el script escribe en ORQUESTA_OUTPUT_FILE o imprime por consola.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    path = os.path.join(BASE_DIR, script_file)
+    if not os.path.exists(path):
+        raise FlowError(f"No se encontró el script {script_file}; cópialo en la carpeta scripts/")
+    work = tempfile.mkdtemp(prefix="orquesta-script-")
+    try:
+        output_file = os.path.join(work, "salida.json")
+        env = {**os.environ, "ORQUESTA_OUTPUT_FILE": output_file, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        scope = dict(ctx)
+        stdin = None
+        if input_mode != "none":
+            payload = _script_input(data, input_format, input_field)
+            if input_mode == "stdin":
+                stdin = payload
+            else:
+                input_file = os.path.join(work, "entrada.json" if input_format == "json" else "entrada.txt")
+                with open(input_file, "w", encoding="utf-8") as f:
+                    f.write(payload)
+                env["ORQUESTA_INPUT_FILE"] = input_file
+                scope["_inputFile"] = input_file
+        argv = _script_rows(scope, arg_list) if arg_list is not None else [_script_arg(_script_value(scope, t)) for t in args]
+        command = [sys.executable, path] if path.endswith(".py") else ["node", path]
+        log.info("   %s %s", os.path.basename(path), " ".join(argv))
+        proc = subprocess.run(command + argv, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                              timeout=timeout, env=env, cwd=os.path.dirname(path))
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout)[-800:].strip()
+            raise FlowError(f"el script terminó con código {proc.returncode}: {detail}")
+        written = None
+        if os.path.exists(output_file):
+            with open(output_file, encoding="utf-8") as f:
+                written = f.read()
+        result = _script_result(proc.stdout, written)
+        return {
+            "data": {"output": proc.stdout.strip()} if result is None else result,
+            "exitCode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "args": argv,
+        }
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def pause(seconds, pass_through=None):
     """Nodo de pausa: espera y deja pasar los datos que recibió."""
     log.info("   esperando %s s...", seconds)

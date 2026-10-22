@@ -2,6 +2,7 @@ import { getDb } from '../db/database.js';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import vm from 'vm';
 import { v4 as uuid } from 'uuid';
 import mssql from 'mssql';
@@ -15,6 +16,12 @@ import { instrumentTransformCode, type BreakpointResolution } from './transformD
 import { resolveReferences, buildSqlPreview, describeQueryParams } from './debugPreview.js';
 import { resolveInterpreter } from './python/environment.js';
 import { scriptInterpreterEnv } from './python/scriptEnv.js';
+import { startScriptRun, stopScriptRun } from './scriptRunner.js';
+import {
+  RUN_SCRIPT_NODE_TYPE, INPUT_FILE_VARIABLE, scriptNodeArgs, serializeScriptInput, parseScriptResult, tail,
+  MAX_COMMAND_LINE_CHARS, commandLineLength, explainScriptArgs,
+  type ScriptInputMode, type ScriptInputFormat,
+} from './scriptNode.js';
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -391,6 +398,10 @@ export async function executeFlowEngine(
                       break;
                     case 'scraping':
                       output = await executeScrapingNode(node, context, abortController.signal);
+                      break;
+                    case RUN_SCRIPT_NODE_TYPE:
+                      output = await executeRunScriptNode(node, context, edges, nodes, abortController.signal,
+                        scriptRun => notifyProgress(node.id, 'progress', { scriptRun }));
                       break;
                     case 'export':
                       output = await executeExportNode(node, context, edges, nodes);
@@ -1055,6 +1066,99 @@ async function executeScrapingNode(node: any, context: Record<string, any>, sign
       }
     });
   });
+}
+
+/**
+ * "Ejecutar script" node: runs a script of the Scripts section with arguments resolved from the
+ * context and, optionally, the data of the previous node in a temporary file or on stdin.
+ * Output: { data, exitCode, stdout, stderr, durationMs, args }, where `data` is the JSON the script
+ * returned (ORQUESTA_OUTPUT_FILE, stdout or its last line) or { output: stdout } when there is none.
+ */
+async function executeRunScriptNode(
+  node: any,
+  context: Record<string, any>,
+  edges: any[],
+  nodes: any[],
+  signal?: AbortSignal,
+  onStart?: (run: { runId: string; scriptId: string; args: string[] }) => void
+) {
+  const data = node.data || {};
+  const ref = String(data.script || '').trim();
+  if (!ref) throw new Error('Ejecutar script: no hay un script seleccionado.');
+  const script = getDb().prepare('SELECT * FROM scripts WHERE id = ? OR name = ?').get(ref, ref) as any;
+  if (!script) {
+    throw new Error(`Ejecutar script: no se encontró el script "${ref}". Súbelo en la sección Scripts y selecciónalo en el nodo.`);
+  }
+  if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
+
+  const inputMode: ScriptInputMode = data.inputMode === 'file' || data.inputMode === 'stdin' ? data.inputMode : 'none';
+  const inputFormat: ScriptInputFormat = data.inputFormat === 'lines' ? 'lines' : 'json';
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orquesta-script-'));
+  const outputFile = path.join(workDir, 'salida.json');
+  const env: Record<string, string> = { ORQUESTA_OUTPUT_FILE: outputFile };
+  const localContext: Record<string, any> = { ...context };
+  let stdin: string | undefined;
+
+  try {
+    if (inputMode !== 'none') {
+      const payload = serializeScriptInput(resolveTransformInput(node, context, edges, nodes), inputFormat, data.inputField);
+      if (inputMode === 'stdin') {
+        stdin = payload;
+      } else {
+        const inputFile = path.join(workDir, inputFormat === 'json' ? 'entrada.json' : 'entrada.txt');
+        fs.writeFileSync(inputFile, payload, 'utf-8');
+        env.ORQUESTA_INPUT_FILE = inputFile;
+        localContext[INPUT_FILE_VARIABLE] = inputFile;
+      }
+    }
+
+    const args = scriptNodeArgs(data, p => resolvePath(localContext, p));
+    if (commandLineLength(args) > MAX_COMMAND_LINE_CHARS) {
+      throw new Error(
+        `Ejecutar script: los argumentos suman ${commandLineLength(args).toLocaleString('es')} caracteres y superan el límite ` +
+        'de la línea de comandos. Envía la lista en «Datos del nodo anterior → Archivo temporal» y pasa {{_inputFile}} como argumento.'
+      );
+    }
+    const timeoutSeconds = Number(data.timeoutSeconds);
+    const run = startScriptRun(script, {
+      args,
+      env,
+      stdin,
+      trigger: 'flow',
+      timeoutMs: Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined,
+    });
+    // The editor follows the live output ('script-output' events of this runId) in its console
+    onStart?.({ runId: run.runId, scriptId: script.id, args });
+    const onAbort = () => stopScriptRun(run.runId);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const finished = await run.done.finally(() => signal?.removeEventListener('abort', onAbort));
+
+    const stdout = finished.output.filter(c => c.stream === 'stdout').map(c => c.text).join('');
+    const stderr = finished.output.filter(c => c.stream === 'stderr' || c.stream === 'system').map(c => c.text).join('');
+    if (finished.status === 'cancelled' || signal?.aborted) throw new Error('Ejecución detenida por el usuario');
+    if (finished.status === 'timeout') {
+      throw new Error('Ejecutar script: el script se detuvo al superar el tiempo límite sin mostrar actividad por consola.');
+    }
+    if (finished.status !== 'completed') {
+      const detail = tail(stderr) || tail(stdout);
+      throw new Error(`Ejecutar script: el script terminó con código ${finished.exitCode}.${detail ? `\n${detail}` : ''}`);
+    }
+
+    const written = fs.existsSync(outputFile) ? fs.readFileSync(outputFile, 'utf-8') : null;
+    const result = parseScriptResult(stdout, written);
+    return {
+      data: result === undefined ? { output: stdout.trim() } : result,
+      exitCode: finished.exitCode,
+      stdout,
+      stderr,
+      durationMs: (finished.finishedAt ?? Date.now()) - finished.startedAt,
+      args,
+    };
+  } finally {
+    try {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    } catch { /* the OS cleans the temp folder anyway */ }
+  }
 }
 
 // Helper: evaluate direct property path on an object without recursing into fallback searches
@@ -2349,6 +2453,10 @@ async function executeForEachNode(
                       case 'scraping':
                         output = await executeScrapingNode(subNode, localContext, signal);
                         break;
+                      case RUN_SCRIPT_NODE_TYPE:
+                        output = await executeRunScriptNode(subNode, localContext, edges, nodes, signal,
+                          scriptRun => onNodeProgress(subNode.id, 'progress', { scriptRun }));
+                        break;
                       case 'export':
                         output = await executeExportNode(subNode, localContext, edges, nodes);
                         break;
@@ -3310,6 +3418,35 @@ function summarizeData(value: any) {
   return { type: empty ? 'vacío' : typeof value, count: empty ? 0 : 1, sample: truncateForPreview(value) };
 }
 
+/** Debug preview of "Ejecutar script": the command with every argument resolved and the data it will receive */
+function buildScriptPreview(node: any, context: Record<string, any>, edges: any[], nodes: any[]) {
+  const data = node.data || {};
+  const ref = String(data.script || '').trim();
+  const script = ref ? getDb().prepare('SELECT id, name, file_path FROM scripts WHERE id = ? OR name = ?').get(ref, ref) as any : null;
+  const inputMode = data.inputMode === 'file' || data.inputMode === 'stdin' ? data.inputMode : 'none';
+  // The temporary file does not exist yet: show where its path will go
+  const scope = { ...context, [INPUT_FILE_VARIABLE]: '<archivo temporal>' };
+  const resolve = (p: string) => resolvePath(scope, p);
+  const argv = scriptNodeArgs(data, resolve);
+
+  let input: { mode: string; format: string; lines: number; chars: number; text: string } | null = null;
+  if (inputMode !== 'none') {
+    const format = data.inputFormat === 'lines' ? 'lines' : 'json';
+    const text = serializeScriptInput(resolveTransformInput(node, context, edges, nodes), format, data.inputField);
+    input = { mode: inputMode, format, lines: text ? text.split(/\r?\n/).length : 0, chars: text.length, text: text.slice(0, 4000) };
+  }
+
+  return {
+    kind: 'script',
+    script: script ? { id: script.id, name: script.name, fileName: path.basename(script.file_path).replace(/^[0-9a-f-]{36}_/, '') } : null,
+    argv,
+    rows: explainScriptArgs(data, resolve),
+    commandLength: commandLineLength(argv),
+    maxCommandLength: MAX_COMMAND_LINE_CHARS,
+    input,
+  };
+}
+
 function buildDebugPreview(
   node: any,
   context: Record<string, any>,
@@ -3355,6 +3492,8 @@ function buildDebugPreview(
           },
         };
       }
+      case RUN_SCRIPT_NODE_TYPE:
+        return { nodePreview: buildScriptPreview(node, context, edges, nodes) };
       case 'oauth2Connector': {
         const req = buildOAuth2Request(node, context, false);
         return {

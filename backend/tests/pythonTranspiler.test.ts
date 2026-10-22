@@ -222,4 +222,54 @@ describe('transpileFlowToPython', () => {
     // The outer alias is known inside the inner loop: it is not asked for
     expect(nested.script).not.toContain('ask_into(ctx, "estacion.IdEds")');
   });
+
+  it('exports the Ejecutar script node with its arguments and input data', () => {
+    const flow = transpileFlowToPython('Reproceso', {
+      nodes: [
+        n('tickets', 'dataList', { label: 'Tickets', items: '[{"ticket": "A1"}]' }),
+        n('rep', 'runScript', {
+          label: 'Reprocesar',
+          script: 'reproceso',
+          args: '--archivo {{_inputFile}} -f "{{vars.fecha}} 00:00"',
+          inputMode: 'file',
+          inputFormat: 'lines',
+          inputField: 'ticket',
+          timeoutSeconds: 900,
+        }),
+      ],
+      edges: [e('tickets', 'rep')],
+    }, { ...ctx, scripts: { reproceso: { fileName: 'reprocesar.py', content: 'print("ok")' } } });
+    expect(flow.scriptFiles).toEqual([{ fileName: 'reprocesar.py', content: 'print("ok")' }]);
+    expect(flow.script).toContain('data = ctx.output_of("tickets")');
+    expect(flow.script).toMatch(/run_user_script\(\s*ctx,\s*"scripts\/reprocesar\.py",/);
+    expect(flow.script).toContain('args=["--archivo", "{{_inputFile}}", "-f", "{{vars.fecha}} 00:00"]');
+    expect(flow.script).toContain('input_mode="file"');
+    expect(flow.script).toContain('input_format="lines"');
+    expect(flow.script).toContain('input_field="ticket"');
+    expect(flow.script).toContain('timeout=900');
+    expect(flow.readmeMd).toContain('Ejecutar script');
+  });
+
+  it('exports the argument rows of the Ejecutar script node', () => {
+    const flow = transpileFlowToPython('Reproceso', {
+      nodes: [
+        n('rep', 'runScript', {
+          label: 'Reprocesar',
+          script: 'reproceso',
+          argList: [
+            { flag: '--tickets', value: '{{Consulta[*].codigo_factura}}', list: 'separate' },
+            { flag: '--fecha-inicial', value: '{{vars.fecha}}', hint: 'no se exporta' },
+            { flag: '--dry-run', kind: 'switch' },
+            { flag: '', value: '' },
+          ],
+        }),
+      ],
+      edges: [],
+    }, { ...ctx, scripts: { reproceso: { fileName: 'reprocesar.py', content: 'print("ok")' } } });
+    expect(flow.script).toMatch(/"flag": "--tickets",\s+"value": "\{\{Consulta\[\*\]\.codigo_factura\}\}",\s+"list": "separate",/);
+    expect(flow.script).toContain('{"flag": "--fecha-inicial", "value": "{{vars.fecha}}"}');
+    expect(flow.script).toContain('{"flag": "--dry-run", "value": "", "kind": "switch"}');
+    expect(flow.script).not.toContain('no se exporta');
+    expect(flow.script).not.toContain('args=[');
+  });
 });
