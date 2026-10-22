@@ -97,9 +97,9 @@ export async function pythonExportRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    // Scraping nodes run a Python script from the server's scripts/ folder: ship it with the package
+    // Scraping and "Ejecutar script" nodes run a script of the Scripts section: ship it with the package
     ctx.scripts = {};
-    for (const sNode of nodes.filter(n => n.type === 'scraping' && n.data?.script)) {
+    for (const sNode of nodes.filter(n => (n.type === 'scraping' || n.type === 'runScript') && n.data?.script)) {
       const ref = String(sNode.data.script);
       const found = resolveScrapingScript(ref);
       if (found) ctx.scripts[ref] = { fileName: found.fileName, content: fs.readFileSync(found.path, 'utf-8') };
