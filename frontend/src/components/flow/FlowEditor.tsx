@@ -320,13 +320,18 @@ function FlowCanvas() {
     const handlePreviewDataSource = (e: any) => {
       setPreviewDataSourceData(e.detail);
     };
+    const handleOpenScriptConsole = (e: any) => {
+      setScriptConsoleNode({ id: e.detail.id, label: String(e.detail.label) });
+    };
     window.addEventListener('inspect-node-result', handleInspect);
     window.addEventListener('preview-export-node', handlePreviewExport);
     window.addEventListener('preview-data-source-node', handlePreviewDataSource);
+    window.addEventListener('open-script-console', handleOpenScriptConsole);
     return () => {
       window.removeEventListener('inspect-node-result', handleInspect);
       window.removeEventListener('preview-export-node', handlePreviewExport);
       window.removeEventListener('preview-data-source-node', handlePreviewDataSource);
+      window.removeEventListener('open-script-console', handleOpenScriptConsole);
     };
   }, []);
 
@@ -662,11 +667,6 @@ function FlowCanvas() {
 
   const handleNodeDoubleClick = useCallback((event: React.MouseEvent, node: Node) => {
     event.stopPropagation();
-    if (node.type === 'runScript') {
-      setScriptConsoleNode({ id: node.id, label: (node.data?.label as string) || 'Ejecutar script' });
-      return;
-    }
-
     if (node.type === 'export') {
       setPreviewExportData({
         id: node.id,

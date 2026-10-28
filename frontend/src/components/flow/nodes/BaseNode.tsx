@@ -169,6 +169,12 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
   const onNodeDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
 
+    // "Ejecutar script" double click -> its console, also while the script runs
+    if (type === 'runScript') {
+      window.dispatchEvent(new CustomEvent('open-script-console', { detail: { id, label: data.label || 'Ejecutar script' } }));
+      return;
+    }
+
     // Export node double click -> quick preview modal
     if (type === 'export') {
       window.dispatchEvent(
