@@ -61,6 +61,7 @@ import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
 import { FlowVersionsModal } from './FlowVersionsModal';
 import { ImportFlowModal } from './ImportFlowModal';
 import { NodeResultModal } from './NodeResultModal';
+import { ScriptConsoleDialog } from './ScriptConsoleDialog';
 import { getBranchOutputs, isBranchHandle } from './nodeDefinitions';
 import { useCanvasHistory } from './canvas/useCanvasHistory';
 import { CanvasSearch } from './canvas/CanvasSearch';
@@ -214,6 +215,8 @@ function FlowCanvas() {
     result: any;
     hasError: boolean;
   } | null>(null);
+  // "Ejecutar script" node whose console is open (double click, also while it runs)
+  const [scriptConsoleNode, setScriptConsoleNode] = useState<{ id: string; label: string } | null>(null);
 
   const [previewExportData, setPreviewExportData] = useState<{
     id: string;
@@ -317,13 +320,18 @@ function FlowCanvas() {
     const handlePreviewDataSource = (e: any) => {
       setPreviewDataSourceData(e.detail);
     };
+    const handleOpenScriptConsole = (e: any) => {
+      setScriptConsoleNode({ id: e.detail.id, label: String(e.detail.label) });
+    };
     window.addEventListener('inspect-node-result', handleInspect);
     window.addEventListener('preview-export-node', handlePreviewExport);
     window.addEventListener('preview-data-source-node', handlePreviewDataSource);
+    window.addEventListener('open-script-console', handleOpenScriptConsole);
     return () => {
       window.removeEventListener('inspect-node-result', handleInspect);
       window.removeEventListener('preview-export-node', handlePreviewExport);
       window.removeEventListener('preview-data-source-node', handlePreviewDataSource);
+      window.removeEventListener('open-script-console', handleOpenScriptConsole);
     };
   }, []);
 
@@ -1720,6 +1728,15 @@ function FlowCanvas() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Console of an "Ejecutar script" node (double click) */}
+      {scriptConsoleNode && (
+        <ScriptConsoleDialog
+          nodeId={scriptConsoleNode.id}
+          label={scriptConsoleNode.label}
+          onClose={() => setScriptConsoleNode(null)}
+        />
       )}
 
       {/* Node Result Modal */}

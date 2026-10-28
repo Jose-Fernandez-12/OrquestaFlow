@@ -245,16 +245,19 @@ export function RunScriptInspector({ node, nodes, edges, updateNodeData }: RunSc
 
       {/* Timeout */}
       <div className="space-y-1.5">
-        <label className="text-xs font-medium">Tiempo límite sin actividad (s)</label>
+        <label className="text-xs font-medium">Tiempo límite sin actividad (s) · opcional</label>
         <Input
           type="number"
           min={1}
           className="h-8 text-xs"
           value={timeout}
           onChange={e => updateNodeData('timeoutSeconds', e.target.value === '' ? '' : Number(e.target.value))}
-          placeholder="El de la configuración del sistema"
+          placeholder="Sin límite"
         />
-        <p className="text-[10px] text-muted">Se detiene si pasa este tiempo sin imprimir nada por consola.</p>
+        <p className="text-[10px] text-muted">
+          Vacío: el script corre hasta terminar (se puede parar con «Detener»). Con un valor, se detiene si pasa ese tiempo sin
+          imprimir nada por consola.
+        </p>
       </div>
 
       {/* Live output of the current run, or the output of the last one */}

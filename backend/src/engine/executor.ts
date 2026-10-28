@@ -1125,7 +1125,8 @@ async function executeRunScriptNode(
       env,
       stdin,
       trigger: 'flow',
-      timeoutMs: Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined,
+      // Without a limit typed in the node, a flow script runs until it ends (or the flow is stopped)
+      timeoutMs: Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0,
     });
     // The editor follows the live output ('script-output' events of this runId) in its console
     onStart?.({ runId: run.runId, scriptId: script.id, args });

@@ -104,6 +104,7 @@ function push(run: ActiveRun, stream: ScriptStream, text: string) {
 
 function armTimeout(run: ActiveRun) {
   if (run.timer) clearTimeout(run.timer);
+  if (run.timeoutMs <= 0) return;
   run.timer = setTimeout(() => {
     if (run.status !== 'running') return;
     run.status = 'timeout';
@@ -124,7 +125,7 @@ export interface ScriptRunOptions {
   stdin?: string;
   /** Extra environment variables for the script */
   env?: Record<string, string>;
-  /** Inactivity limit; defaults to the system setting script_timeout_seconds */
+  /** Inactivity limit; 0 = no limit (runs until it ends or is stopped); defaults to the system setting script_timeout_seconds */
   timeoutMs?: number;
   /** trigger_type of the history entry; defaults to 'manual' (interactive) or 'api' */
   trigger?: string;
@@ -166,8 +167,8 @@ export function startScriptRun(script: { id: string; file_path: string }, option
     done: new Promise(resolve => { resolveDone = resolve; }),
     child,
     timer: null,
-    timeoutMs: options.timeoutMs && options.timeoutMs > 0
-      ? options.timeoutMs
+    timeoutMs: options.timeoutMs !== undefined
+      ? Math.max(0, options.timeoutMs)
       : Math.max(1, Number(getSystemSettingsFromDb().script_timeout_seconds) || 60) * 1000,
     outputBytes: 0,
   };
