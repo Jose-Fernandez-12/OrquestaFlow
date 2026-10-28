@@ -228,7 +228,8 @@ export function SettingsModal() {
                     className="h-8 text-xs font-mono"
                   />
                   <p className="text-[11px] text-muted">
-                    Tiempo máximo de los scripts de Web Scraping y de los que ejecutas desde Scripts. Por defecto: 60 s.
+                    Web Scraping: tiempo máximo del script. Sección Scripts (consola y programados): se detiene si pasa este tiempo sin imprimir nada.
+                    No aplica al nodo Ejecutar script, que no tiene límite salvo que lo indiques en el nodo. Por defecto: 60 s.
                   </p>
                 </div>
               </div>

@@ -20,9 +20,11 @@ Disena pipelines complejos uniendo bloques con dependencias calculadas automatic
   - **HTTP Request Unificado:** Peticiones GET, POST, PUT, DELETE, PATCH con autenticacion (Bearer, Basic, API Key), cabeceras personalizadas, parametros de consulta, politicas de reintento y extraccion de rutas JSON.
   - **OAuth2 Connector:** Flujos de autorizacion con intercambio de tokens, refresco y scopes configurables.
   - **Web Scraping:** Extraccion de contenido HTML y datos web sin requerir servicios externos pesados.
+  - **Ejecutar script:** Corre un script de la seccion Scripts (Python o JS) dentro del flujo. Los argumentos se definen uno por fila (opcion + valor con `{{variables}}`; un valor vacio no se envia) y "Detectar del script" los lee del `argparse` del archivo. Una lista llega como `a,b,c` o como un argumento por elemento (`nargs="*"`). Los datos del nodo anterior pueden ir en un archivo temporal (`{{_inputFile}}` / `ORQUESTA_INPUT_FILE`) o por stdin; el JSON que el script escriba en `ORQUESTA_OUTPUT_FILE` o imprima al final queda en `{{nodo.data}}`, junto con `stdout`, `stderr` y `exitCode`. No tiene tiempo limite salvo que se indique en el nodo, y doble clic sobre el nodo abre su consola en vivo.
 - **Logica, Bucles y Control de Flujo:**
   - **Bifurcacion Condicional (Conditional Branch):** Reglas logicas (AND/OR, comparadores numericos, texto y existencia) para enrutar los datos por caminos especificos.
   - **Bucles For Each y For Each End:** Iteracion de listas elemento por elemento con variables de contexto contextuales (`item`, `index`, `total`).
+  - **Esperar nodo:** Retiene una rama hasta que terminen otros nodos elegidos, sin conectarlos; deja pasar los datos de su entrada y continua si un nodo esperado quedo omitido por una bifurcacion.
 - **Transformacion e Inteligencia Artificial:**
   - **Transformacion JSON (JSON Transform):** Editor de scripts JavaScript con CodeMirror, templates rapidos, selector de variables y tiempo de ejecucion acotado (5 segundos).
   - **AI Chat Completion:** Integracion con modelos de lenguaje para enriquecimiento, clasificacion o generacion de contenido basado en prompts dinamicos.
@@ -39,15 +41,17 @@ Disena pipelines complejos uniendo bloques con dependencias calculadas automatic
 - **Ejecucion Paso a Paso:** Capacidad de pausar la ejecucion entre nodos, inspeccionar cargas utiles de entrada y salida, y controlar el flujo nodo por nodo.
 - **Preflight de Peticiones:** Revision previa de parametros y URLs calculadas antes del disparo real hacia endpoints externos.
 - **Visor de Contexto:** Monitoreo en vivo del estado y memoria de cada paso a traves de WebSockets.
+- **Consola de scripts:** Antes de un nodo Ejecutar script, la pestana "Script" muestra el comando con cada argumento ya resuelto; al continuar, "Consola" muestra en vivo lo que imprime el script.
 
 ### 4. Portabilidad y Versionamiento
-- **Exportacion a Python:** Convierte cualquier flujo en un paquete ZIP listo para produccion. El script principal se lee como el flujo (una funcion por nodo con el decorador `@node` y un `main()` donde los bucles son `for` y las bifurcaciones `if`); la mecanica comun vive en `orquesta_runtime.py`. Incluye `requirements.txt`, `.env.example` (los secretos nunca se escriben en el script), las consultas en `queries/`, las transformaciones en `transforms/` y los scripts de scraping en `scripts/`. Soporta todos los tipos de nodo, reintentos y la opcion de continuar ante errores.
+- **Exportacion a Python:** Convierte cualquier flujo en un paquete ZIP listo para produccion. El script principal se lee como el flujo (una funcion por nodo con el decorador `@node` y un `main()` donde los bucles son `for` y las bifurcaciones `if`); la mecanica comun vive en `orquesta_runtime.py`. Incluye `requirements.txt`, `.env.example` (los secretos nunca se escriben en el script), las consultas en `queries/`, las transformaciones en `transforms/` y los scripts de Web Scraping y Ejecutar script en `scripts/`. Soporta todos los tipos de nodo, reintentos y la opcion de continuar ante errores.
 - **Importacion / Exportacion JSON:** Comparte o respalda definiciones completas de flujos, incluyendo consultas y conexiones asociadas.
 - **Historial de Versiones:** Registro y recuperacion de versiones previas de cada flujo de trabajo.
 
 ### 5. Gestion Centralizada de Conexiones
 - Administracion de credenciales para Microsoft SQL Server y SQLite local (motor WASM pure-JS via sql.js).
 - Clasificacion de conexiones por apodo, grupo y region para evitar credenciales redundantes en cada flujo.
+- La lista de conexiones y consultas se puede ocultar (se pliega hacia abajo) para dar todo el ancho al editor SQL; se recuerda por navegador.
 
 ### 6. Programador de Tareas (Scheduler)
 - Automatizacion de ejecuciones en segundo plano con expresiones Cron estándar.
@@ -118,7 +122,7 @@ npm --prefix frontend install
 ```
 
 ### 2b. Preparar Python para los scripts (opcional)
-Solo hace falta si vas a ejecutar scripts Python (seccion Scripts o nodo Web Scraping). No necesitas tener Python instalado: el comando descarga [uv](https://docs.astral.sh/uv/), instala un Python portatil y crea el entorno compartido, todo dentro de `backend/.runtime/` (ignorado por git, sin permisos de administrador):
+Solo hace falta si vas a ejecutar scripts Python (seccion Scripts o nodos Web Scraping y Ejecutar script). No necesitas tener Python instalado: el comando descarga [uv](https://docs.astral.sh/uv/), instala un Python portatil y crea el entorno compartido, todo dentro de `backend/.runtime/` (ignorado por git, sin permisos de administrador):
 ```bash
 npm run python:setup    # o: npm run setup (dependencias de npm + Python en un paso)
 npm run python:status   # muestra que hay instalado
@@ -150,8 +154,8 @@ El proyecto estara disponible en:
 Las pruebas usan [Vitest](https://vitest.dev). Las del motor corren contra una base SQLite en memoria (`ORQUESTA_DB_PATH=:memory:`), nunca contra `backend/data/orquesta.sqlite`.
 ```bash
 npm test                    # backend y frontend
-npm --prefix backend test   # motor DAG, reintentos, historial, grafo y exportador a Python
-npm --prefix frontend test  # historial del lienzo, portapapeles y validacion del flujo
+npm --prefix backend test   # motor DAG, reintentos, historial, grafo, scripts y exportador a Python
+npm --prefix frontend test  # historial del lienzo, portapapeles, validacion del flujo y argumentos de scripts
 ```
 
 ---
