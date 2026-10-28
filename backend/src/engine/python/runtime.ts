@@ -1001,7 +1001,7 @@ def _script_rows(scope, rows):
 
 
 def run_user_script(ctx, script_file, args=(), data=None, input_mode="none", input_format="json",
-                    input_field="", timeout=600, arg_list=None):
+                    input_field="", timeout=None, arg_list=None):
     """
     Nodo Ejecutar script: ejecuta un script de la carpeta scripts/ con argumentos que admiten
     {{plantillas}} y, si se pide, los datos del nodo anterior en un archivo temporal

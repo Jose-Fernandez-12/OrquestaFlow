@@ -61,6 +61,7 @@ import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
 import { FlowVersionsModal } from './FlowVersionsModal';
 import { ImportFlowModal } from './ImportFlowModal';
 import { NodeResultModal } from './NodeResultModal';
+import { ScriptConsoleDialog } from './ScriptConsoleDialog';
 import { getBranchOutputs, isBranchHandle } from './nodeDefinitions';
 import { useCanvasHistory } from './canvas/useCanvasHistory';
 import { CanvasSearch } from './canvas/CanvasSearch';
@@ -214,6 +215,8 @@ function FlowCanvas() {
     result: any;
     hasError: boolean;
   } | null>(null);
+  // "Ejecutar script" node whose console is open (double click, also while it runs)
+  const [scriptConsoleNode, setScriptConsoleNode] = useState<{ id: string; label: string } | null>(null);
 
   const [previewExportData, setPreviewExportData] = useState<{
     id: string;
@@ -659,6 +662,11 @@ function FlowCanvas() {
 
   const handleNodeDoubleClick = useCallback((event: React.MouseEvent, node: Node) => {
     event.stopPropagation();
+    if (node.type === 'runScript') {
+      setScriptConsoleNode({ id: node.id, label: (node.data?.label as string) || 'Ejecutar script' });
+      return;
+    }
+
     if (node.type === 'export') {
       setPreviewExportData({
         id: node.id,
@@ -1720,6 +1728,15 @@ function FlowCanvas() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Console of an "Ejecutar script" node (double click) */}
+      {scriptConsoleNode && (
+        <ScriptConsoleDialog
+          nodeId={scriptConsoleNode.id}
+          label={scriptConsoleNode.label}
+          onClose={() => setScriptConsoleNode(null)}
+        />
       )}
 
       {/* Node Result Modal */}
