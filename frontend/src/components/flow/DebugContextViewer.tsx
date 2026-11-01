@@ -30,6 +30,7 @@ import {
   Terminal,
   Database,
   Hourglass,
+  SquareTerminal,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -42,6 +43,8 @@ import { buildTransformSteps, type TransformTrace } from './debug/transformTrace
 import { QueryPreviewPanel, type QueryPreview } from './debug/QueryPreviewPanel';
 import { ResolvedReferences, type ResolvedReference } from './debug/ResolvedReferences';
 import { WaitPreviewPanel, type WaitPreview } from './debug/WaitPreviewPanel';
+import { ScriptPreviewPanel, type ScriptPreview } from './debug/ScriptPreviewPanel';
+import { ScriptRunConsole } from './debug/ScriptRunConsole';
 
 export interface HttpRequestPreview {
   method: string;
@@ -89,7 +92,7 @@ interface DebugContextViewerProps {
   bannerOnly?: boolean;
 }
 
-type ModalTab = 'request' | 'response' | 'query' | 'wait' | 'input' | 'console' | 'output';
+type ModalTab = 'request' | 'response' | 'query' | 'wait' | 'script' | 'scriptConsole' | 'input' | 'console' | 'output';
 
 export function DebugContextViewer({
   node,
@@ -162,6 +165,12 @@ export function DebugContextViewer({
   const currentNodePreview = allNodePreviews[node.id]?.nodePreview;
   const queryPreview: QueryPreview | null = currentNodePreview?.kind === 'query' ? currentNodePreview : null;
   const waitPreview: WaitPreview | null = currentNodePreview?.kind === 'wait' ? currentNodePreview : null;
+  const scriptPreview: ScriptPreview | null = currentNodePreview?.kind === 'script' ? currentNodePreview : null;
+  // "Ejecutar script": its console follows the run the engine reported, live
+  const isScriptNode = node.type === 'runScript';
+  const scriptRun = useAppSelector(state => state.flows.nodeScriptRuns?.[node.id]);
+  const scriptResult = useAppSelector(state => (isScriptNode ? state.flows.nodeResults[node.id] : undefined));
+  const hasScriptOutput = Boolean(scriptRun || scriptResult);
   const effectiveOutput = useMemo(() => {
     if (currentNodePreview?.kind === 'transform_result') {
       return currentNodePreview.output;
@@ -250,6 +259,10 @@ export function DebugContextViewer({
       setActiveTab('query');
     } else if (waitPreview) {
       setActiveTab('wait');
+    } else if (scriptPreview) {
+      setActiveTab('script');
+    } else if (isScriptNode && hasScriptOutput) {
+      setActiveTab('scriptConsole');
     } else if (hasStepper || nodeLogs.length > 0) {
       setActiveTab('console');
     } else if (effectiveOutput !== undefined) {
@@ -257,7 +270,12 @@ export function DebugContextViewer({
     } else {
       setActiveTab('input');
     }
-  }, [responsePreview, requestPreview, queryPreview, waitPreview, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
+  }, [responsePreview, requestPreview, queryPreview, waitPreview, scriptPreview, isScriptNode, hasScriptOutput, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
+
+  // When the script starts (after "Continuar"), show its output
+  useEffect(() => {
+    if (scriptRun?.runId) setActiveTab('scriptConsole');
+  }, [scriptRun?.runId]);
 
   // STRICT GRAPH ISOLATION:
   // Traverse backwards along incoming edges to find ONLY real ancestor nodes that lead into this node
@@ -1124,6 +1142,42 @@ export function DebugContextViewer({
                 </button>
               )}
 
+              {scriptPreview && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('script')}
+                  className={cn(
+                    "px-3.5 py-2.5 text-xs font-medium border-b-2 flex items-center gap-2 transition-colors cursor-pointer",
+                    activeTab === 'script'
+                      ? "border-accent text-accent font-semibold"
+                      : "border-transparent text-muted hover:text-fg"
+                  )}
+                >
+                  <SquareTerminal size={14} />
+                  <span>Script</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-accent/10 text-accent font-semibold">
+                    {scriptPreview.argv.length} args
+                  </span>
+                </button>
+              )}
+
+              {isScriptNode && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('scriptConsole')}
+                  className={cn(
+                    "px-3.5 py-2.5 text-xs font-medium border-b-2 flex items-center gap-2 transition-colors cursor-pointer",
+                    activeTab === 'scriptConsole'
+                      ? "border-accent text-accent font-semibold"
+                      : "border-transparent text-muted hover:text-fg"
+                  )}
+                >
+                  <Terminal size={14} />
+                  <span>Consola</span>
+                  {scriptRun && !scriptResult && <Loader2 size={12} className="animate-spin text-accent" />}
+                </button>
+              )}
+
               {upstreamAncestorNodes.length > 0 && (
                 <button
                   type="button"
@@ -1319,6 +1373,12 @@ export function DebugContextViewer({
 
             {activeTab === 'query' && queryPreview && <QueryPreviewPanel preview={queryPreview} />}
             {activeTab === 'wait' && waitPreview && <WaitPreviewPanel preview={waitPreview} />}
+            {activeTab === 'script' && scriptPreview && <ScriptPreviewPanel preview={scriptPreview} />}
+            {activeTab === 'scriptConsole' && isScriptNode && (
+              <div className="flex-1 min-h-0 p-4 flex flex-col bg-bg/20">
+                <ScriptRunConsole key={scriptRun?.runId ?? 'sin-ejecucion'} runId={scriptRun?.runId} result={scriptResult} className="flex-1" />
+              </div>
+            )}
 
             {/* TAB 2: SERVER RESPONSE (Status, Headers, Body or Loading State) */}
             {activeTab === 'response' && isSending && isViewingActiveIter && !effectiveResponse && (

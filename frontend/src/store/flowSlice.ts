@@ -1,6 +1,12 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit';
 import { API_URL } from '../lib/api';
 
+export interface NodeScriptRun {
+  runId: string;
+  scriptId: string;
+  args: string[];
+}
+
 export interface FlowNode {
   id: string;
   type: string;
@@ -72,6 +78,8 @@ interface FlowState {
   nodeProgress: Record<string, { current: number; total: number }>;
   nodeTimers: Record<string, { remainingSeconds: number; totalSeconds: number }>;
   nodeRetries: Record<string, NodeRetryState>;
+  /** Latest script run of each "Ejecutar script" node, to follow its console live */
+  nodeScriptRuns: Record<string, NodeScriptRun>;
   canvasExpanded: boolean;
   nodeLibraryExpanded: boolean;
   isDebugModalOpen: boolean;
@@ -98,6 +106,7 @@ const initialState: FlowState = {
   nodeProgress: {},
   nodeTimers: {},
   nodeRetries: {},
+  nodeScriptRuns: {},
   canvasExpanded: false,
   nodeLibraryExpanded: true,
   isDebugModalOpen: false,
@@ -389,6 +398,10 @@ const flowSlice = createSlice({
       const { nodeId, remainingSeconds, totalSeconds } = action.payload;
       state.nodeTimers[nodeId] = { remainingSeconds, totalSeconds };
     },
+    setNodeScriptRun(state, action: PayloadAction<{ nodeId: string } & NodeScriptRun>) {
+      const { nodeId, ...run } = action.payload;
+      state.nodeScriptRuns[nodeId] = run;
+    },
     resetNodeStates(state) {
       state.executingNodeIds = [];
       state.completedNodeIds = [];
@@ -403,6 +416,7 @@ const flowSlice = createSlice({
       state.nodeProgress = {};
       state.nodeTimers = {};
       state.nodeRetries = {};
+      state.nodeScriptRuns = {};
       state.isDebugModalOpen = false;
     },
     // Before a partial run: only the nodes about to run lose their state; the rest keep the last run's results
@@ -420,6 +434,7 @@ const flowSlice = createSlice({
         delete state.nodeProgress[id];
         delete state.nodeTimers[id];
         delete state.nodeRetries[id];
+        delete state.nodeScriptRuns[id];
       }
       state.isDebugModalOpen = false;
     },
@@ -505,6 +520,7 @@ export const {
   setNodeProgress,
   setNodeTimer,
   setNodeRetry,
+  setNodeScriptRun,
   resetNodeStates,
   clearNodeStates,
   toggleCanvasExpanded,

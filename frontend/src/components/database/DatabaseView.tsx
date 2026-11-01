@@ -3,7 +3,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchConnections, setCurrentConnection, testConnection, createConnection, updateConnection, deleteConnection } from '../../store/connectionSlice';
 import { fetchQueries, setCurrentQuery, executeQuery, cancelQuery, updateQuery, createQuery, deleteQuery } from '../../store/querySlice';
 import { showToast } from '../../store/uiSlice';
-import { Database, Plus, Play, Square, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns, Trash2, Edit, ChevronDown, ChevronUp, Folder, Tag } from 'lucide-react';
+import { Database, Plus, Play, Square, RefreshCw, Save, CheckCircle2, AlertCircle, AlignLeft, X, Columns, Trash2, Edit, ChevronDown, ChevronUp, ChevronsDown, ChevronsUp, Folder, Tag } from 'lucide-react';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql } from '@codemirror/lang-sql';
 import { format } from 'sql-formatter';
@@ -13,12 +13,32 @@ import { Card } from '../ui/card';
 import { cn } from '../../lib/utils';
 import { QueryResultsTable } from './QueryResultsTable';
 
+const LIST_HIDDEN_KEY = 'orquesta.database.listHidden';
+const LIST_WIDTH = 280;
+// Hiding: the list slides down and fades, then the column closes. Showing: the reverse order.
+const SLIDE_MS = 260;
+const COLLAPSE_MS = 220;
+
 export function DatabaseView() {
   const dispatch = useAppDispatch();
   const connectionsState = useAppSelector(state => state.connections);
   const queriesState = useAppSelector(state => state.queries);
 
   const [activeTab, setActiveTab] = useState<'connections' | 'queries'>('connections');
+  // Left list (connections / queries) folded away to give the editor the full width; remembered per browser
+  const [listHidden, setListHidden] = useState(() => {
+    try {
+      return localStorage.getItem(LIST_HIDDEN_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleList = (hidden: boolean) => {
+    setListHidden(hidden);
+    try {
+      localStorage.setItem(LIST_HIDDEN_KEY, hidden ? '1' : '0');
+    } catch { /* private mode: only for this visit */ }
+  };
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [testing, setTesting] = useState(false);
 
@@ -301,9 +321,30 @@ export function DatabaseView() {
       </div>
 
       {/* Main Database Grid Layout */}
-      <div className="flex-1 grid grid-cols-[280px_1fr] border border-border rounded-md bg-surface overflow-hidden min-h-[500px]">
-        {/* Left column list */}
-        <div className="border-r border-border flex flex-col min-h-0">
+      <div
+        className="relative flex-1 grid border border-border rounded-md bg-surface overflow-hidden min-h-[500px]"
+        style={{
+          gridTemplateColumns: `${listHidden ? 0 : LIST_WIDTH}px 1fr`,
+          transition: `grid-template-columns ${COLLAPSE_MS}ms ease-in-out ${listHidden ? SLIDE_MS : 0}ms`,
+        }}
+      >
+        {/* Left column list: hides downwards (slides down and fades) before the column closes */}
+        <div
+          className={cn('flex flex-col min-h-0 overflow-hidden border-r', listHidden ? 'border-transparent' : 'border-border')}
+          // The divider goes away only once the column has closed
+          style={{ transition: `border-color 0ms linear ${listHidden ? SLIDE_MS + COLLAPSE_MS : 0}ms` }}
+          inert={listHidden}
+          aria-hidden={listHidden}
+        >
+          <div
+            className="flex-1 flex flex-col min-h-0"
+            style={{
+              width: LIST_WIDTH,
+              transform: listHidden ? 'translateY(100%)' : 'translateY(0)',
+              opacity: listHidden ? 0 : 1,
+              transition: `transform ${SLIDE_MS}ms ease-in-out ${listHidden ? 0 : COLLAPSE_MS}ms, opacity ${SLIDE_MS}ms ease-in-out ${listHidden ? 0 : COLLAPSE_MS}ms`,
+            }}
+          >
           {/* Tabs */}
           <div className="flex p-2 gap-1 border-b border-border bg-bg/50 shrink-0">
             <button
@@ -323,6 +364,14 @@ export function DatabaseView() {
               )}
             >
               Consultas
+            </button>
+            <button
+              type="button"
+              onClick={() => toggleList(true)}
+              className="shrink-0 px-1.5 rounded-sm text-muted hover:text-fg hover:bg-surface transition-colors"
+              title="Ocultar lista"
+            >
+              <ChevronsDown size={14} />
             </button>
           </div>
 
@@ -451,7 +500,24 @@ export function DatabaseView() {
               </>
             )}
           </div>
+          </div>
         </div>
+
+        {/* Brings the list back up once it is hidden */}
+        <button
+          type="button"
+          onClick={() => toggleList(false)}
+          className={cn(
+            'absolute left-3 bottom-3 z-10 inline-flex items-center gap-1.5 h-8 px-3 rounded-full border border-border bg-surface text-xs font-medium text-fg shadow-md hover:border-accent hover:text-accent transition-all duration-200',
+            listHidden ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3 pointer-events-none'
+          )}
+          style={{ transitionDelay: listHidden ? `${SLIDE_MS + COLLAPSE_MS}ms` : '0ms' }}
+          tabIndex={listHidden ? 0 : -1}
+          title="Mostrar lista"
+        >
+          <ChevronsUp size={14} />
+          {activeTab === 'queries' ? 'Consultas' : 'Conexiones'}
+        </button>
 
         {/* Right column detail/editor */}
         <div className="min-w-0 flex flex-col overflow-y-auto">

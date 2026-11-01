@@ -84,6 +84,9 @@ function inferResultFromConfig(node: Node): any {
   if (node.type === 'oauth2Connector') {
     return { access_token: '', token_type: 'Bearer', expires_in: 0, authorization_header: '' };
   }
+  if (node.type === 'runScript') {
+    return { data: {}, exitCode: 0, stdout: '', stderr: '', durationMs: 0, args: [] };
+  }
   if (node.type === 'aiChatCompletion') {
     return { content: '', parsed: data.responseFormat === 'json_object' ? {} : null, model: '', usage: {} };
   }
@@ -146,6 +149,16 @@ export function useAvailableVariables(node: Node, nodes: Node[], edges: Edge[]):
             type: valueType(p.value),
           })
         );
+        // The whole column as a list ("A1,B2,…" in a script argument, an array in a JSON body)
+        if (isRowSet) {
+          paths
+            .filter(p => !(p.value !== null && typeof p.value === 'object'))
+            .map(p => (prefix && p.path.startsWith(`${prefix}.`) ? p.path.slice(prefix.length + 1) : p.path))
+            .filter(field => !field.includes('.'))
+            .forEach(field =>
+              vars.push({ label: `${field} · todas las filas`, expression: `{{${base}[*].${field}}}`, type: 'lista' })
+            );
+        }
       }
 
       vars.push({ label: 'Resultado completo', expression: `{{${upNode.id}}}`, type: 'referencia' });

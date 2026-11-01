@@ -7,6 +7,7 @@ import {
   Database,
   Clock,
   Hourglass,
+  SquareTerminal,
   FileSpreadsheet,
   List,
   Repeat,
@@ -49,6 +50,7 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
     nodes: [
       { type: 'conditionalBranch', label: 'Bifurcación', icon: GitFork, desc: 'Condiciones Sí/No o Switch' },
       { type: 'jsonTransform', label: 'Transformar datos', icon: Braces, desc: 'Mapear campos o JavaScript' },
+      { type: 'runScript', label: 'Ejecutar script', icon: SquareTerminal, desc: 'Script de la sección Scripts con argumentos' },
       { type: 'forEach', label: 'Para cada elemento', icon: Repeat, desc: 'Inicio de bucle iterativo' },
       { type: 'forEachEnd', label: 'Fin de bucle', icon: Square, desc: 'Cierre del bucle forEach' },
       { type: 'timer', label: 'Temporizador', icon: Clock, desc: 'Pausar ciclo por tiempo' },

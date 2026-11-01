@@ -18,6 +18,7 @@ import { QueryInspector } from './inspectors/QueryInspector';
 import { ExportInspector } from './inspectors/ExportInspector';
 import { TimerInspector } from './inspectors/TimerInspector';
 import { WaitForInspector } from './inspectors/WaitForInspector';
+import { RunScriptInspector } from './inspectors/RunScriptInspector';
 import { DataSourceInspector } from './inspectors/DataSourceInspector';
 import { DataListInspector } from './inspectors/DataListInspector';
 import { VariablesInspector } from './inspectors/VariablesInspector';
@@ -436,6 +437,10 @@ export function NodeInspector({
           <WaitForInspector node={node} nodes={nodes} edges={edges} updateNodeData={updateNodeData} />
         )}
 
+        {type === 'runScript' && (
+          <RunScriptInspector node={node} nodes={nodes} edges={edges} updateNodeData={updateNodeData} />
+        )}
+
         {(type === 'dataSource' || type === 'fileSource') && (
           <DataSourceInspector
             node={node}
@@ -531,6 +536,7 @@ export function NodeInspector({
           'timer',
           'delay',
           'waitFor',
+          'runScript',
           'dataSource',
           'fileSource',
           'dataList',

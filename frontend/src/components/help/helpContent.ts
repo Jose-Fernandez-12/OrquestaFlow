@@ -12,6 +12,8 @@ import {
   Repeat,
   Square,
   Clock,
+  Hourglass,
+  SquareTerminal,
   FileOutput,
   StickyNote,
   Radio,
@@ -50,10 +52,12 @@ export const NODE_GROUPS: HelpGroup[] = [
     title: 'Lógica y transformación',
     nodes: [
       { icon: Braces, color: 'text-teal-600', name: 'Transformar datos', desc: 'Mapea campos o ejecuta JavaScript sobre los datos de entrada (data). Admite console.log, console.table y breakpoints.' },
+      { icon: SquareTerminal, color: 'text-slate-600', name: 'Ejecutar script', desc: 'Corre un script de la sección Scripts con argumentos por fila ({{variables}}; «Detectar del script» lee su argparse) y, si quieres, los datos del nodo anterior en un archivo o por stdin. Su JSON queda en {{nodo.data}}. Sin tiempo límite salvo que lo indiques; doble clic abre su consola.' },
       { icon: GitFork, color: 'text-orange-600', name: 'Bifurcación', desc: 'Sí/No o Switch según reglas. Solo continúa la rama elegida; las demás quedan omitidas.' },
       { icon: Repeat, color: 'text-rose-600', name: 'Para cada elemento', desc: 'Recorre una lista y ejecuta los nodos hasta "Fin de bucle" una vez por elemento ({{_item}}).' },
       { icon: Square, color: 'text-rose-500', name: 'Fin de bucle', desc: 'Cierra el bucle y junta los resultados de todas las vueltas en una lista.' },
       { icon: Clock, color: 'text-indigo-600', name: 'Temporizador', desc: 'Espera un tiempo antes de seguir (por ejemplo, para respetar límites de una API). Deja pasar los datos que recibe.' },
+      { icon: Hourglass, color: 'text-orange-600', name: 'Esperar nodo', desc: 'Retiene su rama hasta que terminen los nodos elegidos, sin conectarlos. Deja pasar los datos de su entrada y sigue si un nodo esperado quedó omitido por una Bifurcación.' },
     ],
   },
   {
@@ -89,6 +93,12 @@ export const SYNTAX_ITEMS: SyntaxItem[] = [
     example: '{{Logearse.data.token}}   ·   {{2af12582-….data.token}}',
   },
   {
+    code: '{{Nombre del nodo[*].campo}}',
+    tag: 'Columna completa',
+    desc: 'Los valores de un campo en todas las filas de un nodo, como lista. En el selector de variables aparece como «campo · todas las filas». Sin [*], {{nodo.campo}} lee solo la primera fila.',
+    example: '{{Consulta[*].codigo_factura}}   →   ["4001…", "4001…", …]',
+  },
+  {
     code: '{{Transformar._data}}',
     tag: 'Transformar datos',
     desc: 'Si el código usa console.log, el resultado queda en _data y los mensajes en _logs. Sin console.log el resultado se usa directo.',
@@ -116,6 +126,12 @@ export const SYNTAX_ITEMS: SyntaxItem[] = [
     desc: 'Se reemplazan al ejecutar por la fecha del día (20260930 / 2026-09-30), la de ayer o el primer día del mes. También $now_iso y $timestamp.',
   },
   {
+    code: '{{_inputFile}}',
+    tag: 'Ejecutar script',
+    desc: 'Ruta del archivo temporal con los datos del nodo anterior, cuando el nodo los envía como «Archivo temporal». El script también la recibe en ORQUESTA_INPUT_FILE y puede devolver su resultado escribiendo JSON en ORQUESTA_OUTPUT_FILE.',
+    example: '--archivo {{_inputFile}}',
+  },
+  {
     code: 'env:NOMBRE_VARIABLE',
     tag: 'Secretos',
     desc: 'En los nodos OAuth2 e IA, lee el valor desde backend/.env en vez de escribirlo en el flujo.',
@@ -135,6 +151,10 @@ export const DEBUG_GUIDE: GuideItem[] = [
   {
     title: 'Ver cómo se arma una petición o consulta',
     text: 'Al inspeccionar un nodo HTTP verás la URL, los encabezados, los parámetros y el cuerpo ya resueltos, y la tabla "Referencias resueltas" con cada {{referencia}} y su valor (en rojo las que no existen). En una Consulta DB, la pestaña "Consulta SQL" muestra cada #param_ con su origen y valor, y el SQL con los valores puestos.',
+  },
+  {
+    title: 'Consola de Ejecutar script',
+    text: 'En Debug, al pausar antes del nodo la pestaña "Script" muestra el comando con cada argumento ya resuelto (y los que se omiten por vacíos); al continuar, "Consola" muestra en vivo lo que imprime el script. Fuera de Debug, doble clic sobre el nodo abre la misma consola, también mientras corre.',
   },
   {
     title: 'Breakpoints en Transformar datos',
@@ -173,6 +193,6 @@ export const TIPS: GuideItem[] = [
   },
   {
     title: 'Tiempos de espera',
-    text: 'Ajusta en Configuración los límites de peticiones HTTP, conexión y consultas SQL, y scripts, para que un servicio caído no deje un flujo esperando indefinidamente.',
+    text: 'Ajusta en Configuración los límites de peticiones HTTP, conexión y consultas SQL, y scripts (Web Scraping y la consola de Scripts), para que un servicio caído no deje un flujo esperando indefinidamente. El nodo Ejecutar script no tiene límite por defecto: indícalo en el nodo si lo necesitas, o detén el flujo.',
   },
 ];

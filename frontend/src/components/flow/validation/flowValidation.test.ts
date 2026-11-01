@@ -10,6 +10,42 @@ const messagesFor = (issues: ReturnType<typeof validateFlow>, nodeId: string) =>
   issues.filter(i => i.nodeId === nodeId).map(i => `${i.level}: ${i.message}`);
 
 describe('validateFlow', () => {
+  it('checks the Ejecutar script node: script, input and {{_inputFile}}', () => {
+    const nodes = [
+      n('start', 'start'),
+      n('sin', 'runScript', { args: '--archivo {{_inputFile}}' }),
+      n('suelto', 'runScript', { script: 's1', inputMode: 'stdin' }),
+      n('ok', 'runScript', { script: 's1', inputMode: 'file', args: '--archivo {{_inputFile}}' }),
+    ];
+    const issues = validateFlow(nodes, [e('start', 'sin'), e('sin', 'ok')]);
+    expect(messagesFor(issues, 'sin')).toEqual([
+      'error: No hay un script seleccionado.',
+      'warning: Los argumentos usan {{_inputFile}}, pero los datos no se envían como archivo: llegará vacío.',
+    ]);
+    expect(messagesFor(issues, 'suelto')).toContain('warning: Envía los datos del nodo anterior, pero no tiene una entrada conectada.');
+    expect(messagesFor(issues, 'ok')).toEqual([]);
+  });
+
+  it('checks the argument rows of the Ejecutar script node', () => {
+    const nodes = [
+      n('start', 'start'),
+      n('rep', 'runScript', {
+        script: 's1',
+        argList: [
+          { flag: '--pais', value: '', required: true },
+          { flag: '', name: 'destino', value: '', required: true },
+          { flag: '--archivo', value: '{{_inputFile}}' },
+          { flag: '--dry-run', kind: 'switch', required: true },
+        ],
+      }),
+    ];
+    expect(messagesFor(validateFlow(nodes, [e('start', 'rep')]), 'rep')).toEqual([
+      'warning: Los argumentos usan {{_inputFile}}, pero los datos no se envían como archivo: llegará vacío.',
+      'error: Falta el valor del argumento obligatorio --pais.',
+      'error: Falta el valor del argumento obligatorio destino.',
+    ]);
+  });
+
   it('accepts a well configured flow', () => {
     const nodes = [
       n('start', 'start'),

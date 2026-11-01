@@ -1,6 +1,7 @@
 import type { Node, Edge } from '@xyflow/react';
 import { getBranchOutputs, getConditionRules, isBranchHandle } from '../nodeDefinitions';
 import { getWaitIssue } from '../waitForUtils';
+import { argRowsOf, argRowsText } from '../inspector/inspectors/runScriptArgs';
 
 export type IssueLevel = 'error' | 'warning';
 
@@ -160,6 +161,23 @@ export function validateFlow(nodes: Node[], edges: Edge[]): FlowIssue[] {
       case 'scraping':
         if (!data.script) add(node.id, 'warning', 'No hay un script de extracción seleccionado: devolverá un resultado simulado.');
         break;
+      case 'runScript': {
+        if (!data.script) add(node.id, 'error', 'No hay un script seleccionado.');
+        const sendsInput = data.inputMode === 'file' || data.inputMode === 'stdin';
+        if (sendsInput && !text(data.inputData) && incoming(node.id).length === 0) {
+          add(node.id, 'warning', 'Envía los datos del nodo anterior, pero no tiene una entrada conectada.');
+        }
+        const argRows = argRowsOf(data);
+        if (argRowsText(argRows).includes('{{_inputFile}}') && data.inputMode !== 'file') {
+          add(node.id, 'warning', 'Los argumentos usan {{_inputFile}}, pero los datos no se envían como archivo: llegará vacío.');
+        }
+        for (const row of argRows) {
+          if (row.required && row.kind !== 'switch' && !text(row.value)) {
+            add(node.id, 'error', `Falta el valor del argumento obligatorio ${row.flag || row.name || '(posicional)'}.`);
+          }
+        }
+        break;
+      }
       case 'oauth2Connector':
         if (!text(data.tokenUrl)) add(node.id, 'error', 'Falta la URL del endpoint de token.');
         break;

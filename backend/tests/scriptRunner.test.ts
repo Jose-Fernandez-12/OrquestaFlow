@@ -75,6 +75,15 @@ describe('scriptRunner', () => {
     expect(text(await run.done, 'stdout')).toBe('2 lineas\n');
   });
 
+  it('runs without an inactivity limit when timeoutMs is 0, and stops a silent script when one is set', async () => {
+    const s = script('silent', 'setTimeout(() => console.log("listo"), 1200);');
+    const unlimited = await startScriptRun(s, { timeoutMs: 0 }).done;
+    expect(unlimited.status).toBe('completed');
+    expect(text(unlimited, 'stdout')).toBe('listo\n');
+    const limited = await startScriptRun(s, { timeoutMs: 300 }).done;
+    expect(limited.status).toBe('timeout');
+  });
+
   it('reports a non-zero exit code as an error', async () => {
     const s = script('fail', 'console.error("roto"); process.exit(3);');
     const run = await startScriptRun(s).done;
