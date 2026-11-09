@@ -115,7 +115,7 @@ export function ThemeSettings() {
           Introduce cualquier código hexadecimal (como <span className="font-mono text-fg">#FB8500</span> o <span className="font-mono text-fg">#D9480F</span>) o utiliza el selector de color nativo.
         </p>
 
-        <form onSubmit={handleAddCustomColor} className="flex items-center gap-2 max-w-md">
+        <div className="flex items-center gap-2 max-w-md">
           {/* Native Color Picker Box */}
           <div className="relative w-9 h-9 rounded-md border border-border overflow-hidden shrink-0 cursor-pointer shadow-xs">
             <input
@@ -138,14 +138,20 @@ export function ThemeSettings() {
               setNewColorInput(e.target.value);
               setInputError(null);
             }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleAddCustomColor();
+              }
+            }}
             className="h-9 font-mono text-xs uppercase"
           />
 
-          <Button type="submit" size="sm" variant="default" className="gap-1.5 shrink-0">
+          <Button type="button" onClick={() => handleAddCustomColor()} size="sm" variant="default" className="gap-1.5 shrink-0">
             <Plus size={14} />
             Agregar y aplicar
           </Button>
-        </form>
+        </div>
 
         {inputError && (
           <p className="text-xs text-danger font-medium">{inputError}</p>
