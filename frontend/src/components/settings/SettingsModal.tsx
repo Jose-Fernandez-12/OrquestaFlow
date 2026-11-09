@@ -16,7 +16,8 @@ import {
   Radio,
   KeyRound,
   Bot,
-  PlugZap
+  PlugZap,
+  Palette
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';

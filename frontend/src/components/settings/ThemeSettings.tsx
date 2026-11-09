@@ -141,7 +141,7 @@ export function ThemeSettings() {
             className="h-9 font-mono text-xs uppercase"
           />
 
-          <Button type="submit" size="sm" variant="secondary" className="gap-1.5 shrink-0">
+          <Button type="submit" size="sm" variant="default" className="gap-1.5 shrink-0">
             <Plus size={14} />
             Agregar y aplicar
           </Button>
