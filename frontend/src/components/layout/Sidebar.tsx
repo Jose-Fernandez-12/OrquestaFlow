@@ -15,6 +15,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { toggleSidebar, openSettingsModal, openHelpModal } from '../../store/uiSlice';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
+import { ThemeSwitcher } from './ThemeSwitcher';
 
 export function Sidebar() {
   const dispatch = useAppDispatch();
@@ -121,6 +122,7 @@ export function Sidebar() {
             <HelpCircle size={18} />
             {!collapsed && "Ayuda"}
           </Button>
+          <ThemeSwitcher collapsed={collapsed} />
         </div>
 
         <div className="mt-2 pt-2 border-t border-border flex items-center gap-3">
