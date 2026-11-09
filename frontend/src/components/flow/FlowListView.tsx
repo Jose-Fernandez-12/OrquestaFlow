@@ -21,7 +21,6 @@ import {
   AlertTriangle,
   Loader2,
   X,
-  Activity,
   Layers,
   History,
   Download,
@@ -101,7 +100,6 @@ export function FlowListView() {
   const totalFlows = flows.length;
   const savedFlows = flows.filter(f => f.status === 'saved').length;
   const lockedFlows = flows.filter(f => f.is_locked === 1).length;
-  const executedRecently = flows.filter(f => f.last_run_at).length;
 
   // Filtered flows
   const filteredFlows = useMemo(() => {
@@ -287,52 +285,9 @@ export function FlowListView() {
         </div>
       </div>
 
-      {/* Metrics Bar */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6 shrink-0">
-        <Card className="p-4 flex items-center gap-4 bg-surface border-border">
-          <div className="w-10 h-10 rounded-md bg-accent-light text-accent flex items-center justify-center shrink-0">
-            <GitMerge size={20} />
-          </div>
-          <div>
-            <div className="text-xs font-medium text-muted">Total Flujos</div>
-            <div className="text-xl font-semibold text-fg mt-0.5">{totalFlows}</div>
-          </div>
-        </Card>
-
-        <Card className="p-4 flex items-center gap-4 bg-surface border-border">
-          <div className="w-10 h-10 rounded-md bg-success/10 text-success flex items-center justify-center shrink-0">
-            <CheckCircle2 size={20} />
-          </div>
-          <div>
-            <div className="text-xs font-medium text-muted">Guardados</div>
-            <div className="text-xl font-semibold text-fg mt-0.5">{savedFlows}</div>
-          </div>
-        </Card>
-
-        <Card className="p-4 flex items-center gap-4 bg-surface border-border">
-          <div className="w-10 h-10 rounded-md bg-slate-500/10 text-slate-700 flex items-center justify-center shrink-0">
-            <Lock size={20} />
-          </div>
-          <div>
-            <div className="text-xs font-medium text-muted">Protegidos</div>
-            <div className="text-xl font-semibold text-fg mt-0.5">{lockedFlows}</div>
-          </div>
-        </Card>
-
-        <Card className="p-4 flex items-center gap-4 bg-surface border-border">
-          <div className="w-10 h-10 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
-            <Activity size={20} />
-          </div>
-          <div>
-            <div className="text-xs font-medium text-muted">Con ejecuciones</div>
-            <div className="text-xl font-semibold text-fg mt-0.5">{executedRecently}</div>
-          </div>
-        </Card>
-      </div>
-
       {/* Search & Filter Toolbar */}
-      <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 mb-6 shrink-0">
-        <div className="relative flex-1 max-w-md">
+      <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3 mb-6 shrink-0">
+        <div className="relative w-full md:w-96">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
           <input
             type="text"
@@ -351,7 +306,7 @@ export function FlowListView() {
           )}
         </div>
 
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 [&>button]:active:translate-y-0">
           <Button
             variant={statusFilter === 'all' ? 'primary' : 'default'}
             size="sm"

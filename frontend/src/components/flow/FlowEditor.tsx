@@ -16,7 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { v4 as uuid } from 'uuid';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useBlocker } from 'react-router-dom';
 import { SOCKET_URL, getApiUrl } from '../../lib/api';
 import {
   Play,
@@ -708,16 +708,41 @@ function FlowCanvas() {
   }, [nodeResults, completedNodeIds, errorNodeIds]);
 
   const handleSave = () => {
-    if (!currentFlow || isLocked) return;
-    
+    if (!currentFlow || isLocked) return undefined;
+
     const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
-    dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
+    const saved = dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
     setSavedSignature(canvasSignature(nodes, edges));
-    
+
     setShowSaveNotification(true);
     setTimeout(() => {
       setShowSaveNotification(false);
     }, 3000);
+    return saved;
+  };
+
+  // Leaving with unsaved changes (topbar button, browser back, another flow) asks first
+  const hasUnsavedChanges = canvasHistory.isDirty || (!!currentFlow && editingName !== currentFlow.name);
+  const skipLeaveGuard = useRef(false);
+  const leaveGuard = useBlocker(({ currentLocation, nextLocation }) =>
+    hasUnsavedChanges && !skipLeaveGuard.current && currentLocation.pathname !== nextLocation.pathname
+  );
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const warnBeforeClose = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener('beforeunload', warnBeforeClose);
+    return () => window.removeEventListener('beforeunload', warnBeforeClose);
+  }, [hasUnsavedChanges]);
+
+  const handleSaveAndLeave = async () => {
+    const saved = handleSave();
+    const result = saved && await saved;
+    if (result && saveFlow.fulfilled.match(result)) {
+      if (leaveGuard.state === 'blocked') leaveGuard.proceed();
+    } else {
+      dispatch(showToast('No se pudo guardar el flujo. Sigues en el editor.'));
+    }
   };
 
   const handleSaveRef = useRef(handleSave);
@@ -793,6 +818,8 @@ function FlowCanvas() {
     try {
       await dispatch(deleteFlow(currentFlow.id));
       setIsDeleteModalOpen(false);
+      // The flow is gone, so there is nothing left to save
+      skipLeaveGuard.current = true;
       navigate('/flujos');
     } finally {
       setIsDeleting(false);
@@ -1761,6 +1788,39 @@ function FlowCanvas() {
         );
       })()}
 
+
+      {/* Unsaved Changes Modal */}
+      {leaveGuard.state === 'blocked' && (
+        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+          <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-sm p-5 flex flex-col gap-4 animate-in zoom-in-95 duration-fast">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-full bg-warn/15 text-warn flex items-center justify-center shrink-0 mt-0.5">
+                <AlertTriangle size={18} />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-fg">¿Salir sin guardar?</h3>
+                <p className="text-xs text-muted mt-1 leading-relaxed">
+                  <strong>«{editingName || currentFlow?.name}»</strong> tiene cambios que aún no se han guardado. Si sales ahora, se perderán.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap justify-end gap-2 pt-2 border-t border-border">
+              <Button type="button" variant="default" size="sm" onClick={() => leaveGuard.reset()}>
+                Seguir editando
+              </Button>
+              <Button type="button" variant="default" size="sm" onClick={() => leaveGuard.proceed()}>
+                Salir sin guardar
+              </Button>
+              {!isLocked && (
+                <Button type="button" variant="primary" size="sm" onClick={handleSaveAndLeave}>
+                  Guardar y salir
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation Modal */}
       {isDeleteModalOpen && currentFlow && (

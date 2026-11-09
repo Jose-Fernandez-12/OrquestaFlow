@@ -16,7 +16,8 @@ import {
   Radio,
   KeyRound,
   Bot,
-  PlugZap
+  PlugZap,
+  Palette
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';
@@ -25,11 +26,13 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
 import { ConnectionsDataSettings } from './ConnectionsDataSettings';
+import { ThemeSettings } from './ThemeSettings';
 
-type SettingsTab = 'general' | 'timeouts' | 'connections' | 'experimental';
+type SettingsTab = 'general' | 'theme' | 'timeouts' | 'connections' | 'experimental';
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Clock }> = [
   { id: 'general', label: 'General', icon: Sliders },
+  { id: 'theme', label: 'Colores y tema', icon: Palette },
   { id: 'timeouts', label: 'Tiempos y reintentos', icon: Clock },
   { id: 'connections', label: 'Conexiones y datos', icon: PlugZap },
   { id: 'experimental', label: 'Experimental', icon: FlaskConical },
@@ -115,7 +118,7 @@ export function SettingsModal() {
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex shrink-0 border-b border-border bg-bg/50 px-6 overflow-x-auto [scrollbar-width:thin]">
+        <div className="flex shrink-0 border-b border-border bg-bg/50 px-6 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {TABS.map(tab => (
             <button
               key={tab.id}
@@ -298,6 +301,8 @@ export function SettingsModal() {
               </div>
             </div>
           )}
+
+          {activeTab === 'theme' && <ThemeSettings />}
 
           {activeTab === 'connections' && <ConnectionsDataSettings />}
 
