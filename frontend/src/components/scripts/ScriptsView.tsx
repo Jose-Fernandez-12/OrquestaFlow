@@ -17,16 +17,7 @@ type ConsoleTarget = { script: Script; autoRun: boolean; tab: 'code' | 'deps' | 
 type Filter = 'todos' | 'python' | 'node' | 'pendientes';
 
 const isPython = (s: Script) => /\.py$/i.test(s.file_path);
-const needsAttention = (s: Script) => !!s.env && ['pendiente', 'no-preparado', 'invalido'].includes(s.env.view);
-
-function Stat({ label, value, tone }: { label: string; value: number; tone?: string }) {
-  return (
-    <div className="px-4 py-3 rounded-md border border-border bg-surface">
-      <div className="text-[11px] text-muted">{label}</div>
-      <div className={cn('text-xl font-semibold leading-tight mt-0.5', tone)}>{value}</div>
-    </div>
-  );
-}
+export const needsAttention = (s: Script) => !!s.env && ['pendiente', 'no-preparado', 'invalido'].includes(s.env.view);
 
 function ScriptCard({ script, onOpen }: { script: Script; onOpen: (tab: ConsoleTarget['tab'], autoRun?: boolean) => void }) {
   const python = isPython(script);
@@ -91,7 +82,7 @@ function ScriptCard({ script, onOpen }: { script: Script; onOpen: (tab: ConsoleT
 
 export function ScriptsView() {
   const dispatch = useAppDispatch();
-  const { scripts, activeCount, executedToday, loading } = useAppSelector(state => state.scripts);
+  const { scripts, loading } = useAppSelector(state => state.scripts);
 
   const [filterText, setFilterText] = useState('');
   const [filter, setFilter] = useState<Filter>('todos');
@@ -148,12 +139,6 @@ export function ScriptsView() {
         <Button variant="primary" size="sm" onClick={() => setUploadOpen(true)} className="gap-2">
           <Upload size={16} /> Subir script
         </Button>
-      </div>
-
-      <div className="grid grid-cols-3 gap-3 mb-5 shrink-0">
-        <Stat label="Scripts" value={scripts.length} />
-        <Stat label="Programaciones activas" value={activeCount} tone="text-accent" />
-        <Stat label="Ejecutados hoy" value={executedToday} tone="text-success" />
       </div>
 
       <EnvBaseBar refreshKey={envKey} onManage={startSetup => setEnvPanel({ startSetup })} />
