@@ -1,14 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { COLOR_THEMES, getSavedTheme, saveTheme } from '../../lib/theme';
+import { getAllThemes, getSavedTheme, saveTheme, ColorTheme } from '../../lib/theme';
 import { Palette, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 export function ThemeSwitcher({ collapsed = false }: { collapsed?: boolean }) {
   const [currentAccent, setCurrentAccent] = useState(getSavedTheme());
+  const [themes, setThemes] = useState<ColorTheme[]>(getAllThemes());
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    setCurrentAccent(getSavedTheme());
+    const handleThemeChange = () => {
+      setCurrentAccent(getSavedTheme());
+      setThemes(getAllThemes());
+    };
+    window.addEventListener('orquesta-theme-change', handleThemeChange);
+    return () => window.removeEventListener('orquesta-theme-change', handleThemeChange);
   }, []);
 
   const handleSelect = (accentHex: string) => {
@@ -20,7 +26,10 @@ export function ThemeSwitcher({ collapsed = false }: { collapsed?: boolean }) {
   return (
     <div className="relative">
       <button
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          setThemes(getAllThemes());
+          setOpen(!open);
+        }}
         className={cn(
           "flex items-center gap-2.5 w-full rounded-sm text-xs font-medium text-muted hover:text-fg hover:bg-bg transition-colors py-1.5 px-2",
           collapsed && "justify-center px-0"
@@ -47,7 +56,7 @@ export function ThemeSwitcher({ collapsed = false }: { collapsed?: boolean }) {
           />
           <div
             className={cn(
-              "absolute z-50 bg-surface border border-border rounded-md shadow-raised p-2 w-56 bottom-full mb-2 animate-in fade-in-50 zoom-in-95",
+              "absolute z-50 bg-surface border border-border rounded-md shadow-raised p-2 w-60 bottom-full mb-2 max-h-72 overflow-y-auto animate-in fade-in-50 zoom-in-95 [scrollbar-width:thin]",
               collapsed ? "left-12" : "left-0"
             )}
           >
@@ -55,7 +64,7 @@ export function ThemeSwitcher({ collapsed = false }: { collapsed?: boolean }) {
               Color de Acentuación
             </div>
             <div className="space-y-1">
-              {COLOR_THEMES.map((theme) => {
+              {themes.map((theme) => {
                 const isSelected = currentAccent.toLowerCase() === theme.accent.toLowerCase();
                 return (
                   <button

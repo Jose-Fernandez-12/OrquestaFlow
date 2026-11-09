@@ -25,11 +25,13 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
 import { ConnectionsDataSettings } from './ConnectionsDataSettings';
+import { ThemeSettings } from './ThemeSettings';
 
-type SettingsTab = 'general' | 'timeouts' | 'connections' | 'experimental';
+type SettingsTab = 'general' | 'theme' | 'timeouts' | 'connections' | 'experimental';
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Clock }> = [
   { id: 'general', label: 'General', icon: Sliders },
+  { id: 'theme', label: 'Colores y tema', icon: Palette },
   { id: 'timeouts', label: 'Tiempos y reintentos', icon: Clock },
   { id: 'connections', label: 'Conexiones y datos', icon: PlugZap },
   { id: 'experimental', label: 'Experimental', icon: FlaskConical },
@@ -298,6 +300,8 @@ export function SettingsModal() {
               </div>
             </div>
           )}
+
+          {activeTab === 'theme' && <ThemeSettings />}
 
           {activeTab === 'connections' && <ConnectionsDataSettings />}
 
