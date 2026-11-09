@@ -2,6 +2,7 @@ import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
   GitMerge,
+  LayoutDashboard,
   Code2,
   Database,
   Calendar,
@@ -23,6 +24,7 @@ export function Sidebar() {
   const collapsed = useAppSelector((state) => state.ui.sidebarCollapsed);
 
   const navItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
     { id: 'flujos', label: 'Flujos de trabajo', icon: GitMerge, path: '/' },
     { id: 'scripts', label: 'Scripts', icon: Code2, path: '/scripts' },
     { id: 'bases', label: 'Bases de datos', icon: Database, path: '/bases' },
