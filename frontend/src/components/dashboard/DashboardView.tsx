@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  AlertCircle, AlertTriangle, Calendar, CheckCircle2, Clock, Code2, Database, GitMerge, Lock, Plus, Upload, Workflow, Zap,
+  AlertCircle, AlertTriangle, Braces, Calendar, CheckCircle2, Clock, Code2, Database, FileCode2, GitMerge, Lock, Plus, Upload, Workflow, Zap,
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchFlows, type Flow } from '../../store/flowSlice';
@@ -27,8 +27,8 @@ function Kpi({ label, value, icon, iconClass, valueClass }: {
   return (
     <Card className="p-4 flex items-center gap-4 bg-surface border-border">
       <div className={cn('w-10 h-10 rounded-md flex items-center justify-center shrink-0', iconClass)}>{icon}</div>
-      <div>
-        <div className="text-xs font-medium text-muted">{label}</div>
+      <div className="min-w-0">
+        <div className="text-xs font-medium text-muted truncate">{label}</div>
         <div className={cn('text-xl font-semibold mt-0.5', valueClass ?? 'text-fg')}>{value}</div>
       </div>
     </Card>
@@ -98,13 +98,21 @@ export function DashboardView() {
 
   const flowStats = useMemo(() => ({
     total: flows.length,
-    saved: flows.filter(f => f.status === 'saved').length,
-    locked: flows.filter(f => f.is_locked === 1).length,
     withRuns: flows.filter(f => f.last_run_at).length,
   }), [flows]);
 
+  const scriptStats = useMemo(() => {
+    const python = scripts.filter(s => /\.py$/i.test(s.file_path)).length;
+    return {
+      total: scripts.length,
+      python,
+      node: scripts.length - python,
+      attention: scripts.filter(needsAttention).length,
+    };
+  }, [scripts]);
+
   const health = useMemo(() => flows.map(checkFlow), [flows]);
-  // Flows with errors first, then warnings, then the rest
+  // Flows with errors first, then warnings
   const flowsToReview = useMemo(() => health
     .filter(h => h.errors > 0 || h.warnings > 0)
     .sort((a, b) => b.errors - a.errors || b.warnings - a.warnings), [health]);
@@ -116,13 +124,15 @@ export function DashboardView() {
   const scriptsByAttention = useMemo(() => [...scripts]
     .sort((a, b) => Number(needsAttention(b)) - Number(needsAttention(a))), [scripts]);
 
-  // Same source as the list below, so the KPI and the list never disagree
+  // Same source as the KPI, so the number and the list never disagree
   const activeSchedules = useMemo(() => schedules.filter(s => s.is_active === 1), [schedules]);
 
   const upcoming = useMemo(() => activeSchedules
     .filter(s => s.next_run_at)
     .sort((a, b) => (parseDbDate(a.next_run_at)?.getTime() ?? 0) - (parseDbDate(b.next_run_at)?.getTime() ?? 0))
     .slice(0, 5), [activeSchedules]);
+
+  const pendingCount = flowsToReview.length + scriptStats.attention + (pythonReady === false ? 1 : 0);
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-bg p-6 overflow-y-auto">
@@ -139,100 +149,110 @@ export function DashboardView() {
       </div>
 
       <div className="space-y-6">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Environment status strip */}
+        <Card className="bg-surface border-border grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-border overflow-hidden">
+          <Link to="/scripts" className={rowClass}>
+            {pythonReady === null ? <Clock size={14} className="text-muted shrink-0" />
+              : pythonReady ? <CheckCircle2 size={14} className="text-success shrink-0" />
+              : <AlertTriangle size={14} className="text-warn shrink-0" />}
+            <span className="flex-1 min-w-0 truncate text-sm font-medium">Entorno Python base</span>
+            <span className="text-xs text-muted shrink-0">{pythonReady === null ? 'Comprobando…' : pythonReady ? 'Listo' : 'Falta configurar'}</span>
+          </Link>
+          <Link to="/bases" className={rowClass}>
+            <Database size={14} className="text-muted shrink-0" />
+            <span className="flex-1 min-w-0 truncate text-sm font-medium">Conexiones de bases de datos</span>
+            <span className="text-xs text-muted shrink-0 tabular-nums">{connections.filter(c => c.is_active === 1).length} activas de {connections.length}</span>
+          </Link>
+        </Card>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           <Kpi label="Total flujos" value={flowStats.total} icon={<GitMerge size={20} />} iconClass="bg-accent-light text-accent" />
-          <Kpi label="Guardados" value={flowStats.saved} icon={<CheckCircle2 size={20} />} iconClass="bg-success/10 text-success" />
-          <Kpi label="Protegidos" value={flowStats.locked} icon={<Lock size={20} />} iconClass="bg-slate-500/10 text-slate-700" />
           <Kpi label="Con ejecuciones" value={flowStats.withRuns} icon={<Zap size={20} />} iconClass="bg-accent/10 text-accent" />
+          <Kpi label="Total scripts" value={scriptStats.total} icon={<Code2 size={20} />} iconClass="bg-accent-light text-accent" />
+          <Kpi label="Requieren atención" value={scriptStats.attention} icon={<AlertTriangle size={20} />} iconClass="bg-danger/10 text-danger" valueClass={scriptStats.attention > 0 ? 'text-warn' : undefined} />
+          <Kpi label="Python" value={scriptStats.python} icon={<FileCode2 size={20} />} iconClass="bg-warn/15 text-warn" />
+          <Kpi label="Node.js" value={scriptStats.node} icon={<Braces size={20} />} iconClass="bg-success/10 text-success" />
+          <Kpi label="Programaciones activas" value={activeSchedules.length} icon={<Calendar size={20} />} iconClass="bg-accent/10 text-accent" valueClass="text-accent" />
+          <Kpi label="Ejecutados hoy" value={executedToday} icon={<Workflow size={20} />} iconClass="bg-success/10 text-success" valueClass="text-success" />
         </div>
 
-        <Section title="Flujos por revisar">
-          <Panel count={flowsToReview.length} empty="Todos los flujos pasan la validación.">
-            {flowsToReview.map(({ flow, errors, warnings }) => (
-              <Link key={flow.id} to={`/flujos/${flow.id}`} className={rowClass}>
-                {errors > 0 ? <AlertCircle size={14} className="text-danger shrink-0" /> : <AlertTriangle size={14} className="text-warn shrink-0" />}
-                <span className="flex-1 min-w-0 truncate text-sm font-medium">{flow.name}</span>
-                <span className="text-xs text-muted shrink-0 tabular-nums">
-                  {errors > 0 && `${errors} error${errors === 1 ? '' : 'es'}`}
-                  {errors > 0 && warnings > 0 && ' · '}
-                  {warnings > 0 && `${warnings} aviso${warnings === 1 ? '' : 's'}`}
-                </span>
-              </Link>
-            ))}
-          </Panel>
-        </Section>
-
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-          <Section title="Editados recientemente">
-            <Panel count={recentlyEdited.length} empty="Todavía no hay flujos.">
-              {recentlyEdited.map(flow => (
-                <Link key={flow.id} to={`/flujos/${flow.id}`} className={rowClass}>
-                  <GitMerge size={14} className="text-muted shrink-0" />
-                  <span className="flex-1 min-w-0 truncate text-sm font-medium">{flow.name}</span>
-                  {flow.is_locked === 1 && <Lock size={12} className="text-muted shrink-0" />}
-                  <span className="text-xs text-muted shrink-0">{relativeTime(parseDbDate(flow.updated_at))}</span>
-                </Link>
-              ))}
-            </Panel>
-          </Section>
-
-          <Section title={`Scripts (${scripts.length})`} action={<Link to="/scripts" className="text-xs text-accent hover:underline">Ver todos</Link>}>
-            <Panel count={scripts.length} empty="Sube tu primer script.">
-              {scriptsByAttention.map(script => {
-                const attention = needsAttention(script);
-                return (
-                  <Link key={script.id} to="/scripts" className={rowClass}>
-                    <Code2 size={14} className="text-muted shrink-0" />
-                    <span className="flex-1 min-w-0 truncate text-sm font-medium">{script.name || displayFileName(script.file_path)}</span>
-                    {script.env ? (
-                      <span className={cn('text-[11px] px-2 py-0.5 rounded shrink-0', attention ? ENV_VIEW[script.env.view].className : 'bg-bg text-muted border border-border')}>
-                        {ENV_VIEW[script.env.view].label}
-                      </span>
-                    ) : (
-                      <span className="text-[11px] px-2 py-0.5 rounded bg-bg text-muted border border-border shrink-0">Node.js</span>
-                    )}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          <div className="space-y-6 min-w-0">
+            <Section title={`Pendientes (${pendingCount})`}>
+              <Card className="bg-surface border-border divide-y divide-border overflow-hidden">
+                {pendingCount === 0 && (
+                  <div className="p-6 text-sm text-muted text-center">Todo en orden. No hay nada pendiente.</div>
+                )}
+                {flowsToReview.map(({ flow, errors, warnings }) => (
+                  <Link key={flow.id} to={`/flujos/${flow.id}`} className={rowClass}>
+                    {errors > 0 ? <AlertCircle size={14} className="text-danger shrink-0" /> : <AlertTriangle size={14} className="text-warn shrink-0" />}
+                    <span className="flex-1 min-w-0 truncate text-sm font-medium">{flow.name}</span>
+                    <span className="text-xs text-muted shrink-0 tabular-nums">
+                      {errors > 0 && `${errors} error${errors === 1 ? '' : 'es'}`}
+                      {errors > 0 && warnings > 0 && ' · '}
+                      {warnings > 0 && `${warnings} aviso${warnings === 1 ? '' : 's'}`}
+                    </span>
                   </Link>
-                );
-              })}
-            </Panel>
-          </Section>
+                ))}
+                {scripts.filter(needsAttention).map(script => (
+                  <Link key={script.id} to="/scripts" className={rowClass}>
+                    <Code2 size={14} className="text-warn shrink-0" />
+                    <span className="flex-1 min-w-0 truncate text-sm font-medium">{script.name || displayFileName(script.file_path)}</span>
+                    {script.env && <span className="text-xs text-muted shrink-0">{ENV_VIEW[script.env.view].label}</span>}
+                  </Link>
+                ))}
+              </Card>
+            </Section>
 
-          <Section title="Entorno y conexiones">
-            <Card className="bg-surface border-border divide-y divide-border overflow-hidden">
-              <Link to="/scripts" className={rowClass}>
-                {pythonReady === null ? <Clock size={14} className="text-muted shrink-0" />
-                  : pythonReady ? <CheckCircle2 size={14} className="text-success shrink-0" />
-                  : <AlertTriangle size={14} className="text-warn shrink-0" />}
-                <span className="flex-1 min-w-0 truncate text-sm font-medium">Entorno Python base</span>
-                <span className="text-xs text-muted shrink-0">{pythonReady === null ? 'Comprobando…' : pythonReady ? 'Listo' : 'Falta configurar'}</span>
-              </Link>
-              <Link to="/bases" className={rowClass}>
-                <Database size={14} className="text-muted shrink-0" />
-                <span className="flex-1 min-w-0 truncate text-sm font-medium">Conexiones de bases de datos</span>
-                <span className="text-xs text-muted shrink-0 tabular-nums">{connections.filter(c => c.is_active === 1).length} activas de {connections.length}</span>
-              </Link>
-            </Card>
-          </Section>
+            <Section title="Editados recientemente">
+              <Panel count={recentlyEdited.length} empty="Todavía no hay flujos.">
+                {recentlyEdited.map(flow => (
+                  <Link key={flow.id} to={`/flujos/${flow.id}`} className={rowClass}>
+                    <GitMerge size={14} className="text-muted shrink-0" />
+                    <span className="flex-1 min-w-0 truncate text-sm font-medium">{flow.name}</span>
+                    {flow.is_locked === 1 && <Lock size={12} className="text-muted shrink-0" />}
+                    <span className="text-xs text-muted shrink-0">{relativeTime(parseDbDate(flow.updated_at))}</span>
+                  </Link>
+                ))}
+              </Panel>
+            </Section>
+          </div>
 
-          <Section title="Ejecución de scripts">
-            <div className="grid grid-cols-2 gap-4">
-              <Kpi label="Programaciones activas" value={activeSchedules.length} icon={<Calendar size={20} />} iconClass="bg-accent/10 text-accent" valueClass="text-accent" />
-              <Kpi label="Ejecutados hoy" value={executedToday} icon={<Workflow size={20} />} iconClass="bg-success/10 text-success" valueClass="text-success" />
-            </div>
-          </Section>
+          <div className="space-y-6 min-w-0">
+            <Section title={`Scripts (${scripts.length})`} action={<Link to="/scripts" className="text-xs text-accent hover:underline">Ver todos</Link>}>
+              <Panel count={scripts.length} empty="Sube tu primer script.">
+                {scriptsByAttention.map(script => {
+                  const attention = needsAttention(script);
+                  return (
+                    <Link key={script.id} to="/scripts" className={rowClass}>
+                      <Code2 size={14} className="text-muted shrink-0" />
+                      <span className="flex-1 min-w-0 truncate text-sm font-medium">{script.name || displayFileName(script.file_path)}</span>
+                      {script.env ? (
+                        <span className={cn('text-[11px] px-2 py-0.5 rounded shrink-0', attention ? ENV_VIEW[script.env.view].className : 'bg-bg text-muted border border-border')}>
+                          {ENV_VIEW[script.env.view].label}
+                        </span>
+                      ) : (
+                        <span className="text-[11px] px-2 py-0.5 rounded bg-bg text-muted border border-border shrink-0">Node.js</span>
+                      )}
+                    </Link>
+                  );
+                })}
+              </Panel>
+            </Section>
+
+            <Section title="Próximas programaciones" action={<Link to="/programacion" className="text-xs text-accent hover:underline">Ver todas</Link>}>
+              <Panel count={upcoming.length} empty="No hay programaciones activas. Programa un flujo o script para verlo aquí.">
+                {upcoming.map(job => (
+                  <Link key={job.id} to="/programacion" className={rowClass}>
+                    <Clock size={14} className="text-muted shrink-0" />
+                    <span className="flex-1 min-w-0 truncate text-sm font-medium">{job.name}</span>
+                    <span className="text-xs text-muted shrink-0">{parseDbDate(job.next_run_at)?.toLocaleString()}</span>
+                  </Link>
+                ))}
+              </Panel>
+            </Section>
+          </div>
         </div>
-
-        <Section title="Próximas programaciones" action={<Link to="/programacion" className="text-xs text-accent hover:underline">Ver todas</Link>}>
-          <Panel count={upcoming.length} empty="No hay programaciones activas. Programa un flujo o script para verlo aquí.">
-            {upcoming.map(job => (
-              <Link key={job.id} to="/programacion" className={rowClass}>
-                <Clock size={14} className="text-muted shrink-0" />
-                <span className="flex-1 min-w-0 truncate text-sm font-medium">{job.name}</span>
-                <span className="text-xs text-muted shrink-0">{parseDbDate(job.next_run_at)?.toLocaleString()}</span>
-              </Link>
-            ))}
-          </Panel>
-        </Section>
       </div>
     </div>
   );
