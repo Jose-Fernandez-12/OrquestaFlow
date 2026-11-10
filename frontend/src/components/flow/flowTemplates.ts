@@ -83,7 +83,7 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
             data: {
               label: 'Consultar API',
               method: 'GET',
-              url: 'https://jsonplaceholder.typicode.com/users',
+              endpoint: 'https://jsonplaceholder.typicode.com/users',
             },
           },
           {
@@ -92,8 +92,8 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
             position: { x: 760, y: 200 },
             data: {
               label: 'Formatear filas',
-              mode: 'code',
-              code: `const rows = Array.isArray(data) ? data : (data?.data || []);\nreturn rows.slice(0, Number(context.limite) || 10).map(u => ({\n  id: u.id,\n  nombre: u.name,\n  correo: u.email,\n  empresa: u.company?.name || '',\n  fechaCorte: context.fechaCorte\n}));`,
+              transformType: 'javascript',
+              expression: `const rows = Array.isArray(data) ? data : (data?.data || []);\nreturn rows.slice(0, Number(context['Parámetros']?.limite) || 10).map(u => ({\n  id: u.id,\n  nombre: u.name,\n  correo: u.email,\n  empresa: u.company?.name || '',\n  fechaCorte: context['Parámetros']?.fechaCorte\n}));`,
             },
           },
           {
@@ -176,7 +176,7 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
             position: { x: 760, y: 200 },
             data: {
               label: '¿Hay registros?',
-              mode: 'if',
+              mode: 'if_else',
               conditions: [
                 {
                   id: '1',
@@ -267,7 +267,7 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
             data: {
               label: 'Consultar detalle',
               method: 'GET',
-              url: 'https://jsonplaceholder.typicode.com/todos/{{_item.id}}',
+              endpoint: 'https://jsonplaceholder.typicode.com/todos/{{_item.id}}',
             },
           },
           {
@@ -325,7 +325,7 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
             data: {
               label: 'Fuente principal',
               method: 'GET',
-              url: 'https://jsonplaceholder.typicode.com/users',
+              endpoint: 'https://jsonplaceholder.typicode.com/users',
             },
           },
           {
@@ -360,8 +360,8 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
             position: { x: 840, y: 120 },
             data: {
               label: 'Cruzar datos',
-              mode: 'code',
-              code: `const usuarios = Array.isArray(data) ? data : (data?.data || []);\nconst catalogo = context['${listId}'] || [];\nreturn usuarios.slice(0, 5).map(u => ({\n  id: u.id,\n  nombre: u.name,\n  region: catalogo.find(c => c.id === u.id)?.region || 'General'\n}));`,
+              transformType: 'javascript',
+              expression: `const usuarios = Array.isArray(data) ? data : (data?.data || []);\nconst catalogo = context['${listId}'] || [];\nreturn usuarios.slice(0, 5).map(u => ({\n  id: u.id,\n  nombre: u.name,\n  region: catalogo.find(c => c.id === u.id)?.region || 'General'\n}));`,
             },
           },
         ],
@@ -438,8 +438,8 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
             position: { x: 800, y: 200 },
             data: {
               label: 'Procesar respuesta',
-              mode: 'code',
-              code: `return {\n  subflujo: data?.flowName || '',\n  duracionMs: data?.durationMs || 0,\n  resultado: data?.data ?? data\n};`,
+              transformType: 'javascript',
+              expression: `return {\n  subflujo: data?.flowName || '',\n  duracionMs: data?.durationMs || 0,\n  resultado: data?.data ?? data\n};`,
             },
           },
         ],

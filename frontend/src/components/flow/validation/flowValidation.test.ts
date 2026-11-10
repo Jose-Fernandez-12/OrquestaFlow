@@ -201,4 +201,14 @@ describe('validateFlow · Ejecutar flujo (runFlow), parámetros y plantillas', (
       expect(def1.nodes[0].id).not.toBe(def2.nodes[0].id);
     }
   });
+
+  it('templates that need no user setup pass validation without errors', () => {
+    // SQL needs a saved query and the orchestrator a target flow: those errors are expected
+    const needsSetup = new Set(['sql-conditional-export', 'subflow-orchestrator']);
+    for (const tpl of FLOW_TEMPLATES.filter(t => !needsSetup.has(t.id))) {
+      const { nodes, edges } = tpl.buildDefinition();
+      const errors = validateFlow(nodes as Node[], edges as Edge[]).filter(i => i.level === 'error');
+      expect(errors, tpl.id).toEqual([]);
+    }
+  });
 });
