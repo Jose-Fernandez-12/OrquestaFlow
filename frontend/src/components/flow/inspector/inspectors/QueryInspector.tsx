@@ -188,18 +188,22 @@ export function QueryInspector({ node, nodes, edges, updateNodeData }: QueryInsp
               upstreamDataNodes.map(upNode => (
                 <div
                   key={upNode.id}
-                  className="p-3 bg-bg border border-border rounded flex items-center justify-between"
+                  className="p-3 bg-bg border border-border rounded flex items-center justify-between gap-2"
                 >
-                  <div>
-                    <span className="text-xs font-medium block text-fg">
+                  <div className="flex-1 min-w-0">
+                    <span
+                      className="text-xs font-medium block text-fg truncate"
+                      title={(upNode.data?.label as string) || upNode.type}
+                    >
                       {(upNode.data?.label as string) || upNode.type}
                     </span>
-                    <span className="text-[10px] text-muted font-mono">{upNode.id}</span>
+                    <span className="text-[10px] text-muted font-mono block truncate">{upNode.id}</span>
                   </div>
                   <JsonSelectorModal
                     node={upNode}
                     customLabel="Ver JSON"
                     updateNodeData={updateNodeData}
+                    className="w-auto shrink-0"
                   />
                 </div>
               ))

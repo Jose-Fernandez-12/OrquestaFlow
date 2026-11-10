@@ -76,8 +76,11 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
           {canRetry && (
             <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
-                <label className="text-xs font-medium flex items-center gap-1.5">
-                  <RotateCw size={12} className="text-muted" />
+                <label
+                  className="min-w-0 flex-1 truncate text-xs font-medium flex items-center gap-1.5"
+                  title="Reintentos si falla"
+                >
+                  <RotateCw size={12} className="text-muted shrink-0" />
                   Reintentos si falla
                 </label>
                 <input
@@ -87,7 +90,7 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
                   value={config.retryCount ?? ''}
                   placeholder={isHttp ? `Global (${globalHttpRetries})` : '0'}
                   onChange={e => setRetryCount(e.target.value)}
-                  className="w-28 h-8 rounded-sm border border-border bg-surface px-2 text-xs font-mono text-center focus-visible:outline-none focus-visible:border-accent"
+                  className="w-28 shrink-0 h-8 rounded-sm border border-border bg-surface px-2 text-xs font-mono text-center focus-visible:outline-none focus-visible:border-accent"
                 />
               </div>
 
@@ -115,9 +118,10 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
                             type="button"
                             onClick={() => updateNodeData('retryBackoff', value)}
                             className={cn(
-                              'text-[11px] rounded font-medium transition-colors',
+                              'min-w-0 px-1.5 truncate text-[10px] sm:text-[11px] rounded font-medium transition-colors',
                               config.retryBackoff === value ? 'bg-surface text-accent shadow-sm' : 'text-muted hover:text-fg'
                             )}
+                            title={label}
                           >
                             {label}
                           </button>
@@ -125,7 +129,7 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
                       </div>
                     </div>
                   </div>
-                  <p className="text-[10px] text-muted leading-relaxed">
+                  <p className="text-[10px] text-muted leading-relaxed break-words">
                     Esperas: <span className="font-mono text-fg">{describeRetryDelays(config, effectiveRetries)}</span>.
                     {isHttp && ' Solo se reintentan fallos de red, tiempos de espera y respuestas 408, 429 o 5xx; un 4xx falla de inmediato.'}
                     {isHttp && config.retryCount === null && ' Usa el valor global de Configuración.'}

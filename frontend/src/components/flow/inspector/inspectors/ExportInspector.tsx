@@ -304,11 +304,14 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
                 {upstreamDataNodes.map(upNode => (
                   <div
                     key={upNode.id}
-                    className="p-2.5 bg-bg border border-border rounded flex items-center justify-between"
+                    className="p-2.5 bg-bg border border-border rounded flex items-center justify-between gap-2"
                   >
-                    <div className="flex items-center gap-2 truncate">
+                    <div className="flex flex-1 min-w-0 items-center gap-2">
                       <FileSpreadsheet size={14} className="text-accent shrink-0" />
-                      <span className="text-xs font-medium truncate">
+                      <span
+                        className="text-xs font-medium truncate"
+                        title={(upNode.data?.label as string) || upNode.type}
+                      >
                         {(upNode.data?.label as string) || upNode.type}
                       </span>
                     </div>
@@ -317,6 +320,7 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
                       forExportNode={node}
                       customLabel="Ver JSON"
                       updateNodeData={updateNodeData}
+                      className="w-auto shrink-0"
                     />
                   </div>
                 ))}
