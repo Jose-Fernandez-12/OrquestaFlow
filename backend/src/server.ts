@@ -20,6 +20,7 @@ import { exportRoutes } from './routes/export.js';
 import { fileManagerRoutes } from './routes/files.js';
 import { settingsRoutes } from './routes/settings.js';
 import { pythonExportRoutes } from './routes/pythonExport.js';
+import { dashboardRoutes } from './routes/dashboard.js';
 
 config();
 
@@ -86,6 +87,7 @@ async function start(): Promise<void> {
   await app.register(settingsRoutes, { prefix: '/api/settings' });
   await app.register(pythonExportRoutes, { prefix: '/api/flows' });
   await app.register(pythonEnvRoutes, { prefix: '/api/python-env' });
+  await app.register(dashboardRoutes, { prefix: '/api/dashboard' });
 
   // Health check
   app.get('/api/health', async () => {

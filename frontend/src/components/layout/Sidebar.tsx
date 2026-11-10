@@ -24,17 +24,16 @@ export function Sidebar() {
   const collapsed = useAppSelector((state) => state.ui.sidebarCollapsed);
 
   const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
-    { id: 'flujos', label: 'Flujos de trabajo', icon: GitMerge, path: '/' },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: '/' },
+    { id: 'flujos', label: 'Flujos de trabajo', icon: GitMerge, path: '/flujos' },
     { id: 'scripts', label: 'Scripts', icon: Code2, path: '/scripts' },
     { id: 'bases', label: 'Bases de datos', icon: Database, path: '/bases' },
     { id: 'programacion', label: 'Programación', icon: Calendar, path: '/programacion' },
   ];
 
   const isItemActive = (item: typeof navItems[0]) => {
-    if (item.id === 'flujos') {
-      return location.pathname === '/' || location.pathname.startsWith('/flujos');
-    }
+    // '/' is a prefix of every route, so the dashboard only matches exactly
+    if (item.id === 'dashboard') return location.pathname === '/';
     return location.pathname.startsWith(item.path);
   };
 

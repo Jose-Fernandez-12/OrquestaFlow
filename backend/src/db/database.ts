@@ -133,6 +133,13 @@ export async function initDb(): Promise<void> {
   } catch (e: any) {
     // Ignore if exists
   }
+  try {
+    // Scheduled time of a run that did not happen because the server was off: see engine/scheduler.ts
+    wrappedDb.exec('ALTER TABLE schedules ADD COLUMN last_missed_at TEXT;');
+    console.log('[DB] Migrated: added last_missed_at to schedules');
+  } catch (e: any) {
+    // Ignore if exists
+  }
 
   try {
     wrappedDb.exec(`
