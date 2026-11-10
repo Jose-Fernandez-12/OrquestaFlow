@@ -48,11 +48,13 @@ function firstRow(value: any): any {
   return value;
 }
 
+const EMPTY_RESULTS: Record<string, any> = {};
+
 export function JsonTransformInspector({ node, nodes, edges, updateNodeData, nodeResult, debugPreview }: JsonTransformInspectorProps) {
   const data = (node.data || {}) as Record<string, any>;
   const mappings = getMappings(data);
   const mode = (data.transformType === 'map' || data.transformType === 'pick') && mappings.length > 0 ? 'map' : 'javascript';
-  const nodeResults = useAppSelector(state => state.flows.nodeResults || {});
+  const nodeResults = useAppSelector(state => state.flows.nodeResults) || EMPTY_RESULTS;
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
 
   const [showCodeModal, setShowCodeModal] = useState(false);

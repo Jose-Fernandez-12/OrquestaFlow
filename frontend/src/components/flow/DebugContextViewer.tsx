@@ -146,7 +146,7 @@ export function DebugContextViewer({
 
   // Sync selected iteration to current active when active updates
   useEffect(() => {
-    setSelectedIterNum(activeIterationNumber);
+    setSelectedIterNum(prev => (prev !== activeIterationNumber ? activeIterationNumber : prev));
   }, [activeIterationNumber]);
 
   // Enclosing loops shown before "Iteración x de y" (nested loops): the HTTP preview sends the outer
@@ -252,29 +252,29 @@ export function DebugContextViewer({
   useEffect(() => {
     if (responsePreview) {
       setIsSending(false);
-      setActiveTab('response');
+      setActiveTab(prev => (prev !== 'response' ? 'response' : prev));
     } else if (requestPreview) {
-      setActiveTab('request');
+      setActiveTab(prev => (prev !== 'request' ? 'request' : prev));
     } else if (queryPreview) {
-      setActiveTab('query');
+      setActiveTab(prev => (prev !== 'query' ? 'query' : prev));
     } else if (waitPreview) {
-      setActiveTab('wait');
+      setActiveTab(prev => (prev !== 'wait' ? 'wait' : prev));
     } else if (scriptPreview) {
-      setActiveTab('script');
+      setActiveTab(prev => (prev !== 'script' ? 'script' : prev));
     } else if (isScriptNode && hasScriptOutput) {
-      setActiveTab('scriptConsole');
+      setActiveTab(prev => (prev !== 'scriptConsole' ? 'scriptConsole' : prev));
     } else if (hasStepper || nodeLogs.length > 0) {
-      setActiveTab('console');
+      setActiveTab(prev => (prev !== 'console' ? 'console' : prev));
     } else if (effectiveOutput !== undefined) {
-      setActiveTab('output');
+      setActiveTab(prev => (prev !== 'output' ? 'output' : prev));
     } else {
-      setActiveTab('input');
+      setActiveTab(prev => (prev !== 'input' ? 'input' : prev));
     }
   }, [responsePreview, requestPreview, queryPreview, waitPreview, scriptPreview, isScriptNode, hasScriptOutput, currentNodePreview, nodeLogs.length, effectiveOutput, hasStepper]);
 
   // When the script starts (after "Continuar"), show its output
   useEffect(() => {
-    if (scriptRun?.runId) setActiveTab('scriptConsole');
+    if (scriptRun?.runId) setActiveTab(prev => (prev !== 'scriptConsole' ? 'scriptConsole' : prev));
   }, [scriptRun?.runId]);
 
   // STRICT GRAPH ISOLATION:
@@ -346,9 +346,10 @@ export function DebugContextViewer({
   const [viewMode, setViewMode] = useState<'table' | 'structured' | 'raw'>('table');
 
   useEffect(() => {
-    setViewMode(isCurrentDataTabular ? 'table' : 'raw');
-    setPage(1);
-    setSearchTerm('');
+    const nextMode = isCurrentDataTabular ? 'table' : 'raw';
+    setViewMode(prev => (prev !== nextMode ? nextMode : prev));
+    setPage(prev => (prev !== 1 ? 1 : prev));
+    setSearchTerm(prev => (prev !== '' ? '' : prev));
   }, [activeTab, isCurrentDataTabular]);
 
   const tabularRows = useMemo(() => {

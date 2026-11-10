@@ -164,9 +164,12 @@ function FlowCanvas() {
   const lastPointer = useRef<{ x: number; y: number } | null>(null);
 
   const selectedNodeIdRef = useRef(selectedNodeId);
-  selectedNodeIdRef.current = selectedNodeId;
+  useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
 
   const selectSingleNode = useCallback((nodeId: string | null) => {
+    if (selectedNodeIdRef.current === nodeId) return;
     selectedNodeIdRef.current = nodeId;
     setNodes(nds => {
       let hasChanges = false;
@@ -194,7 +197,7 @@ function FlowCanvas() {
 
   useEffect(() => {
     if (activeDebugNodeId) {
-      setPersistedDebugNodeId(activeDebugNodeId);
+      setPersistedDebugNodeId(prev => (prev !== activeDebugNodeId ? activeDebugNodeId : prev));
     }
   }, [activeDebugNodeId]);
 
@@ -207,6 +210,7 @@ function FlowCanvas() {
 
   // Keep React Flow nodes.selected in sync with Redux selectedNodeId without circular triggers
   useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
     setNodes(nds => {
       let hasChanges = false;
       const updated = nds.map(n => {
@@ -572,28 +576,40 @@ function FlowCanvas() {
     }));
   }, [isLocked, setEdges]);
 
-  // Load flow definition when currentFlow changes
+  // Load flow definition only when opening a different flow or on initial load
+  const loadedFlowIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (currentFlow && currentFlow.definition) {
-      try {
-        const def = JSON.parse(currentFlow.definition);
-        // Older saves stored the canvas selection; a flow always opens with nothing selected
-        setNodes((def.nodes || []).map((n: Node) => (n.selected || n.dragging ? { ...n, selected: false, dragging: false } : n)));
-        const loadedEdges = (def.edges || []).map((e: Edge) => ({
-          ...e,
-          markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
-        }));
-        setEdges(loadedEdges);
-        setSavedSignature(canvasSignature(def.nodes || [], loadedEdges));
-      } catch (e) {
-        console.error("Failed to parse flow definition", e);
-      }
-    } else {
+    if (!currentFlow) {
+      loadedFlowIdRef.current = null;
       setNodes([]);
       setEdges([]);
       setSavedSignature(canvasSignature([], []));
+      return;
     }
-  }, [currentFlow, setNodes, setEdges]);
+
+    if (loadedFlowIdRef.current !== currentFlow.id || nodes.length === 0) {
+      loadedFlowIdRef.current = currentFlow.id;
+      if (currentFlow.definition) {
+        try {
+          const def = JSON.parse(currentFlow.definition);
+          // Older saves stored the canvas selection; a flow always opens with nothing selected
+          setNodes((def.nodes || []).map((n: Node) => (n.selected || n.dragging ? { ...n, selected: false, dragging: false } : n)));
+          const loadedEdges = (def.edges || []).map((e: Edge) => ({
+            ...e,
+            markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
+          }));
+          setEdges(loadedEdges);
+          setSavedSignature(canvasSignature(def.nodes || [], loadedEdges));
+        } catch (e) {
+          console.error("Failed to parse flow definition", e);
+        }
+      } else {
+        setNodes([]);
+        setEdges([]);
+        setSavedSignature(canvasSignature([], []));
+      }
+    }
+  }, [currentFlow?.id, currentFlow?.definition, setNodes, setEdges, nodes.length]);
 
   const canvasHistory = useCanvasHistory({
     nodes,
@@ -708,9 +724,6 @@ function FlowCanvas() {
         selectedNodeIdRef.current = selNodes[0].id;
         dispatch(selectNode(selNodes[0].id));
       }
-    } else if (selNodes.length === 0 && selectedNodeIdRef.current !== null) {
-      selectedNodeIdRef.current = null;
-      dispatch(selectNode(null));
     }
   }, [dispatch]);
 
