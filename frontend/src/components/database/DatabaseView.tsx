@@ -1,4 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
+import { CredentialPicker } from '../flow/inspector/editors/CredentialPicker';
+import { parseDbDate } from '../scripts/scriptDisplay';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchConnections, setCurrentConnection, testConnection, createConnection, updateConnection, deleteConnection } from '../../store/connectionSlice';
 import { fetchQueries, setCurrentQuery, executeQuery, cancelQuery, updateQuery, createQuery, deleteQuery } from '../../store/querySlice';
@@ -54,6 +56,7 @@ export function DatabaseView() {
   const [formDriver, setFormDriver] = useState('ODBC Driver 17 for SQL Server');
   const [formUsername, setFormUsername] = useState('');
   const [formPassword, setFormPassword] = useState('');
+  const [formCredentialId, setFormCredentialId] = useState('');
   const [formEnvCredentialKey, setFormEnvCredentialKey] = useState('SQLSERVER');
   
   // Local state for editing/creating SQL
@@ -204,7 +207,15 @@ export function DatabaseView() {
   };
 
   const handleExecuteClick = () => {
-    if (!queriesState.currentQuery || selectedConns.length === 0) return;
+    // Say why nothing would happen instead of ignoring the click
+    if (!queriesState.currentQuery) {
+      dispatch(showToast('Por favor guarda la consulta antes de ejecutarla.'));
+      return;
+    }
+    if (selectedConns.length === 0) {
+      dispatch(showToast('Por favor selecciona al menos una base de datos en «Bases de datos asociadas».'));
+      return;
+    }
     
     const params = extractParams(sqlText);
     if (params.length > 0) {
@@ -316,7 +327,7 @@ export function DatabaseView() {
       <div className="flex items-center justify-between mb-6 shrink-0">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Bases de datos</h1>
-          <p className="text-sm text-muted">Gestión de conexiones regionales SQL Server y consultas preparadas.</p>
+          <p className="text-sm text-muted">Conexiones a SQL Server y SQLite, y consultas preparadas para reutilizar en los flujos.</p>
         </div>
       </div>
 
@@ -485,7 +496,7 @@ export function DatabaseView() {
                                 </span>
                               )}
                               <span className="text-xs text-muted truncate">
-                                {q.last_run_at ? new Date(q.last_run_at).toLocaleDateString() : 'Never'}
+                                {parseDbDate(q.last_run_at)?.toLocaleDateString() ?? 'Nunca'}
                               </span>
                             </div>
                           </div>
@@ -560,6 +571,7 @@ export function DatabaseView() {
                       setFormDriver(selectedConn.driver);
                       setFormUsername(selectedConn.username || '');
                       setFormPassword('');
+                      setFormCredentialId(selectedConn.credential_id || '');
                       setFormEnvCredentialKey(selectedConn.env_credential_key || 'SQLSERVER');
                       setIsCreating(true);
                       setTestResult(null);
@@ -638,7 +650,7 @@ export function DatabaseView() {
                           </div>
                           <div>
                             <div className="text-sm font-medium">{q.name}</div>
-                            <div className="text-xs text-muted">Última ejecución: {q.last_run_at ? new Date(q.last_run_at).toLocaleDateString() : 'Nunca'}</div>
+                            <div className="text-xs text-muted">Última ejecución: {parseDbDate(q.last_run_at)?.toLocaleDateString() ?? 'Nunca'}</div>
                           </div>
                         </div>
                         <Button 
@@ -823,6 +835,7 @@ export function DatabaseView() {
                   </div>
                 </div>
                 <div className="flex gap-2 shrink-0 items-start pt-1">
+                  {queriesState.currentQuery && (
                   <Button 
                     variant="outline" 
                     size="sm" 
@@ -841,6 +854,7 @@ export function DatabaseView() {
                   >
                     <Trash2 size={14} /> Eliminar
                   </Button>
+                  )}
                   <Button variant="default" size="sm" onClick={handleFormatSql} className="gap-2" title="Formatear SQL">
                     <AlignLeft size={14} /> Formatear
                   </Button>
@@ -1165,6 +1179,14 @@ export function DatabaseView() {
                       />
                     </div>
 
+                    <CredentialPicker
+                      id="connection-credential"
+                      types={['basic']}
+                      value={formCredentialId}
+                      onChange={setFormCredentialId}
+                    />
+
+                    {!formCredentialId && (
                     <div className="grid grid-cols-2 gap-4">
                       <div className="flex flex-col gap-1.5">
                         <label className="text-xs font-medium text-muted">Usuario</label>
@@ -1181,10 +1203,11 @@ export function DatabaseView() {
                           type="password"
                           value={formPassword}
                           onChange={(e) => setFormPassword(e.target.value)}
-                          placeholder="••••••••"
+                          placeholder={selectedConn?.has_password ? 'Guardada · vacía para mantenerla' : '••••••••'}
                         />
                       </div>
                     </div>
+                    )}
                   </>
                 )}
 
@@ -1216,7 +1239,8 @@ export function DatabaseView() {
                         driver: formDriver,
                         username: formDriver === 'sqlite' ? null : formUsername,
                         password: formDriver === 'sqlite' ? null : formPassword,
-                        env_credential_key: formDriver === 'sqlite' ? null : formEnvCredentialKey
+                        env_credential_key: formDriver === 'sqlite' ? null : formEnvCredentialKey,
+                        credential_id: formDriver === 'sqlite' ? null : formCredentialId || null
                       };
                       try {
                         let resultAction;
@@ -1240,6 +1264,7 @@ export function DatabaseView() {
                           setFormDriver('ODBC Driver 17 for SQL Server');
                           setFormUsername('');
                           setFormPassword('');
+                          setFormCredentialId('');
                           setFormEnvCredentialKey('SQLSERVER');
                         } else {
                           dispatch(showToast(selectedConn ? 'Error al actualizar la conexión' : 'Error al crear la conexión'));

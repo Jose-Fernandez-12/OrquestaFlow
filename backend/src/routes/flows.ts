@@ -1,4 +1,5 @@
 import { FastifyInstance } from 'fastify';
+import { encryptSecret } from '../engine/secrets.js';
 import crypto from 'crypto';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
@@ -218,7 +219,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
           conn.port || 1433,
           conn.driver || 'ODBC Driver 17 for SQL Server',
           conn.username || '',
-          conn.password || '',
+          encryptSecret(conn.password),
           conn.env_credential_key || null
         );
 
@@ -562,12 +563,15 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Execute flow (using DAG engine)
-  app.post<{ Params: { id: string }, Body: { mode?: 'normal' | 'debug' } }>('/:id/execute', async (request, reply) => {
+  app.post<{ Params: { id: string }, Body: { mode?: 'normal' | 'debug'; params?: Record<string, any> } }>('/:id/execute', async (request, reply) => {
     const db = getDb();
     const flowId = request.params.id;
     const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as Record<string, unknown> | undefined;
     if (!flow) return reply.status(404).send({ error: 'Flow not found' });
     const mode = request.body?.mode || 'normal';
+    const params = request.body?.params && typeof request.body.params === 'object' && !Array.isArray(request.body.params)
+      ? request.body.params
+      : undefined;
 
     const logId = startExecutionLog(flowId, mode === 'debug' ? 'debug' : 'manual');
     const tracer = new ExecutionTracer();
@@ -580,7 +584,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     try {
 
       // Execute the DAG with real-time socket callbacks
-      const context = await executeFlowEngine(flowId, progress.emit, { mode, tracer });
+      const context = await executeFlowEngine(flowId, progress.emit, { mode, tracer, params });
       saveRunCache(flowId, context, progress.skippedNodeIds, { merge: false });
       const duration = Date.now() - startTime;
 
@@ -917,9 +921,10 @@ function verifyWebhookAuth(request: any, secret: string): string | null {
   return 'Este webhook requiere autenticación: envía la cabecera x-webhook-signature o Authorization: Bearer <secreto>';
 }
 
-const SECRET_NODE_FIELDS = ['apiKey', 'clientSecret', 'password', 'refreshToken', 'secret'];
+const SECRET_NODE_FIELDS = ['apiKey', 'clientSecret', 'password', 'refreshToken', 'secret', 'authToken', 'authPassword'];
 
-// Secrets typed directly into nodes are removed from exports; env:VARIABLE references are kept
+// Secrets typed directly into nodes are removed from exports. References are kept: env:VARIABLE,
+// cred:nombre and {{values taken from another node}}
 export function stripNodeSecrets(definition: { nodes: any[]; edges: any[] }) {
   return {
     ...definition,
@@ -927,7 +932,7 @@ export function stripNodeSecrets(definition: { nodes: any[]; edges: any[] }) {
       if (!node?.data) return node;
       const data = { ...node.data };
       for (const field of SECRET_NODE_FIELDS) {
-        if (typeof data[field] === 'string' && data[field] && !data[field].startsWith('env:')) {
+        if (typeof data[field] === 'string' && data[field] && !/^(env|cred):/.test(data[field]) && !data[field].includes('{{')) {
           data[field] = '';
         }
       }

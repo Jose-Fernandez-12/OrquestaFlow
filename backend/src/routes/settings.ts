@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
 import { describeMssqlCredentials } from '../engine/mssql.js';
 import { runCacheStats, clearRunCache } from '../engine/runCache.js';
+import { DEFAULT_RETENTION_DAYS, applyRetentionNow } from '../engine/retention.js';
 
 export interface SystemSettingsMap {
   http_timeout_seconds: number;
@@ -14,6 +15,8 @@ export interface SystemSettingsMap {
   user_role_label: string;
   experimental_nodes_enabled: boolean;
   python_version: string;
+  /** Days of execution history to keep; 0 keeps everything (see engine/retention.ts) */
+  execution_log_retention_days: number;
   [key: string]: any;
 }
 
@@ -27,7 +30,8 @@ export const DEFAULT_SETTINGS: SystemSettingsMap = {
   user_display_name: 'Jose Fernandez',
   user_role_label: 'Administrador',
   experimental_nodes_enabled: false,
-  python_version: '3.12'
+  python_version: '3.12',
+  execution_log_retention_days: DEFAULT_RETENTION_DAYS,
 };
 
 const BOOLEAN_SETTINGS = ['experimental_nodes_enabled'];
@@ -39,7 +43,7 @@ export function getSystemSettingsFromDb(): SystemSettingsMap {
     const result: Record<string, any> = { ...DEFAULT_SETTINGS };
 
     for (const row of rows) {
-      if (['http_timeout_seconds', 'mssql_connection_timeout_seconds', 'mssql_request_timeout_seconds', 'script_timeout_seconds', 'http_max_retries', 'table_preview_row_limit'].includes(row.key)) {
+      if (['http_timeout_seconds', 'mssql_connection_timeout_seconds', 'mssql_request_timeout_seconds', 'script_timeout_seconds', 'http_max_retries', 'table_preview_row_limit', 'execution_log_retention_days'].includes(row.key)) {
         const num = Number(row.value);
         result[row.key] = isNaN(num) ? DEFAULT_SETTINGS[row.key] : num;
       } else if (BOOLEAN_SETTINGS.includes(row.key)) {
@@ -77,6 +81,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       'user_display_name',
       'user_role_label',
       'python_version',
+      'execution_log_retention_days',
       ...BOOLEAN_SETTINGS
     ];
 
@@ -88,6 +93,9 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         // Validations for numeric settings
         if (['http_timeout_seconds', 'mssql_connection_timeout_seconds', 'mssql_request_timeout_seconds', 'script_timeout_seconds', 'table_preview_row_limit'].includes(k)) {
           const num = Math.max(1, parseInt(stringValue, 10) || 1);
+          stringValue = String(num);
+        } else if (k === 'execution_log_retention_days') {
+          const num = Math.max(0, Math.min(3650, parseInt(stringValue, 10) || 0));
           stringValue = String(num);
         } else if (k === 'http_max_retries') {
           const num = Math.max(0, Math.min(5, parseInt(stringValue, 10) || 0));
@@ -108,6 +116,8 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
+      if ('execution_log_retention_days' in body) applyRetentionNow();
+
       const updated = getSystemSettingsFromDb();
       return { data: updated, message: 'Configuración actualizada exitosamente' };
     } catch (err: any) {
@@ -118,7 +128,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   // Where each SQL Server connection takes its credentials from (never the values)
   app.get('/credentials', async () => {
     const db = getDb();
-    const rows = db.prepare('SELECT id, name, host, database_name, driver, username, password, env_credential_key FROM connections ORDER BY name').all() as any[];
+    const rows = db.prepare('SELECT id, name, host, database_name, driver, username, password, env_credential_key, credential_id FROM connections ORDER BY name').all() as any[];
     return {
       data: rows
         .filter(c => c.driver !== 'sqlite')

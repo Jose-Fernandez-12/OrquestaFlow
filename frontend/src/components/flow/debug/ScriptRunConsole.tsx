@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
 import { CheckCircle2, Loader2, XCircle } from 'lucide-react';
-import { SOCKET_URL } from '../../../lib/api';
+import { createSocket } from '../../../lib/api';
 import { cn } from '../../../lib/utils';
 import { ConsoleOutput, type ConsoleChunk } from '../../ui/ConsoleOutput';
 import { apiRequest } from '../../scripts/pythonEnvApi';
@@ -41,7 +40,7 @@ export function ScriptRunConsole({ runId, result, className }: ScriptRunConsoleP
     let cancelled = false;
 
     // Socket first, so nothing printed between the snapshot and the subscription is lost
-    const socket = io(SOCKET_URL);
+    const socket = createSocket();
     socket.on('script-output', (data: ConsoleChunk & { runId: string; ts: number }) => {
       if (data.runId !== runId) return;
       if (pending.current) pending.current.push(data);

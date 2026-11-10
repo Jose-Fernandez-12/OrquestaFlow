@@ -17,7 +17,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { v4 as uuid } from 'uuid';
 import { useParams, useNavigate, useBlocker } from 'react-router-dom';
-import { SOCKET_URL, getApiUrl } from '../../lib/api';
+import { getApiUrl, createSocket } from '../../lib/api';
 import {
   Play,
   Save,
@@ -52,13 +52,17 @@ import {
   Undo2,
   Redo2,
   AlertCircle,
-  Search
+  Search,
+  SlidersHorizontal,
+  Sparkles
 } from 'lucide-react';
-import { io } from 'socket.io-client';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
 import { FlowVersionsModal } from './FlowVersionsModal';
+import { RunFlowParamsModal } from './RunFlowParamsModal';
+import { getFlowParameters, hasPromptParameters } from './flowParameters';
+import { FLOW_TEMPLATES, type FlowTemplate } from './flowTemplates';
 import { ImportFlowModal } from './ImportFlowModal';
 import { NodeResultModal } from './NodeResultModal';
 import { ScriptConsoleDialog } from './ScriptConsoleDialog';
@@ -112,6 +116,12 @@ import { downloadAsXMLSpreadsheet, downloadAsCSV, resolveExportData, triggerBrow
 
 // Drops edges whose nodes no longer exist or whose conditional output (deleted switch case,
 // changed mode) is gone, since those would never be followed.
+function buildNode(type: string, label: string, position: { x: number; y: number }): Node {
+  return type === 'note'
+    ? { id: uuid(), type, position, data: { label: 'Nota', text: '', color: 'amarillo' }, width: 240, height: 130, zIndex: -1 }
+    : { id: uuid(), type, position, data: { label: label || type } };
+}
+
 function pruneEdges(nodes: Node[], edges: Edge[]): Edge[] {
   const byId = new Map(nodes.map(n => [n.id, n]));
   return edges.filter(edge => {
@@ -398,7 +408,7 @@ function FlowCanvas() {
         console.error('Failed to sync flow execution state', err);
       });
 
-    const socket = io(SOCKET_URL);
+    const socket = createSocket();
 
     socket.on('flow-progress', (data: { 
       flowId: string; 
@@ -642,14 +652,24 @@ function FlowCanvas() {
         y: event.clientY,
       });
 
-      const newNode: Node = type === 'note'
-        ? { id: uuid(), type, position, data: { label: 'Nota', text: '', color: 'amarillo' }, width: 240, height: 130, zIndex: -1 }
-        : { id: uuid(), type, position, data: { label: label || type } };
-
-      setNodes((nds) => nds.concat(newNode));
+      setNodes((nds) => nds.concat(buildNode(type, label, position)));
     },
     [reactFlowInstance, setNodes]
   );
+
+  // Click on a library node: it lands in the middle of what is on screen, a little lower each time
+  // so several clicks in a row do not stack the nodes on top of each other
+  const addedByClick = useRef(0);
+  const addNodeAtCenter = useCallback((type: string, label: string) => {
+    const wrapper = reactFlowWrapper.current;
+    if (!reactFlowInstance || !wrapper) return;
+    const area = wrapper.getBoundingClientRect();
+    const offset = (addedByClick.current++ % 6) * 28;
+    const position = reactFlowInstance.screenToFlowPosition({ x: area.left + area.width / 2 - 100 + offset, y: area.top + area.height / 2 - 30 + offset });
+    const node = buildNode(type, label, position);
+    setNodes((nds) => nds.concat(node));
+    if (type !== 'note') dispatch(selectNode(node.id));
+  }, [reactFlowInstance, setNodes, dispatch]);
 
   const onSelectionChange = useCallback(({ nodes: selNodes }: { nodes: Node[] }) => {
     if (selNodes.length === 1) {
@@ -1023,7 +1043,27 @@ function FlowCanvas() {
     runPartial(selectedNodeIds, { mode, title: `La ejecución de ${selectedNodeIds.length} nodos` });
   }, [runPartial, selectedNodeIds]);
 
-  const handleExecute = async (mode: 'normal' | 'debug' = 'normal', skipValidation = false) => {
+  const [paramsModalState, setParamsModalState] = useState<{ mode: 'normal' | 'debug' } | null>(null);
+  const flowParameters = useMemo(() => getFlowParameters(nodes), [nodes]);
+
+  const applyTemplateToCanvas = useCallback((template: FlowTemplate) => {
+    if (isLocked) return;
+    const def = template.buildDefinition();
+    setNodes(def.nodes);
+    setEdges(def.edges);
+    if (def.nodes.length > 0) {
+      dispatch(selectNode(def.nodes[0].id));
+    }
+    setTimeout(() => {
+      reactFlowInstance?.fitView({ padding: 0.2, duration: 250 });
+    }, 60);
+  }, [isLocked, setNodes, setEdges, dispatch, reactFlowInstance]);
+
+  const handleExecute = async (
+    mode: 'normal' | 'debug' = 'normal',
+    skipValidation = false,
+    runtimeParams?: Record<string, any>
+  ) => {
     if (!currentFlow) return;
     const currentIssues = validateFlow(nodes, edges);
     if (!skipValidation && currentIssues.some(i => i.level === 'error')) {
@@ -1031,6 +1071,12 @@ function FlowCanvas() {
       setPendingRunMode(mode);
       return;
     }
+
+    if (runtimeParams === undefined && hasPromptParameters(nodes)) {
+      setParamsModalState({ mode });
+      return;
+    }
+
     dispatch(setExecutionMode(mode));
     dispatch(resetNodeStates());
     
@@ -1063,17 +1109,21 @@ function FlowCanvas() {
       return; // Stop here and wait for the user to fill the modal
     }
 
-    await performExecution(nodes, mode);
+    await performExecution(nodes, mode, runtimeParams);
   };
 
-  const performExecution = async (nodesToExecute: Node[], mode: 'normal' | 'debug' = 'normal') => {
+  const performExecution = async (
+    nodesToExecute: Node[],
+    mode: 'normal' | 'debug' = 'normal',
+    runtimeParams?: Record<string, any>
+  ) => {
     downloadedUrlsRef.current.clear();
     // Auto-guardar definición antes de ejecutar para que el backend tenga los últimos datos
     const definition = JSON.stringify({ nodes: nodesToExecute, edges: pruneEdges(nodesToExecute, edges) });
     await dispatch(saveFlow({ id: currentFlow!.id, definition, name: editingName }));
     
     try {
-      const result = await dispatch(executeFlow({ id: currentFlow!.id, mode }));
+      const result = await dispatch(executeFlow({ id: currentFlow!.id, mode, params: runtimeParams }));
       
       // Check for exported files returned by backend execution
       const payload = (result as any)?.payload;
@@ -1135,6 +1185,69 @@ function FlowCanvas() {
       dispatch(showToast(`No se pudo detener el flujo: ${err.message}`));
     }
   };
+
+  // ── Debug session ──
+  const debugBarVisible = executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting);
+  const floatingBarVisible = debugBarVisible || (selectedNodeIds.length > 1 && !isLiveExecuting && !isLocked);
+  const lastPausedId = pausedNodeIds.length > 0 ? pausedNodeIds[pausedNodeIds.length - 1] : null;
+
+  // Bring the node that just paused into view: it may be off-screen or under the inspector
+  useEffect(() => {
+    if (!lastPausedId || !reactFlowInstance) return;
+    // After the layout settles (the library hides and the inspector opens when a run starts)
+    const timer = setTimeout(() => {
+      const wrapper = reactFlowWrapper.current;
+      const element = wrapper?.querySelector(`.react-flow__node[data-id="${CSS.escape(lastPausedId)}"]`);
+      if (!wrapper || !element) return;
+      const area = wrapper.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      // The debug bar floats over the top of the canvas
+      const visible = box.left >= area.left + 24 && box.right <= area.right - 24 && box.top >= area.top + 64 && box.bottom <= area.bottom - 24;
+      if (visible) return;
+      const internal = reactFlowInstance.getInternalNode?.(lastPausedId);
+      const node = reactFlowInstance.getNode(lastPausedId);
+      const position = internal?.internals?.positionAbsolute ?? node?.position;
+      if (!position) return;
+      const width = node?.measured?.width ?? node?.width ?? 200;
+      const height = node?.measured?.height ?? node?.height ?? 60;
+      reactFlowInstance.setCenter(position.x + width / 2, position.y + height / 2, { zoom: reactFlowInstance.getZoom(), duration: 300 });
+    }, 380);
+    return () => clearTimeout(timer);
+  }, [lastPausedId, reactFlowInstance]);
+
+  const debugStep = useCallback(() => {
+    if (!flowId) return;
+    pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: flowId, nodeId: id, action: 'step_over' })));
+  }, [dispatch, flowId, pausedNodeIds]);
+
+  const debugContinue = useCallback(() => {
+    if (flowId) dispatch(resumeDebugNode({ id: flowId, action: 'continue' }));
+  }, [dispatch, flowId]);
+
+  const handleStopRef = useRef(handleStopExecution);
+  useEffect(() => {
+    handleStopRef.current = handleStopExecution;
+  });
+
+  // F10 next step · F8 continue · Shift+F5 stop, as in most debuggers. They work from any field
+  useEffect(() => {
+    if (!debugBarVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key === 'F10' && !event.shiftKey && pausedNodeIds.length > 0) {
+        event.preventDefault();
+        debugStep();
+      } else if (event.key === 'F8' && !event.shiftKey && pausedNodeIds.length > 0) {
+        event.preventDefault();
+        debugContinue();
+      } else if (event.key === 'F5' && event.shiftKey) {
+        event.preventDefault();
+        handleStopRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [debugBarVisible, pausedNodeIds.length, debugStep, debugContinue]);
 
   if (!currentFlow) {
     return (
@@ -1266,7 +1379,7 @@ function FlowCanvas() {
               <Save size={16} /> Guardar
             </Button>
           )}
-          {isLiveExecuting ? (
+          {debugBarVisible ? null : isLiveExecuting ? (
             <Button
               variant="default"
               size="sm"
@@ -1314,6 +1427,19 @@ function FlowCanvas() {
                     </>
                   )}
                 </div>
+              )}
+              {flowParameters.length > 0 && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => setParamsModalState({ mode: 'normal' })}
+                  className="gap-1.5 text-xs font-medium border-violet-500/30 text-violet-600 hover:bg-violet-500/10"
+                  title="Ajustar parámetros de ejecución para esta corrida"
+                >
+                  <SlidersHorizontal size={14} />
+                  <span className="hidden md:inline">Parámetros</span>
+                  <span className="text-[10px] px-1 rounded bg-violet-500/15">{flowParameters.length}</span>
+                </Button>
               )}
               <Button variant="outline" size="sm" onClick={() => handleExecute('debug')} className="gap-2 text-amber-600 border-amber-600 hover:bg-amber-50" disabled={nodes.length === 0}>
                 <Bug size={16} /> Debug
@@ -1464,7 +1590,7 @@ function FlowCanvas() {
       {/* Editor Body */}
       <div className="flex-1 flex flex-col min-h-0 relative">
         <div className="flex-1 flex min-h-0 relative">
-          {showNodeLibrary && <NodeLibrary />}
+          {showNodeLibrary && <NodeLibrary onAdd={isLocked ? undefined : addNodeAtCenter} />}
           
           <div
             className="flex-1 h-full relative"
@@ -1479,13 +1605,19 @@ function FlowCanvas() {
               type="button"
               onClick={() => setShowSearch(true)}
               className="absolute top-3 left-3 z-10 h-8 pl-2.5 pr-2 flex items-center gap-2 rounded-sm border border-border bg-surface/90 text-xs text-muted hover:text-fg hover:border-border-hover shadow-sm backdrop-blur"
-              title="Buscar un nodo en el lienzo"
+              title="Buscar un nodo en el lienzo (Ctrl K)"
+              aria-label="Buscar un nodo en el lienzo"
             >
               <Search size={13} />
-              <span>Buscar nodo</span>
-              <kbd className="text-[10px] border border-border rounded px-1">Ctrl K</kbd>
+              {/* A floating bar (debug, selection) shares the top of the canvas: leave it the room */}
+              {!floatingBarVisible && (
+                <>
+                  <span>Buscar nodo</span>
+                  <kbd className="text-[10px] border border-border rounded px-1">Ctrl K</kbd>
+                </>
+              )}
             </button>
-            {executionMode === 'debug' && (pausedNodeIds.length > 0 || isLiveExecuting) && (
+            {debugBarVisible && (
               <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-nowrap items-center gap-1.5 whitespace-nowrap max-w-[calc(100%-1.5rem)] overflow-x-auto bg-surface border border-border shadow-raised rounded-full pl-4 pr-1.5 py-1.5">
                 {/* Amber only marks the state; actions follow the app's buttons */}
                 <div className="flex items-center gap-2 text-xs font-semibold text-fg mr-2">
@@ -1503,18 +1635,18 @@ function FlowCanvas() {
                     <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => pausedNodeIds.forEach(id => dispatch(resumeDebugNode({ id: currentFlow!.id, nodeId: id, action: 'step_over' })))}
+                      onClick={debugStep}
                       className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
-                      title="Ejecutar el paso actual y pausar en el siguiente"
+                      title="Ejecutar el paso actual y pausar en el siguiente (F10)"
                     >
                       <StepForward size={13} /> Siguiente paso
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => dispatch(resumeDebugNode({ id: currentFlow!.id, action: 'continue' }))}
+                      onClick={debugContinue}
                       className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1"
-                      title="Continuar la ejecución sin pausas"
+                      title="Continuar la ejecución sin pausas (F8)"
                     >
                       <PlayCircle size={13} /> Continuar todo
                     </Button>
@@ -1556,7 +1688,7 @@ function FlowCanvas() {
                   size="sm"
                   onClick={handleStopExecution}
                   className="h-7 min-h-0 shrink-0 text-xs rounded-full gap-1 text-danger border-danger/30 hover:bg-danger/5 hover:border-danger/50"
-                  title="Detener la ejecución del flujo"
+                  title="Detener la ejecución del flujo (Mayús+F5)"
                 >
                   <Square size={10} className="fill-danger" /> Detener
                 </Button>
@@ -1617,6 +1749,56 @@ function FlowCanvas() {
                 className="!bg-surface !border-border !rounded-sm !shadow-sm" 
               />
             </ReactFlow>
+
+            {nodes.length === 0 && !isLocked && !isLiveExecuting && (
+              <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center p-6">
+                <div className="pointer-events-auto bg-surface/95 backdrop-blur border border-border rounded-md shadow-raised p-5 max-w-2xl w-full space-y-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                      <Sparkles size={16} />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-semibold text-fg">Lienzo vacío · empieza con una plantilla</h3>
+                      <p className="text-xs text-muted">
+                        Haz clic en un nodo de la librería izquierda o selecciona una plantilla lista para usar:
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {FLOW_TEMPLATES.map(tpl => (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        onClick={() => applyTemplateToCanvas(tpl)}
+                        className="text-left p-3 rounded-sm border border-border bg-bg/50 hover:border-accent/50 hover:bg-surface transition-all group space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold text-fg group-hover:text-accent transition-colors">
+                            {tpl.name}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-surface border border-border text-muted shrink-0">
+                            {tpl.category}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-muted line-clamp-2 leading-relaxed">
+                          {tpl.description}
+                        </p>
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {tpl.nodeBadges.map(badge => (
+                            <span
+                              key={badge}
+                              className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-accent/5 text-accent border border-accent/20"
+                            >
+                              {badge}
+                            </span>
+                          ))}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {showInspector && selectedNodeId && (
@@ -1630,6 +1812,7 @@ function FlowCanvas() {
               testing={testingNodeId === selectedNodeId}
               testDisabled={isLiveExecuting || testingNodeId !== null || partialRunIds !== null}
               layout={isLiveExecuting && executionMode === 'debug' ? 'debug' : 'edit'}
+              executing={isLiveExecuting}
             />
           )}
 
@@ -1946,6 +2129,20 @@ function FlowCanvas() {
           navigate(`/flujos/${importedFlow.id}`);
         }}
       />
+
+      {/* Runtime Parameters Modal */}
+      {paramsModalState && currentFlow && (
+        <RunFlowParamsModal
+          flowName={editingName || currentFlow.name}
+          parameters={flowParameters}
+          initialMode={paramsModalState.mode}
+          onClose={() => setParamsModalState(null)}
+          onConfirm={(runtimeParams, chosenMode) => {
+            setParamsModalState(null);
+            handleExecute(chosenMode, true, runtimeParams);
+          }}
+        />
+      )}
 
     </div>
     </FlowIssuesContext.Provider>

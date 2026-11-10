@@ -202,7 +202,7 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
         SET status = 'completed', duration_ms = ?, record_count = ?, completed_at = datetime('now'),
             result = ?
         WHERE id = ?
-      `).run(duration, combinedRows.length, JSON.stringify(combinedRows), logId);
+      `).run(duration, combinedRows.length, JSON.stringify({ connection_ids, params, columns, rowCount: combinedRows.length }), logId);
 
       db.prepare(`
         UPDATE queries SET last_run_at = datetime('now'), last_row_count = ?, updated_at = datetime('now')

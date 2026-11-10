@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { CredentialPicker } from '../editors/CredentialPicker';
 import { Input } from '../../../ui/input';
 import { Button } from '../../../ui/button';
 import { Globe, ShieldCheck, Send, ArrowDownToLine, Repeat, Plus, Trash2, Wand2, Clock } from 'lucide-react';
@@ -328,10 +329,18 @@ export function HttpInspector({
                 onChange={(e) => updateNodeData('authType', e.target.value)}
               >
                 <option value="none">Sin Autenticación</option>
+                <option value="credential">Credencial guardada</option>
                 <option value="bearer">Bearer Token</option>
                 <option value="basic">Basic Auth</option>
               </select>
             </div>
+
+            {authType === 'credential' && (
+              <CredentialPicker
+                value={(node.data?.credentialId as string) || ''}
+                onChange={(id) => updateNodeData('credentialId', id)}
+              />
+            )}
 
             {authType === 'bearer' && (
               <div className="space-y-2 bg-bg/50 p-3 rounded border border-border">
@@ -661,10 +670,10 @@ export function HttpInspector({
             )}
 
             <div className="pt-3 border-t border-border space-y-2">
-              <label className="text-xs font-medium block">Probar y Ejecutar</label>
+              <label className="text-xs font-medium block">Elegir la propiedad en una respuesta real</label>
               <JsonSelectorModal
                 node={node}
-                customLabel="Probar Petición HTTP (Ejecutar)"
+                customLabel="Enviar petición y elegir propiedad"
                 updateNodeData={updateNodeData}
               />
             </div>

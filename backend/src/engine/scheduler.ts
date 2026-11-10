@@ -79,6 +79,98 @@ function getNextRunAt(cronExpression: string): string | null {
   }
 }
 
+/**
+ * One run of a schedule: at its cron time, or right now from «Ejecutar ahora» (trigger "manual").
+ * A run that is still in progress makes the new one be skipped, and the history says so.
+ */
+async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' = 'schedule'): Promise<void> {
+  if (runningJobIds.has(schedule.id)) {
+    console.warn(`[Scheduler] Skipping schedule ${schedule.id} (${schedule.name}): previous execution is still running`);
+    getDb().prepare(`
+      INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type, error_message, duration_ms, completed_at)
+      VALUES (?, ?, ?, ?, 'cancelled', ?, ?, 0, datetime('now'))
+    `).run(require('uuid').v4(), schedule.target_type, schedule.target_id, schedule.id, trigger, SKIPPED_OVERLAP_MESSAGE);
+    return;
+  }
+
+  runningJobIds.add(schedule.id);
+  console.log(`[Scheduler] Triggered job: ${schedule.name} (${schedule.target_type})`);
+  const { v4: uuid } = require('uuid');
+  const db = getDb();
+  const tracer = new ExecutionTracer();
+  let logId: string;
+  if (schedule.target_type === 'flow') {
+    logId = startExecutionLog(schedule.target_id, trigger, schedule.id);
+  } else {
+    logId = uuid();
+    db.prepare(`
+      INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type)
+      VALUES (?, ?, ?, ?, 'running', ?)
+    `).run(logId, schedule.target_type, schedule.target_id, schedule.id, trigger);
+  }
+
+  const startTime = Date.now();
+  try {
+    let recordCount = 0;
+    let exportedFiles: string[] = [];
+
+    if (schedule.target_type === 'flow') {
+      const context = await executeFlowEngine(schedule.target_id, undefined, { tracer });
+      
+      const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
+      exportResults.forEach((exportResult: any) => {
+        const fileName = exportResult.filePath.split(/[/\\]/).pop();
+        exportedFiles.push(fileName);
+        recordCount += (exportResult.records || 0);
+
+        try {
+          const { getIo } = require('./socket.js');
+          const io = getIo();
+          io.emit('flow-export-ready', {
+            flowId: schedule.target_id,
+            source: 'scheduler',
+            fileName,
+            downloadUrl: `/api/files/${fileName}`,
+            records: exportResult.records,
+            format: exportResult.format,
+            filePath: exportResult.filePath
+          });
+        } catch (e) {}
+      });
+    } else if (schedule.target_type === 'script') {
+      await runScriptById(schedule.target_id);
+    }
+    
+    const duration = Date.now() - startTime;
+    const resultJson = exportedFiles.length > 0 ? JSON.stringify({ exportedFiles }) : null;
+
+    finishExecutionLog(logId, {
+      status: 'completed',
+      durationMs: duration,
+      recordCount,
+      result: resultJson ? JSON.parse(resultJson) : null,
+      trace: schedule.target_type === 'flow' ? tracer.toJSON('completed') : undefined
+    });
+  } catch (err: any) {
+    console.error(`[Scheduler] Error running job ${schedule.id}:`, err.message);
+    const duration = Date.now() - startTime;
+    const status = schedule.target_type === 'flow' && isCancellationError(err, activeFlowExecutions.get(schedule.target_id)?.status) ? 'cancelled' : 'error';
+    finishExecutionLog(logId, {
+      status,
+      durationMs: duration,
+      errorMessage: err.message,
+      trace: schedule.target_type === 'flow' ? tracer.toJSON(status) : undefined
+    });
+  } finally {
+    runningJobIds.delete(schedule.id);
+    // Also after a failed run; otherwise the schedule keeps showing a next run in the past
+    const nextNextRun = getNextRunAt(schedule.cron_expression);
+    if (nextNextRun) {
+      db.prepare("UPDATE schedules SET next_run_at = ? WHERE id = ?").run(nextNextRun, schedule.id);
+    }
+  }
+}
+
 function startCronJob(schedule: any) {
   if (activeJobs[schedule.id]) {
     activeJobs[schedule.id].stop();
@@ -91,93 +183,7 @@ function startCronJob(schedule: any) {
     getDb().prepare("UPDATE schedules SET next_run_at = ? WHERE id = ?").run(nextRun, schedule.id);
   }
 
-  const task = cron.schedule(schedule.cron_expression, async () => {
-    if (runningJobIds.has(schedule.id)) {
-      console.warn(`[Scheduler] Skipping schedule ${schedule.id} (${schedule.name}): previous execution is still running`);
-      getDb().prepare(`
-        INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type, error_message, duration_ms, completed_at)
-        VALUES (?, ?, ?, ?, 'cancelled', 'schedule', ?, 0, datetime('now'))
-      `).run(require('uuid').v4(), schedule.target_type, schedule.target_id, schedule.id, SKIPPED_OVERLAP_MESSAGE);
-      return;
-    }
-
-    runningJobIds.add(schedule.id);
-    console.log(`[Scheduler] Triggered job: ${schedule.name} (${schedule.target_type})`);
-    const { v4: uuid } = require('uuid');
-    const db = getDb();
-    const tracer = new ExecutionTracer();
-    let logId: string;
-    if (schedule.target_type === 'flow') {
-      logId = startExecutionLog(schedule.target_id, 'schedule', schedule.id);
-    } else {
-      logId = uuid();
-      db.prepare(`
-        INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type)
-        VALUES (?, ?, ?, ?, 'running', 'schedule')
-      `).run(logId, schedule.target_type, schedule.target_id, schedule.id);
-    }
-
-    const startTime = Date.now();
-    try {
-      let recordCount = 0;
-      let exportedFiles: string[] = [];
-
-      if (schedule.target_type === 'flow') {
-        const context = await executeFlowEngine(schedule.target_id, undefined, { tracer });
-        
-        const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
-        exportResults.forEach((exportResult: any) => {
-          const fileName = exportResult.filePath.split(/[/\\]/).pop();
-          exportedFiles.push(fileName);
-          recordCount += (exportResult.records || 0);
-
-          try {
-            const { getIo } = require('./socket.js');
-            const io = getIo();
-            io.emit('flow-export-ready', {
-              flowId: schedule.target_id,
-              source: 'scheduler',
-              fileName,
-              downloadUrl: `/api/files/${fileName}`,
-              records: exportResult.records,
-              format: exportResult.format,
-              filePath: exportResult.filePath
-            });
-          } catch (e) {}
-        });
-      } else if (schedule.target_type === 'script') {
-        await runScriptById(schedule.target_id);
-      }
-      
-      const duration = Date.now() - startTime;
-      const resultJson = exportedFiles.length > 0 ? JSON.stringify({ exportedFiles }) : null;
-
-      finishExecutionLog(logId, {
-        status: 'completed',
-        durationMs: duration,
-        recordCount,
-        result: resultJson ? JSON.parse(resultJson) : null,
-        trace: schedule.target_type === 'flow' ? tracer.toJSON('completed') : undefined
-      });
-    } catch (err: any) {
-      console.error(`[Scheduler] Error running job ${schedule.id}:`, err.message);
-      const duration = Date.now() - startTime;
-      const status = schedule.target_type === 'flow' && isCancellationError(err, activeFlowExecutions.get(schedule.target_id)?.status) ? 'cancelled' : 'error';
-      finishExecutionLog(logId, {
-        status,
-        durationMs: duration,
-        errorMessage: err.message,
-        trace: schedule.target_type === 'flow' ? tracer.toJSON(status) : undefined
-      });
-    } finally {
-      runningJobIds.delete(schedule.id);
-      // Also after a failed run; otherwise the schedule keeps showing a next run in the past
-      const nextNextRun = getNextRunAt(schedule.cron_expression);
-      if (nextNextRun) {
-        db.prepare("UPDATE schedules SET next_run_at = ? WHERE id = ?").run(nextNextRun, schedule.id);
-      }
-    }
-  });
+  const task = cron.schedule(schedule.cron_expression, () => runSchedule(schedule));
 
   activeJobs[schedule.id] = task;
   task.start();
@@ -209,4 +215,13 @@ export function updateJobSchedule(scheduleId: string) {
   if (schedule && schedule.is_active === 1) {
     startCronJob(schedule);
   }
+}
+
+/** «Ejecutar ahora»: starts the schedule's target without waiting for its cron time */
+export function runScheduleNow(scheduleId: string): 'started' | 'running' | 'not_found' {
+  const schedule = getDb().prepare('SELECT * FROM schedules WHERE id = ?').get(scheduleId) as any;
+  if (!schedule) return 'not_found';
+  if (runningJobIds.has(scheduleId)) return 'running';
+  runSchedule(schedule, 'manual').catch(err => console.error(`[Scheduler] Manual run of ${scheduleId} failed:`, err?.message || err));
+  return 'started';
 }

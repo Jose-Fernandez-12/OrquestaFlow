@@ -474,6 +474,34 @@ export function VariablesInspector({
                       </div>
                     </div>
 
+                    {/* Description & Prompt on Run */}
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={variable.description || ''}
+                        onChange={e => updateVariable(idx, { description: e.target.value })}
+                        placeholder="Descripción opcional (ej. Fecha de corte)"
+                        className="flex-1 min-w-0 h-6 px-2 text-[11px] rounded-sm border border-border bg-bg text-fg placeholder:text-muted/60 focus-visible:outline-none focus-visible:border-violet-500"
+                      />
+                      <label
+                        className={cn(
+                          'flex items-center gap-1.5 px-2 h-6 rounded-sm border text-[11px] cursor-pointer select-none shrink-0 transition-colors',
+                          variable.promptOnRun
+                            ? 'bg-violet-500/10 border-violet-500/40 text-violet-600 dark:text-violet-400 font-medium'
+                            : 'bg-bg border-border text-muted hover:text-fg'
+                        )}
+                        title="Si está activo, se pedirá este valor antes de iniciar la ejecución del flujo"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={Boolean(variable.promptOnRun)}
+                          onChange={e => updateVariable(idx, { promptOnRun: e.target.checked })}
+                          className="accent-violet-600 w-3 h-3"
+                        />
+                        <span>Pedir al ejecutar</span>
+                      </label>
+                    </div>
+
                     {/* Preview / Evaluation Pill */}
                     {variable.key && (
                       <div className="flex items-center justify-between text-[10px] text-muted pt-0.5">

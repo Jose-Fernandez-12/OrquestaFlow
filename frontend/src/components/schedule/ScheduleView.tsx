@@ -3,7 +3,8 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchSchedules, createSchedule, updateSchedule, deleteSchedule, type Schedule } from '../../store/scheduleSlice';
 import { fetchFlows } from '../../store/flowSlice';
 import { fetchScripts } from '../../store/scriptSlice';
-import { SOCKET_URL, getApiUrl } from '../../lib/api';
+import { showToast } from '../../store/uiSlice';
+import { getApiUrl, createSocket } from '../../lib/api';
 import {
   Calendar,
   Plus,
@@ -27,7 +28,6 @@ import {
   Filter
 } from 'lucide-react';
 import { format } from 'date-fns';
-import { io } from 'socket.io-client';
 import { Button } from '../ui/button';
 import { Card } from '../ui/card';
 import { Input } from '../ui/input';
@@ -95,7 +95,7 @@ export function ScheduleView() {
       setNow(Date.now());
     }, 10000);
 
-    const socket = io(SOCKET_URL);
+    const socket = createSocket();
 
     socket.on('flow-export-ready', (data: any) => {
       const id = Date.now() + Math.random();
@@ -236,6 +236,18 @@ export function ScheduleView() {
       is_active: currentStatus === 1 ? 0 : 1
     }));
     dispatch(fetchSchedules());
+  };
+
+  // «Ejecutar ahora»: the server starts the run and this returns at once; the result lands in the history
+  const handleRunNow = async (job: Schedule) => {
+    try {
+      const res = await fetch(getApiUrl(`/schedules/${job.id}/run`), { method: 'POST' });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `Error ${res.status}`);
+      dispatch(showToast(`«${job.name}» se está ejecutando. El resultado aparecerá en su historial.`));
+    } catch (err: any) {
+      dispatch(showToast(`Error al ejecutar «${job.name}»: ${err.message}`));
+    }
   };
 
   const openHistory = async (id: string, name: string) => {
@@ -505,6 +517,14 @@ export function ScheduleView() {
 
                   <div className="flex items-center gap-1">
                     <button
+                      onClick={() => handleRunNow(job)}
+                      className="flex items-center gap-1 text-muted hover:text-success py-1 px-2 rounded hover:bg-success/10 transition-colors"
+                      title="Ejecutar ahora, sin esperar a su horario"
+                    >
+                      <PlayCircle size={13} />
+                      <span>Ejecutar</span>
+                    </button>
+                    <button
                       onClick={() => openEditModal(job)}
                       className="flex items-center gap-1 text-muted hover:text-fg py-1 px-2 rounded hover:bg-bg transition-colors"
                       title="Editar programación"
@@ -652,7 +672,7 @@ export function ScheduleView() {
                   )}>
                     {cronDescription || 'Escribe una expresión cron'}
                   </span>
-                  <span className="text-[10px] text-muted">Minuto Hora Día-Mes Mes Día-Semana</span>
+                  <span className="text-[10px] text-muted">Minuto Hora Día-Mes Mes Día-Semana · en la hora del equipo donde corre OrquestaFlow</span>
                 </div>
 
                 {/* Quick Templates */}

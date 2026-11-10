@@ -87,6 +87,9 @@ function inferResultFromConfig(node: Node): any {
   if (node.type === 'runScript') {
     return { data: {}, exitCode: 0, stdout: '', stderr: '', durationMs: 0, args: [] };
   }
+  if (node.type === 'runFlow') {
+    return { data: {}, outputs: {}, params: {}, flowId: '', flowName: '', durationMs: 0 };
+  }
   if (node.type === 'aiChatCompletion') {
     return { content: '', parsed: data.responseFormat === 'json_object' ? {} : null, model: '', usage: {} };
   }

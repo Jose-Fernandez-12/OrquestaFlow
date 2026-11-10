@@ -118,7 +118,7 @@ export function describeRule(rule: ConditionRule): string {
 export const HTTP_NODE_TYPES = ['httpGet', 'httpPost', 'httpRequest'];
 
 /** Nodes that talk to the outside world and can fail transiently */
-export const RETRYABLE_NODE_TYPES = [...HTTP_NODE_TYPES, 'scraping', 'query', 'oauth2Connector', 'aiChatCompletion'];
+export const RETRYABLE_NODE_TYPES = [...HTTP_NODE_TYPES, 'scraping', 'query', 'oauth2Connector', 'aiChatCompletion', 'runFlow'];
 
 /** Control-flow nodes: continuing past a failure would leave the graph in an undefined state */
 export const NO_CONTINUE_NODE_TYPES = ['start', 'forEach', 'forEachEnd', 'conditionalBranch', 'waitFor'];

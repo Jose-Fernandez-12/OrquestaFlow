@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchFlows, createFlow, deleteFlow, duplicateFlow, saveFlow, executeFlow, stopFlow, setCurrentFlow, type Flow } from '../../store/flowSlice';
 import { triggerBrowserDownload } from '../../lib/exportUtils';
-import { SOCKET_URL, getFileUrl } from '../../lib/api';
+import { SOCKET_URL, getFileUrl, createSocket } from '../../lib/api';
 import {
   GitMerge,
   Plus,
@@ -31,10 +31,13 @@ import { Card } from '../ui/card';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
 import { format } from 'date-fns';
-import { io } from 'socket.io-client';
+import { parseDbDate } from '../scripts/scriptDisplay';
 import { showToast } from '../../store/uiSlice';
 import { FlowExecutionHistoryModal } from './FlowExecutionHistoryModal';
 import { ImportFlowModal } from './ImportFlowModal';
+import { RunFlowParamsModal } from './RunFlowParamsModal';
+import { getFlowParameters, hasPromptParameters } from './flowParameters';
+import { FLOW_TEMPLATES } from './flowTemplates';
 
 export function FlowListView() {
   const dispatch = useAppDispatch();
@@ -66,6 +69,8 @@ export function FlowListView() {
   }, [searchParams, setSearchParams]);
   const [newFlowName, setNewFlowName] = useState('');
   const [newFlowDesc, setNewFlowDesc] = useState('');
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('blank');
+  const [paramsModalFlow, setParamsModalFlow] = useState<Flow | null>(null);
 
   // Import flow modal state
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -79,7 +84,7 @@ export function FlowListView() {
   }, [dispatch]);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL);
+    const socket = createSocket();
     socket.on('flow-export-ready', (data: { flowId: string; fileName: string; downloadUrl: string; records: number; format: string }) => {
       const id = Date.now() + Math.random();
       setExportNotifications(prev => {
@@ -132,16 +137,20 @@ export function FlowListView() {
     e.preventDefault();
     if (!newFlowName.trim()) return;
 
+    const template = FLOW_TEMPLATES.find(t => t.id === selectedTemplateId) || FLOW_TEMPLATES[0];
+    const initialDef = template.buildDefinition();
+
     const result = await dispatch(createFlow({
       name: newFlowName.trim(),
       description: newFlowDesc.trim(),
-      definition: JSON.stringify({ nodes: [], edges: [] }),
+      definition: JSON.stringify(initialDef),
       is_locked: 0
     })).unwrap();
 
     setIsNewModalOpen(false);
     setNewFlowName('');
     setNewFlowDesc('');
+    setSelectedTemplateId('blank');
     navigate(`/flujos/${result.id}`);
   };
 
@@ -185,11 +194,10 @@ export function FlowListView() {
     }
   };
 
-  const handleExecute = async (flow: Flow, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const runFlowWithParams = async (flow: Flow, runtimeParams?: Record<string, any>) => {
     setExecutingFlowId(flow.id);
     try {
-      const resultAction = await dispatch(executeFlow({ id: flow.id, mode: 'normal' }));
+      const resultAction = await dispatch(executeFlow({ id: flow.id, mode: 'normal', params: runtimeParams }));
       if (executeFlow.fulfilled.match(resultAction)) {
         const payload = resultAction.payload as any;
         const durationSec = payload?.duration ? (payload.duration / 1000).toFixed(2) : null;
@@ -230,6 +238,15 @@ export function FlowListView() {
     } finally {
       setExecutingFlowId(null);
     }
+  };
+
+  const handleExecute = async (flow: Flow, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (hasPromptParameters(flow.definition)) {
+      setParamsModalFlow(flow);
+      return;
+    }
+    await runFlowWithParams(flow);
   };
 
   const handleStop = async (flow: Flow, e: React.MouseEvent) => {
@@ -466,9 +483,9 @@ export function FlowListView() {
                       </div>
 
                       {flow.last_run_at ? (
-                        <div className="flex items-center gap-1 text-[11px] text-fg font-medium" title={`Última corrida: ${new Date(flow.last_run_at).toLocaleString()}`}>
+                        <div className="flex items-center gap-1 text-[11px] text-fg font-medium" title={`Última ejecución: ${parseDbDate(flow.last_run_at)?.toLocaleString() ?? ''}`}>
                           <Clock size={11} className="text-muted" />
-                          <span>{format(new Date(flow.last_run_at), 'dd MMM, HH:mm')}</span>
+                          <span>{format(parseDbDate(flow.last_run_at) ?? new Date(flow.last_run_at), 'dd MMM, HH:mm')}</span>
                         </div>
                       ) : (
                         <span className="text-[11px] text-muted">Sin ejecuciones</span>
@@ -576,11 +593,16 @@ export function FlowListView() {
       {/* New Flow Modal */}
       {isNewModalOpen && (
         <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
-          <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-md p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-fast">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Nuevo flujo de trabajo"
+            className="bg-surface border border-border rounded-md shadow-raised w-full max-w-xl p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-fast max-h-[88vh] overflow-y-auto"
+          >
             <div className="flex justify-between items-center">
               <div>
                 <h2 className="text-lg font-semibold tracking-tight">Nuevo flujo de trabajo</h2>
-                <p className="text-xs text-muted mt-0.5">Asigna un nombre para empezar a construir en el diseñador.</p>
+                <p className="text-xs text-muted mt-0.5">Elige una plantilla o empieza en blanco y asigna un nombre.</p>
               </div>
               <button onClick={() => setIsNewModalOpen(false)} className="text-muted hover:text-fg">
                 <X size={18} />
@@ -588,6 +610,52 @@ export function FlowListView() {
             </div>
 
             <form onSubmit={handleCreateFlow} className="flex flex-col gap-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Plantilla inicial</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-1">
+                  {FLOW_TEMPLATES.map(tpl => {
+                    const active = selectedTemplateId === tpl.id;
+                    return (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedTemplateId(tpl.id);
+                          if (tpl.id !== 'blank' && !newFlowName.trim()) {
+                            setNewFlowName(tpl.name);
+                            setNewFlowDesc(tpl.description);
+                          }
+                        }}
+                        className={cn(
+                          'text-left p-2.5 rounded-sm border transition-all space-y-1',
+                          active
+                            ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
+                            : 'border-border bg-bg/40 hover:border-muted hover:bg-surface'
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-xs font-semibold text-fg truncate">{tpl.name}</span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-surface border border-border text-muted shrink-0">
+                            {tpl.category}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-muted line-clamp-2 leading-snug">{tpl.description}</p>
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {tpl.nodeBadges.map(badge => (
+                            <span
+                              key={badge}
+                              className="text-[9px] font-mono px-1 py-0.2 rounded bg-accent/5 text-accent border border-accent/20"
+                            >
+                              {badge}
+                            </span>
+                          ))}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="space-y-1.5">
                 <label className="text-xs font-medium">Nombre del flujo</label>
                 <Input
@@ -618,6 +686,26 @@ export function FlowListView() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Runtime Parameters Modal */}
+      {paramsModalFlow && (
+        <RunFlowParamsModal
+          flowName={paramsModalFlow.name}
+          parameters={getFlowParameters(paramsModalFlow.definition)}
+          initialMode="normal"
+          onClose={() => setParamsModalFlow(null)}
+          onConfirm={(runtimeParams, chosenMode) => {
+            const target = paramsModalFlow;
+            setParamsModalFlow(null);
+            if (chosenMode === 'debug') {
+              dispatch(setCurrentFlow(target));
+              navigate(`/flujos/${target.id}`);
+            } else {
+              runFlowWithParams(target, runtimeParams);
+            }
+          }}
+        />
       )}
 
       {/* Delete Confirmation Modal */}

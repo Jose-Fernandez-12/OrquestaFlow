@@ -27,7 +27,8 @@ import {
   SlidersHorizontal,
   RotateCw,
   AlertTriangle,
-  ShieldCheck
+  ShieldCheck,
+  Workflow
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -73,6 +74,7 @@ const typeIcons: Record<string, React.ElementType> = {
   delay: Clock,
   waitFor: Hourglass,
   runScript: SquareTerminal,
+  runFlow: Workflow,
   dataSource: FileSpreadsheet,
   fileSource: FileSpreadsheet,
   dataList: List,
@@ -119,6 +121,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     delay: 'text-amber-600',
     waitFor: 'text-orange-600',
     runScript: 'text-slate-600',
+    runFlow: 'text-indigo-600',
     dataSource: 'text-emerald-600',
     fileSource: 'text-emerald-600',
     dataList: 'text-violet-600',
@@ -144,6 +147,7 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
     delay: 'Pausa programada',
     waitFor: 'Esperar nodo',
     runScript: 'Ejecutar script',
+    runFlow: 'Ejecutar flujo',
     dataSource: 'Obtener datos (Excel/CSV)',
     fileSource: 'Obtener datos (Excel/CSV)',
     dataList: 'Lista de datos',
@@ -396,7 +400,13 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           ) : (
             <div className="text-xs text-muted truncate flex items-center gap-1.5">
               <span className="truncate">
-                {skipped ? 'Omitido · rama no tomada' : continuedAfterError ? 'Falló · el flujo continuó' : typeLabels[type] || type}
+                {skipped
+                  ? 'Omitido · rama no tomada'
+                  : continuedAfterError
+                    ? 'Falló · el flujo continuó'
+                    : type === 'runFlow' && data.targetFlowName
+                      ? `Subflujo: ${data.targetFlowName}`
+                      : typeLabels[type] || type}
               </span>
               {configuredRetries > 0 && (
                 <span

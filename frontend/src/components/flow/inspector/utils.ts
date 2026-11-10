@@ -15,6 +15,7 @@ export const isDataProducerNode = (type?: string) => {
     type === 'forEachEnd' ||
     type === 'jsonTransform' ||
     type === 'runScript' ||
+    type === 'runFlow' ||
     type === 'webhookTrigger' ||
     type === 'oauth2Connector' ||
     type === 'aiChatCompletion'
