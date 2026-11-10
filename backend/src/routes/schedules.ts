@@ -72,6 +72,8 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     if (is_active !== undefined) { updates.push('is_active = ?'); values.push(is_active); }
     if (target_type !== undefined) { updates.push('target_type = ?'); values.push(target_type); }
     if (target_id !== undefined) { updates.push('target_id = ?'); values.push(target_id); }
+    // The missed-run notice refers to the previous timing; a change of plan makes it obsolete
+    if (cron_expression !== undefined || is_active !== undefined) updates.push('last_missed_at = NULL');
     updates.push("updated_at = datetime('now')");
 
     values.push(request.params.id);
@@ -98,6 +100,15 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     updateJobSchedule(request.params.id);
 
     return { data: { deleted: true } };
+  });
+
+  // Run the schedule's flow or script right now, without changing its timing
+  app.post<{ Params: { id: string } }>('/:id/run', async (request, reply) => {
+    const { runScheduleNow } = await import('../engine/scheduler.js');
+    const outcome = runScheduleNow(request.params.id);
+    if (outcome === 'not_found') return reply.status(404).send({ error: 'Schedule not found' });
+    if (outcome === 'running') return reply.status(409).send({ error: 'Esta programación ya se está ejecutando.' });
+    return { data: { started: true } };
   });
 
   // Get schedule logs

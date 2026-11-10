@@ -11,7 +11,7 @@ interface CredentialStatus {
   name: string;
   host: string;
   database: string | null;
-  source: 'connection' | 'env' | 'missing';
+  source: 'credential' | 'connection' | 'env' | 'missing';
   key: string;
   variables: string[];
 }
@@ -23,6 +23,7 @@ function formatBytes(bytes: number): string {
 }
 
 const SOURCE_LABEL: Record<CredentialStatus['source'], string> = {
+  credential: 'Credencial guardada',
   connection: 'Guardadas en la conexión',
   env: 'Desde backend/.env',
   missing: 'Faltan credenciales',

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS connections (
   username TEXT,
   password TEXT,
   env_credential_key TEXT,
+  credential_id TEXT,
   is_active INTEGER DEFAULT 1,
   last_tested_at TEXT,
   created_at TEXT DEFAULT (datetime('now'))
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS schedules (
   name TEXT,
   cron_expression TEXT NOT NULL,
   next_run_at TEXT,
+  last_missed_at TEXT,
   is_active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -107,3 +109,16 @@ CREATE TABLE IF NOT EXISTS system_settings (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+
+-- Secrets saved once and used by reference (engine/credentials.ts). `secret` is encrypted
+CREATE TABLE IF NOT EXISTS credentials (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL CHECK(type IN ('bearer', 'basic', 'api_key')),
+  username TEXT,
+  header_name TEXT,
+  secret TEXT,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);

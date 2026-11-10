@@ -1,4 +1,6 @@
 import { getDb } from '../db/database.js';
+import { credentialHeaders, credentialSecret } from './credentials.js';
+import { openDefinition } from './nodeSecrets.js';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -22,6 +24,9 @@ import {
   MAX_COMMAND_LINE_CHARS, commandLineLength, explainScriptArgs,
   type ScriptInputMode, type ScriptInputFormat,
 } from './scriptNode.js';
+
+export const RUN_FLOW_NODE_TYPE = 'runFlow';
+export const MAX_SUBFLOW_DEPTH = 5;
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -121,14 +126,35 @@ export function resumeNodeExecution(
 export async function executeFlowEngine(
   flowId: string,
   onNodeProgress?: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
-  options?: { mode?: 'normal' | 'debug'; initialContext?: Record<string, any>; tracer?: ExecutionTracer; onlyNodeIds?: string[] }
+  options?: {
+    mode?: 'normal' | 'debug';
+    initialContext?: Record<string, any>;
+    tracer?: ExecutionTracer;
+    onlyNodeIds?: string[];
+    params?: Record<string, any>;
+    callStack?: string[];
+    parentSignal?: AbortSignal;
+    isSubflow?: boolean;
+  }
 ): Promise<Record<string, any>> {
   const db = getDb();
   const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
   if (!flow) throw new Error('Flow not found');
 
   const abortController = new AbortController();
+  if (options?.parentSignal) {
+    if (options.parentSignal.aborted) {
+      abortController.abort(options.parentSignal.reason || 'Ejecución detenida por el usuario');
+    } else {
+      options.parentSignal.addEventListener(
+        'abort',
+        () => abortController.abort(options.parentSignal?.reason || 'Ejecución detenida por el usuario'),
+        { once: true }
+      );
+    }
+  }
   const mode = options?.mode || 'normal';
+  const callStack = options?.callStack && options.callStack.length > 0 ? options.callStack : [flowId];
 
   // Track active execution in memory. Everything below works on this run's own state: a node of a
   // previous run that is still finishing (e.g. a query) must never touch the state of a newer run
@@ -142,7 +168,9 @@ export async function executeFlowEngine(
     nodes: {},
     abortController
   };
-  activeFlowExecutions.set(flowId, execution);
+  if (!options?.isSubflow) {
+    activeFlowExecutions.set(flowId, execution);
+  }
   const forgetExecution = () => {
     if (activeFlowExecutions.get(flowId) === execution) activeFlowExecutions.delete(flowId);
   };
@@ -155,7 +183,8 @@ export async function executeFlowEngine(
     }
   };
 
-  const definition = JSON.parse(flow.definition || '{"nodes":[],"edges":[]}');
+  // Secrets typed into nodes are stored encrypted
+  const definition = JSON.parse(openDefinition(flow.definition || '{"nodes":[],"edges":[]}'));
   // Notes only document the canvas: they never run
   const nodes: any[] = (definition.nodes || []).filter((n: any) => n.type !== 'note');
   const edges: any[] = definition.edges || [];
@@ -250,7 +279,17 @@ export async function executeFlowEngine(
     );
   }
 
-  const context: Record<string, any> = { ...(options?.initialContext || {}) };
+  const runtimeParams: Record<string, any> =
+    options?.params && typeof options.params === 'object' && !Array.isArray(options.params)
+      ? { ...options.params }
+      : {};
+  // Values typed when the run started. They only replace the values of the Variables node with the
+  // same key, which converts them (types, $today_ymd…), so {{fecha}} reads the converted value. Kept
+  // out of the rest of the context: a raw "$today_ymd" there would be found before the converted one
+  const context: Record<string, any> = {
+    ...(options?.initialContext || {}),
+    ...(Object.keys(runtimeParams).length > 0 ? { _params: runtimeParams } : {}),
+  };
   const runningPromises = new Map<string, Promise<void>>();
   const completedNodes = new Set<string>();
   const errorNodes = new Set<string>();
@@ -389,7 +428,8 @@ export async function executeFlowEngine(
                   let output: any = {};
                   switch (node.type) {
                     case 'start':
-                      output = { msg: 'Flow started' };
+                      // Nested: at the top they would be found by {{nombre}} before the converted values
+                      output = Object.keys(runtimeParams).length > 0 ? { msg: 'Flow started', params: runtimeParams } : { msg: 'Flow started' };
                       break;
                     case 'httpGet':
                     case 'httpPost':
@@ -402,6 +442,9 @@ export async function executeFlowEngine(
                     case RUN_SCRIPT_NODE_TYPE:
                       output = await executeRunScriptNode(node, context, edges, nodes, abortController.signal,
                         scriptRun => notifyProgress(node.id, 'progress', { scriptRun }));
+                      break;
+                    case RUN_FLOW_NODE_TYPE:
+                      output = await executeRunFlowNode(node, context, abortController.signal, callStack);
                       break;
                     case 'export':
                       output = await executeExportNode(node, context, edges, nodes);
@@ -435,7 +478,7 @@ export async function executeFlowEngine(
                     case 'forEach':
                       output = await executeForEachNode(
                         node, context, normalizedEdges, nodes, adjList, notifyProgress,
-                        abortController.signal, flowId
+                        abortController.signal, flowId, callStack
                       );
                       break;
                     case 'forEachEnd':
@@ -758,6 +801,13 @@ async function executeHttpNode(
         headers['Authorization'] = `Basic ${encoded}`;
       }
     }
+    // A stored credential: its secret goes in the request but is masked wherever the request is shown
+    let maskedAuthHeaders: Record<string, string> = {};
+    if (authType === 'credential') {
+      const auth = credentialHeaders(node.data?.credentialId, `El nodo «${node.data?.label || node.id}»`);
+      headers = { ...headers, ...auth.headers };
+      maskedAuthHeaders = auth.masked;
+    }
 
     let requestBody: any = undefined;
     if (['POST', 'PUT', 'PATCH'].includes(method)) {
@@ -813,7 +863,7 @@ async function executeHttpNode(
       const requestPreview = {
         method,
         endpoint,
-        headers,
+        headers: { ...headers, ...maskedAuthHeaders },
         body: requestBody || null,
         // The values sent, not the {{templates}} they come from (those are listed in references)
         params: resolvedParams,
@@ -1247,10 +1297,11 @@ function resolvePath(context: Record<string, any>, pathStr: string): any {
     }
   }
 
-  // 3. Fallback: smart lookup across upstream nodes in context (pure iterative, no recursion)
+  // 3. Fallback: smart lookup across upstream nodes in context (pure iterative, no recursion).
+  // Internal keys (_item, _params, _loops…) are not node outputs
   const lowerTrimmed = trimmed.toLowerCase();
   for (const [ctxKey, ctxVal] of Object.entries(context)) {
-    if (ctxKey === 'start' || ctxKey === '_item') continue;
+    if (ctxKey === 'start' || ctxKey.startsWith('_')) continue;
     if (ctxVal === undefined || ctxVal === null) continue;
 
     if (Array.isArray(ctxVal) && ctxVal.length > 0) {
@@ -1286,6 +1337,12 @@ function resolvePath(context: Record<string, any>, pathStr: string): any {
         if (k.toLowerCase() === lowerTrimmed) return v;
       }
     }
+  }
+
+  // 4. Last: a run parameter no Variables node declares (a subflow can receive any). Raw, as typed
+  if (context._params && typeof context._params === 'object') {
+    const fromParams = evaluatePathOnObject(context._params, trimmed);
+    if (fromParams !== undefined && fromParams !== null) return fromParams;
   }
 
   return undefined;
@@ -2141,13 +2198,23 @@ function executeDataListNode(node: any): any[] {
 function executeVariablesNode(node: any, context: Record<string, any>): Record<string, any> {
   const vars = node.data?.variables;
   const result: Record<string, any> = {};
+  const runtimeParams: Record<string, any> =
+    context?._params && typeof context._params === 'object' && !Array.isArray(context._params)
+      ? context._params
+      : {};
 
   if (!Array.isArray(vars) || vars.length === 0) {
     if (node.data?.rawJson && typeof node.data.rawJson === 'string' && node.data.rawJson.trim() !== '') {
       try {
         const parsed = JSON.parse(node.data.rawJson);
         if (typeof parsed === 'object' && parsed !== null) {
-          return resolveTemplate(context, parsed);
+          const resolved = resolveTemplate(context, parsed);
+          for (const k of Object.keys(resolved)) {
+            if (Object.prototype.hasOwnProperty.call(runtimeParams, k) && runtimeParams[k] !== undefined && runtimeParams[k] !== '') {
+              resolved[k] = runtimeParams[k];
+            }
+          }
+          return resolved;
         }
       } catch (e: any) {
         throw new Error(`Variables: JSON inválido - ${e.message}`);
@@ -2173,7 +2240,11 @@ function executeVariablesNode(node: any, context: Record<string, any>): Record<s
     if (!v || !v.key || typeof v.key !== 'string' || !v.key.trim()) continue;
     const key = v.key.trim();
     const type = v.type || 'string';
-    let val: any = v.value;
+    const hasParamOverride =
+      Object.prototype.hasOwnProperty.call(runtimeParams, key) &&
+      runtimeParams[key] !== undefined &&
+      runtimeParams[key] !== '';
+    let val: any = hasParamOverride ? runtimeParams[key] : v.value;
 
     if (typeof val === 'string' && val.includes('{{')) {
       val = resolveTemplate(context, val);
@@ -2235,7 +2306,8 @@ async function executeForEachNode(
   adjList: Record<string, string[]>,
   onNodeProgress: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
   signal: AbortSignal,
-  flowId: string
+  flowId: string,
+  callStack: string[] = [flowId]
 ): Promise<any[]> {
   // Resolve the array to iterate over
   const iterateOverExpr = node.data?.iterateOver;
@@ -2458,6 +2530,9 @@ async function executeForEachNode(
                         output = await executeRunScriptNode(subNode, localContext, edges, nodes, signal,
                           scriptRun => onNodeProgress(subNode.id, 'progress', { scriptRun }));
                         break;
+                      case RUN_FLOW_NODE_TYPE:
+                        output = await executeRunFlowNode(subNode, localContext, signal, callStack);
+                        break;
                       case 'export':
                         output = await executeExportNode(subNode, localContext, edges, nodes);
                         break;
@@ -2490,7 +2565,7 @@ async function executeForEachNode(
                         break;
                       case 'forEach':
                         // Nested loop: iterates with this iteration's context ({{_item}} is still the outer element here)
-                        output = await executeForEachNode(subNode, localContext, edges, nodes, adjList, onNodeProgress, signal, flowId);
+                        output = await executeForEachNode(subNode, localContext, edges, nodes, adjList, onNodeProgress, signal, flowId, callStack);
                         break;
                       case 'forEachEnd': {
                         // End of a nested loop: the results its forEach accumulated for this outer element
@@ -3204,6 +3279,9 @@ function executeWebhookTriggerNode(node: any, context: Record<string, any>): any
 
 function resolveSecret(context: Record<string, any>, raw: unknown): string {
   const value = String(resolveTemplate(context, String(raw ?? '')) ?? '').trim();
+  // cred:nombre → the secret saved in Configuración → Credenciales
+  const credMatch = value.match(/^cred:([A-Za-z0-9_.-]+)$/);
+  if (credMatch) return credentialSecret(credMatch[1]);
   const envMatch = value.match(/^env:([A-Za-z_][A-Za-z0-9_]*)$/);
   if (!envMatch) return value;
   const envValue = process.env[envMatch[1]];
@@ -3214,7 +3292,7 @@ function resolveSecret(context: Record<string, any>, raw: unknown): string {
 function maskSecret(value: unknown): string {
   const s = String(value ?? '');
   if (!s) return '';
-  if (s.startsWith('env:')) return s;
+  if (s.startsWith('env:') || s.startsWith('cred:')) return s;
   return '••••••••';
 }
 
@@ -3402,6 +3480,115 @@ async function executeAiChatCompletionNode(node: any, context: Record<string, an
   };
 }
 
+function resolveRunFlowParams(node: any, context: Record<string, any>): Record<string, any> {
+  const rawParams = node.data?.flowParams;
+  const resolved: Record<string, any> = {};
+  if (Array.isArray(rawParams)) {
+    for (const entry of rawParams) {
+      if (!entry || typeof entry.key !== 'string' || !entry.key.trim()) continue;
+      const key = entry.key.trim();
+      resolved[key] = resolveTemplate(context, entry.value ?? '');
+    }
+  } else if (rawParams && typeof rawParams === 'object') {
+    for (const [key, val] of Object.entries(rawParams)) {
+      if (!key.trim()) continue;
+      resolved[key.trim()] = resolveTemplate(context, val);
+    }
+  }
+  return resolved;
+}
+
+async function executeRunFlowNode(
+  node: any,
+  context: Record<string, any>,
+  signal: AbortSignal,
+  callStack: string[] = []
+): Promise<any> {
+  const targetFlowId = String(node.data?.targetFlowId || '').trim();
+  if (!targetFlowId) {
+    throw new Error('Ejecutar flujo: debe seleccionar un flujo de destino');
+  }
+
+  const db = getDb();
+  const targetFlow = db.prepare('SELECT id, name, definition FROM flows WHERE id = ?').get(targetFlowId) as any;
+  if (!targetFlow) {
+    throw new Error(`Ejecutar flujo: el flujo seleccionado (${targetFlowId}) no existe`);
+  }
+
+  if (callStack.includes(targetFlowId)) {
+    const chainNames = [...callStack, targetFlowId].map(fid => {
+      const f = db.prepare('SELECT name FROM flows WHERE id = ?').get(fid) as any;
+      return f?.name || fid;
+    });
+    throw new Error(`Ejecutar flujo: se detectó una llamada recursiva circular (${chainNames.join(' → ')})`);
+  }
+
+  if (callStack.length >= MAX_SUBFLOW_DEPTH) {
+    throw new Error(`Ejecutar flujo: se alcanzó la profundidad máxima de subflujos (${MAX_SUBFLOW_DEPTH})`);
+  }
+
+  const resolvedParams = resolveRunFlowParams(node, context);
+  const startedAt = Date.now();
+
+  const subContext = await executeFlowEngine(targetFlowId, undefined, {
+    mode: 'normal',
+    params: resolvedParams,
+    callStack: [...callStack, targetFlowId],
+    parentSignal: signal,
+    isSubflow: true,
+  });
+
+  const durationMs = Date.now() - startedAt;
+
+  let def: { nodes?: any[]; edges?: any[] } = { nodes: [], edges: [] };
+  try {
+    def = JSON.parse(targetFlow.definition || '{"nodes":[],"edges":[]}');
+  } catch {
+    def = { nodes: [], edges: [] };
+  }
+  const subNodes = (def.nodes || []).filter((n: any) => n.type !== 'note');
+  const subEdges = normalizeEdges(subNodes, def.edges || []);
+
+  const subOutputs: Record<string, any> = {};
+  for (const n of subNodes) {
+    if (n.type === 'start') continue;
+    if (subContext[n.id] !== undefined) {
+      subOutputs[n.id] = subContext[n.id];
+      if (n.data?.label && typeof n.data.label === 'string') {
+        subOutputs[n.data.label] = subContext[n.id];
+      }
+    }
+  }
+
+  const requestedOutputNodeId = String(node.data?.outputNodeId || '').trim();
+  let mainOutput: any = null;
+  if (requestedOutputNodeId && subContext[requestedOutputNodeId] !== undefined) {
+    mainOutput = subContext[requestedOutputNodeId];
+  } else {
+    const sourcesWithOutgoing = new Set(subEdges.map((e: any) => e.source));
+    const terminalNodes = subNodes.filter(
+      (n: any) => n.type !== 'start' && !sourcesWithOutgoing.has(n.id) && subContext[n.id] !== undefined
+    );
+    if (terminalNodes.length > 0) {
+      mainOutput = subContext[terminalNodes[terminalNodes.length - 1].id];
+    } else {
+      const completedSubNodes = subNodes.filter((n: any) => n.type !== 'start' && subContext[n.id] !== undefined);
+      if (completedSubNodes.length > 0) {
+        mainOutput = subContext[completedSubNodes[completedSubNodes.length - 1].id];
+      }
+    }
+  }
+
+  return {
+    data: mainOutput,
+    outputs: subOutputs,
+    params: resolvedParams,
+    flowId: targetFlow.id,
+    flowName: targetFlow.name,
+    durationMs,
+  };
+}
+
 // ── Debug previews (computed before the node runs, never with side effects) ──
 
 function truncateForPreview(value: any): any {
@@ -3495,6 +3682,19 @@ function buildDebugPreview(
       }
       case RUN_SCRIPT_NODE_TYPE:
         return { nodePreview: buildScriptPreview(node, context, edges, nodes) };
+      case RUN_FLOW_NODE_TYPE: {
+        const targetFlowId = String(node.data?.targetFlowId || '').trim();
+        const targetFlow = targetFlowId
+          ? (getDb().prepare('SELECT id, name FROM flows WHERE id = ?').get(targetFlowId) as any)
+          : null;
+        return {
+          nodePreview: {
+            kind: 'runFlow',
+            targetFlow: targetFlow ? { id: targetFlow.id, name: targetFlow.name } : null,
+            params: resolveRunFlowParams(node, context),
+          },
+        };
+      }
       case 'oauth2Connector': {
         const req = buildOAuth2Request(node, context, false);
         return {

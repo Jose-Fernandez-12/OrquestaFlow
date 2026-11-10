@@ -10,6 +10,16 @@ import { SettingsModal } from '../settings/SettingsModal';
 import { HelpModal } from '../help/HelpModal';
 import { fetchSettings } from '../../store/settingsSlice';
 
+/**
+ * Toasts are plain text. A message is a problem when it opens like one ("Error al…", "No se pudo…",
+ * "Por favor…") or reports a failure ("… falló: …"); the name of a flow that happens to contain
+ * the word «error» does not make its success message one.
+ */
+export function isErrorToast(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return /^(error|no se pud|por favor|la depuración ya no|hay una ejecución en curso)/i.test(message.trim()) || / falló: /i.test(message);
+}
+
 export function AppLayout() {
   const dispatch = useAppDispatch();
   const { toastVisible, toastMessage } = useAppSelector((state: any) => state.ui);
@@ -43,7 +53,7 @@ export function AppLayout() {
       {/* Global Toast Notification */}
       {toastVisible && (
         (() => {
-          const isError = toastMessage?.toLowerCase().includes('error') || toastMessage?.toLowerCase().includes('por favor');
+          const isError = isErrorToast(toastMessage);
           return (
             <div className={cn(
               "fixed bottom-4 right-4 z-50 flex items-start gap-3 bg-surface p-4 rounded-md shadow-raised animate-in slide-in-from-bottom-5 max-w-sm w-full border-l-4 border",

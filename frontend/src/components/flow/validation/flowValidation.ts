@@ -84,6 +84,7 @@ export function validateFlow(nodes: Node[], edges: Edge[]): FlowIssue[] {
         else if (!/^https?:\/\//i.test(endpoint) && !endpoint.startsWith('{{')) {
           add(node.id, 'warning', 'La URL no empieza por http:// o https://; el motor la tratará como una respuesta simulada.');
         }
+        if (data.authType === 'credential' && !text(data.credentialId)) add(node.id, 'error', 'Elige la credencial guardada en la pestaña Autenticación.');
         for (const [field, label] of [['headers', 'Headers'], ['params', 'Parámetros de consulta']] as const) {
           if (text(data[field]) && !parseJson(data[field]).ok) add(node.id, 'warning', `${label}: el JSON no es válido y se ignorará.`);
         }
@@ -175,6 +176,12 @@ export function validateFlow(nodes: Node[], edges: Edge[]): FlowIssue[] {
           if (row.required && row.kind !== 'switch' && !text(row.value)) {
             add(node.id, 'error', `Falta el valor del argumento obligatorio ${row.flag || row.name || '(posicional)'}.`);
           }
+        }
+        break;
+      }
+      case 'runFlow': {
+        if (!text(data.targetFlowId)) {
+          add(node.id, 'error', 'No hay un flujo de destino seleccionado.');
         }
         break;
       }

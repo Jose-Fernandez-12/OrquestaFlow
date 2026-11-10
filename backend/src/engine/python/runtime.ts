@@ -660,7 +660,7 @@ def _requests():
 
 
 def http_request(ctx, method, url, *, headers=None, params=None, body=None, bearer_token=None,
-                 basic_auth=None, extract=None, timeout=30, retries=0, retry_delay=1.0,
+                 basic_auth=None, extra_headers=None, extract=None, timeout=30, retries=0, retry_delay=1.0,
                  backoff="exponential", for_each=None):
     """
     Petición HTTP con plantillas {{...}} en la URL, headers, parámetros y cuerpo.
@@ -692,6 +692,10 @@ def http_request(ctx, method, url, *, headers=None, params=None, body=None, bear
             if user or password:
                 encoded = base64.b64encode(f"{user}:{password}".encode()).decode()
                 request_headers["Authorization"] = f"Basic {encoded}"
+        # Cabeceras con secretos (por ejemplo una clave de API): no pasan por las plantillas
+        for name, value in (extra_headers or {}).items():
+            if value:
+                request_headers[name] = to_text(value)
 
         send = lambda: _send(method, request_url, _as_mapping(resolve(scope, params)), request_headers,
                              resolve(scope, body), timeout)

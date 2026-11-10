@@ -16,7 +16,8 @@ import {
   Radio,
   KeyRound,
   Bot,
-  PlugZap
+  PlugZap,
+  Palette
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';
@@ -25,12 +26,17 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
 import { ConnectionsDataSettings } from './ConnectionsDataSettings';
+import { ThemeSettings } from './ThemeSettings';
+import { AccessSettings } from './AccessSettings';
+import { CredentialsSettings } from './CredentialsSettings';
 
-type SettingsTab = 'general' | 'timeouts' | 'connections' | 'experimental';
+type SettingsTab = 'general' | 'theme' | 'timeouts' | 'credentials' | 'connections' | 'experimental';
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Clock }> = [
   { id: 'general', label: 'General', icon: Sliders },
+  { id: 'theme', label: 'Colores y tema', icon: Palette },
   { id: 'timeouts', label: 'Tiempos y reintentos', icon: Clock },
+  { id: 'credentials', label: 'Credenciales', icon: KeyRound },
   { id: 'connections', label: 'Conexiones y datos', icon: PlugZap },
   { id: 'experimental', label: 'Experimental', icon: FlaskConical },
 ];
@@ -115,7 +121,7 @@ export function SettingsModal() {
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex shrink-0 border-b border-border bg-bg/50 px-6 overflow-x-auto [scrollbar-width:thin]">
+        <div className="flex shrink-0 border-b border-border bg-bg/50 px-6 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {TABS.map(tab => (
             <button
               key={tab.id}
@@ -296,8 +302,34 @@ export function SettingsModal() {
                   para recrear el entorno. Un script puede pedir otra versión en su pestaña Dependencias.
                 </p>
               </div>
+
+              <div className="p-3.5 bg-bg rounded-md border border-border space-y-2">
+                <label htmlFor="retention-days" className="text-xs font-semibold text-fg">Historial de ejecuciones</label>
+                <select
+                  id="retention-days"
+                  value={formData.execution_log_retention_days ?? 0}
+                  onChange={(e) => handleChange('execution_log_retention_days', Number(e.target.value))}
+                  className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-3 py-1.5 text-xs focus-visible:outline-none focus-visible:border-accent"
+                >
+                  {[...new Set([0, 30, 90, 180, 365, formData.execution_log_retention_days ?? 0])].map(days => (
+                    <option key={days} value={days}>
+                      {days === 0 ? 'Guardar todo (no se borra nada)' : `Últimos ${days} días${days === 90 ? ' (recomendado)' : ''}`}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-muted">
+                  Con un periodo elegido, las ejecuciones más antiguas se borran solas para que la base no crezca sin límite.
+                  La última de cada flujo, script y consulta se conserva siempre.
+                </p>
+              </div>
+
+              <AccessSettings />
             </div>
           )}
+
+          {activeTab === 'theme' && <ThemeSettings />}
+
+          {activeTab === 'credentials' && <CredentialsSettings />}
 
           {activeTab === 'connections' && <ConnectionsDataSettings />}
 

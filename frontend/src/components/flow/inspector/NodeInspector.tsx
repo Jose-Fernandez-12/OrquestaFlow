@@ -19,6 +19,7 @@ import { ExportInspector } from './inspectors/ExportInspector';
 import { TimerInspector } from './inspectors/TimerInspector';
 import { WaitForInspector } from './inspectors/WaitForInspector';
 import { RunScriptInspector } from './inspectors/RunScriptInspector';
+import { RunFlowInspector } from './inspectors/RunFlowInspector';
 import { DataSourceInspector } from './inspectors/DataSourceInspector';
 import { DataListInspector } from './inspectors/DataListInspector';
 import { VariablesInspector } from './inspectors/VariablesInspector';
@@ -45,6 +46,8 @@ export interface NodeInspectorProps {
   testDisabled?: boolean;
   /** The panel remembers one width while editing and another during a debug session */
   layout?: 'edit' | 'debug';
+  /** A run is in progress: the node cannot be deleted under it */
+  executing?: boolean;
 }
 
 const DEFAULT_WIDTH = 420;
@@ -79,6 +82,7 @@ export function NodeInspector({
   testing = false,
   testDisabled = false,
   layout = 'edit',
+  executing = false,
 }: NodeInspectorProps) {
   const dispatch = useAppDispatch();
   const [widths, setWidths] = useState(() => ({ edit: readSavedWidth('edit'), debug: readSavedWidth('debug') }));
@@ -236,7 +240,7 @@ export function NodeInspector({
 
       {/* Action bar (variables panel, loop tag, single-node test) — hidden when there is nothing to offer */}
       {(hasAvailableVariables || canTest || canRunFrom) && (
-      <div className="px-5 py-3 border-b border-border bg-bg/40 flex items-center justify-between gap-2 shrink-0">
+      <div className="px-5 py-3 border-b border-border bg-bg/40 flex flex-wrap items-center justify-between gap-2 shrink-0 [&_button]:whitespace-nowrap">
         {hasAvailableVariables ? (
           <button
             type="button"
@@ -247,10 +251,11 @@ export function NodeInspector({
                 ? 'bg-accent/10 text-accent border-accent/40 shadow-md ring-2 ring-accent/20'
                 : 'bg-accent/5 text-accent border-accent/20 hover:bg-accent/15 hover:border-accent/30 hover:shadow-sm'
             )}
-            title="Alternar panel de variables dinámicas disponibles"
+            title="Variables disponibles para este nodo"
+            aria-expanded={isVariableDrawerOpen}
           >
             <Braces size={14} strokeWidth={2.5} />
-            <span>Variables disponibles</span>
+            <span>Variables</span>
             <ChevronDown
               size={13}
               className={cn('transition-transform duration-200', isVariableDrawerOpen && 'rotate-180')}
@@ -394,7 +399,7 @@ export function NodeInspector({
         )}
 
         {/* Node-specific Inspector Routing */}
-        {type === 'start' && <StartInspector node={node} />}
+        {type === 'start' && <StartInspector node={node} nodes={nodes} />}
 
         {(type.startsWith('http') || type === 'httpRequest') && (
           <HttpInspector
@@ -439,6 +444,17 @@ export function NodeInspector({
 
         {type === 'runScript' && (
           <RunScriptInspector node={node} nodes={nodes} edges={edges} updateNodeData={updateNodeData} />
+        )}
+
+        {type === 'runFlow' && (
+          <RunFlowInspector
+            node={node}
+            nodes={nodes}
+            edges={edges}
+            updateNodeData={updateNodeData}
+            setNodes={setNodes}
+            selectedNodeId={selectedNodeId}
+          />
         )}
 
         {(type === 'dataSource' || type === 'fileSource') && (
@@ -537,6 +553,7 @@ export function NodeInspector({
           'delay',
           'waitFor',
           'runScript',
+          'runFlow',
           'dataSource',
           'fileSource',
           'dataList',
@@ -561,7 +578,8 @@ export function NodeInspector({
         {/* Retries and error policy (hidden for nodes that cannot fail transiently or continue) */}
         <ErrorHandlingSection key={node.id} node={node} updateNodeData={updateNodeData} />
 
-        {/* Delete Node Button */}
+        {/* Delete Node Button (not while a run is using the node) */}
+        {!executing && (
         <div className="mt-8 pt-5 border-t border-border-light">
           <Button
             variant="default"
@@ -577,6 +595,7 @@ export function NodeInspector({
             <span>Eliminar Nodo</span>
           </Button>
         </div>
+        )}
       </div>
 
     </aside>

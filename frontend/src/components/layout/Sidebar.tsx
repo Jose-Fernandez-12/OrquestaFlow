@@ -2,6 +2,7 @@ import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
   GitMerge,
+  LayoutDashboard,
   Code2,
   Database,
   Calendar,
@@ -15,6 +16,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { toggleSidebar, openSettingsModal, openHelpModal } from '../../store/uiSlice';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
+import { ThemeSwitcher } from './ThemeSwitcher';
 
 export function Sidebar() {
   const dispatch = useAppDispatch();
@@ -22,16 +24,16 @@ export function Sidebar() {
   const collapsed = useAppSelector((state) => state.ui.sidebarCollapsed);
 
   const navItems = [
-    { id: 'flujos', label: 'Flujos de trabajo', icon: GitMerge, path: '/' },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: '/' },
+    { id: 'flujos', label: 'Flujos de trabajo', icon: GitMerge, path: '/flujos' },
     { id: 'scripts', label: 'Scripts', icon: Code2, path: '/scripts' },
     { id: 'bases', label: 'Bases de datos', icon: Database, path: '/bases' },
     { id: 'programacion', label: 'Programación', icon: Calendar, path: '/programacion' },
   ];
 
   const isItemActive = (item: typeof navItems[0]) => {
-    if (item.id === 'flujos') {
-      return location.pathname === '/' || location.pathname.startsWith('/flujos');
-    }
+    // '/' is a prefix of every route, so the dashboard only matches exactly
+    if (item.id === 'dashboard') return location.pathname === '/';
     return location.pathname.startsWith(item.path);
   };
 
@@ -121,6 +123,7 @@ export function Sidebar() {
             <HelpCircle size={18} />
             {!collapsed && "Ayuda"}
           </Button>
+          <ThemeSwitcher collapsed={collapsed} />
         </div>
 
         <div className="mt-2 pt-2 border-t border-border flex items-center gap-3">

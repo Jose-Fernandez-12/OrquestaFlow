@@ -635,18 +635,6 @@ export function DebugContextViewer({
                   <span>Restantes ({responsePreview.iteration.total - responsePreview.iteration.current})</span>
                 </Button>
               )}
-
-              <Button
-                type="button"
-                variant="default"
-                size="sm"
-                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className="text-xs h-7 min-h-0 px-3 gap-1"
-                title="Continuar ejecución completa del flujo"
-              >
-                <PlayCircle size={12} />
-                <span>Continuar todo</span>
-              </Button>
             </>
           ) : requestPreview ? (
             <>
@@ -688,18 +676,6 @@ export function DebugContextViewer({
                   <span>Restantes ({requestPreview.iteration.total - requestPreview.iteration.current + 1})</span>
                 </Button>
               )}
-
-              <Button
-                type="button"
-                variant="default"
-                size="sm"
-                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className="text-xs h-7 min-h-0 px-3 gap-1"
-                title="Continuar ejecución completa"
-              >
-                <PlayCircle size={12} />
-                <span>Continuar todo</span>
-              </Button>
             </>
           ) : (
             <div className="flex items-center gap-1.5 w-full">
@@ -713,17 +689,6 @@ export function DebugContextViewer({
               >
                 <StepForward size={12} />
                 <span>Siguiente paso</span>
-              </Button>
-              <Button
-                type="button"
-                variant="default"
-                size="sm"
-                onClick={() => dispatch(resumeDebugNode({ id: flowId, action: 'continue' }))}
-                className="flex-1 text-xs h-7 min-h-0 gap-1.5"
-                title="Continuar ejecución completa del flujo"
-              >
-                <PlayCircle size={12} />
-                <span>Continuar todo</span>
               </Button>
             </div>
           )}
