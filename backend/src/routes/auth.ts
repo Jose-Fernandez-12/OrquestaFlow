@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import {
   accessCookie, accessToken, accessTokenFile, accessTokenSource, checkAccess, clearedAccessCookie,
-  clearLoginFailures, isLocalAddress, loginLockedUntil, recordLoginFailure, tokenMatches,
+  clearLoginFailures, isFrontendOrigin, isLocalAddress, loginLockedUntil, recordLoginFailure, tokenMatches,
 } from '../security/access.js';
 
 export function accessRequestOf(request: FastifyRequest) {
@@ -11,6 +11,7 @@ export function accessRequestOf(request: FastifyRequest) {
     origin: request.headers.origin,
     cookie: request.headers.cookie,
     authorization: request.headers.authorization,
+    headers: request.headers,
   };
 }
 
@@ -51,10 +52,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // The key itself, only for the computer the server runs on, so it can be passed on to others
+  // A page may only read it when it is OrquestaFlow's own frontend (exact port, not just the name)
   app.get('/token', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
     const decision = checkAccess(accessRequestOf(request));
     if (!decision.ok || decision.via !== 'local') {
       return reply.status(403).send({ error: 'La clave solo se muestra en el equipo donde corre el servidor.' });
+    }
+    const origin = request.headers.origin;
+    if (origin && !isFrontendOrigin(origin)) {
+      return reply.status(403).send({
+        error: `La clave solo se muestra en la propia aplicación. Si sirves OrquestaFlow en otro puerto, añádelo a ORQUESTA_FRONTEND_PORTS.`,
+      });
     }
     return { data: { token: accessToken(), source: accessTokenSource(), file: accessTokenFile() } };
   });

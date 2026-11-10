@@ -28,7 +28,7 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   user_role_label: 'Administrador',
   experimental_nodes_enabled: false,
   python_version: '3.12',
-  execution_log_retention_days: 90,
+  execution_log_retention_days: 0,
 };
 
 // Safe load from localStorage if available

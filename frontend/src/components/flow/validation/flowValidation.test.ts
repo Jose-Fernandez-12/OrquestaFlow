@@ -211,4 +211,18 @@ describe('validateFlow · Ejecutar flujo (runFlow), parámetros y plantillas', (
       expect(errors, tpl.id).toEqual([]);
     }
   });
+
+  it('templates read a query node as the list of rows it returns', () => {
+    // {{consulta.rows.length}} is undefined: the condition always took the "No" branch
+    for (const tpl of FLOW_TEMPLATES) {
+      const { nodes } = tpl.buildDefinition();
+      const queryIds = nodes.filter(n => n.type === 'query').map(n => n.id);
+      const text = JSON.stringify(nodes);
+      for (const id of queryIds) expect(text, tpl.id).not.toContain(`{{${id}.rows`);
+    }
+    const sql = FLOW_TEMPLATES.find(t => t.id === 'sql-conditional-export')!.buildDefinition();
+    const query = sql.nodes.find(n => n.type === 'query')!;
+    const branch = sql.nodes.find(n => n.type === 'conditionalBranch')!;
+    expect((branch.data as any).conditions[0].left).toBe(`{{${query.id}.length}}`);
+  });
 });

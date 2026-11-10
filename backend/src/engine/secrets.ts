@@ -58,15 +58,35 @@ export function isEncryptedSecret(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith(PREFIX);
 }
 
-/** Encrypted text to store; null for an empty secret. A value that is already encrypted is kept as is */
-export function encryptSecret(plain: string | null | undefined): string | null {
-  if (plain === null || plain === undefined || plain === '') return null;
-  if (isEncryptedSecret(plain)) return plain;
+/**
+ * Encrypted text to store; null for an empty secret. A value that is already encrypted is kept as is,
+ * but only when this installation's key opens it: anything else that merely starts with "enc:v1:"
+ * (typed by someone, or from another installation) is encrypted like any other text, so it is never
+ * stored in clear. Numbers are accepted as text; other values are refused.
+ */
+export function encryptSecret(input: unknown): string | null {
+  if (input === null || input === undefined || input === '') return null;
+  if (typeof input !== 'string' && typeof input !== 'number') {
+    const err: any = new TypeError('El secreto debe ser un texto.');
+    err.statusCode = 400;
+    throw err;
+  }
+  const plain = String(input);
+  if (isEncryptedSecret(plain) && canDecrypt(plain)) return plain;
 
   const iv = crypto.randomBytes(IV_BYTES);
   const cipher = crypto.createCipheriv('aes-256-gcm', secretKey(), iv);
   const encrypted = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
   return PREFIX + Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64');
+}
+
+function canDecrypt(value: string): boolean {
+  try {
+    decryptSecret(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The secret in clear. Values saved before encryption existed are returned unchanged */
