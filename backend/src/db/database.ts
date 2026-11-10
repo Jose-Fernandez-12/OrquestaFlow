@@ -2,6 +2,7 @@ import initSqlJs from 'sql.js';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'fs';
 import { join } from 'path';
 import { encryptSecret } from '../engine/secrets.js';
+import { sealDefinition } from '../engine/nodeSecrets.js';
 
 // ORQUESTA_DB_PATH=':memory:' keeps the database in memory only (used by the automated tests)
 const DB_PATH = process.env.ORQUESTA_DB_PATH || join(process.cwd(), 'data', 'orquesta.sqlite');
@@ -143,6 +144,7 @@ export async function initDb(): Promise<void> {
   }
 
   encryptStoredPasswords(wrappedDb);
+  sealStoredDefinitions(wrappedDb);
   compactQueryResults(wrappedDb);
 
   try {
@@ -243,11 +245,31 @@ function migrateExecutionLogs(db: SqlJsWrapper) {
 
 // Passwords saved before they were encrypted (see engine/secrets.ts)
 function encryptStoredPasswords(db: SqlJsWrapper) {
-  const rows = db.prepare("SELECT id, password FROM connections WHERE password IS NOT NULL AND password != '' AND password NOT LIKE 'enc:v1:%'").all() as Array<{ id: string; password: string }>;
+  // Includes values that only look encrypted (encryptSecret keeps the ones this key opens)
+  const rows = db.prepare("SELECT id, password FROM connections WHERE password IS NOT NULL AND password != ''").all() as Array<{ id: string; password: string }>;
+  let encrypted = 0;
   for (const row of rows) {
-    db.prepare('UPDATE connections SET password = ? WHERE id = ?').run(encryptSecret(row.password), row.id);
+    const next = encryptSecret(row.password);
+    if (next === row.password) continue;
+    db.prepare('UPDATE connections SET password = ? WHERE id = ?').run(next, row.id);
+    encrypted++;
   }
-  if (rows.length > 0) console.log(`[DB] Migrated: encrypted ${rows.length} connection password(s)`);
+  if (encrypted > 0) console.log(`[DB] Migrated: encrypted ${encrypted} connection password(s)`);
+}
+
+// Secrets typed into nodes, in flows and in their saved versions (see engine/nodeSecrets.ts)
+function sealStoredDefinitions(db: SqlJsWrapper) {
+  let sealed = 0;
+  for (const table of ['flows', 'flow_versions']) {
+    const rows = db.prepare(`SELECT id, definition FROM ${table}`).all() as Array<{ id: string; definition: string }>;
+    for (const row of rows) {
+      const next = sealDefinition(row.definition);
+      if (next === row.definition) continue;
+      db.prepare(`UPDATE ${table} SET definition = ? WHERE id = ?`).run(next, row.id);
+      sealed++;
+    }
+  }
+  if (sealed > 0) console.log(`[DB] Migrated: encrypted the secrets typed into ${sealed} flow definition(s)`);
 }
 
 // Query runs used to keep every returned row in the history; now only their count is kept

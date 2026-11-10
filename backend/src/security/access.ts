@@ -16,6 +16,11 @@ import path from 'path';
  *
  * Names other than this computer's (a DNS alias, a reverse proxy) go in ORQUESTA_ALLOWED_HOSTS,
  * comma separated.
+ *
+ * Behind a reverse proxy every request arrives from the proxy, often this same computer, so it would
+ * look local. A request with forwarding headers (X-Forwarded-For, Forwarded, X-Real-IP…) is therefore
+ * never let in as local: it needs the key. A proxy that adds none of them cannot be told apart, so
+ * ORQUESTA_REQUIRE_ACCESS_TOKEN=true asks for the key on every request, this computer included.
  */
 
 export const ACCESS_COOKIE = 'orquesta_access';
@@ -137,6 +142,48 @@ export interface AccessRequest {
   origin: string | null | undefined;
   cookie: string | null | undefined;
   authorization: string | null | undefined;
+  /** Request headers, to notice a request relayed by a proxy */
+  headers?: Record<string, string | string[] | undefined>;
+}
+
+const FORWARDING_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'x-client-ip', 'true-client-ip', 'cf-connecting-ip', 'via'];
+
+/** The request was relayed by a proxy: the real client is somewhere else */
+export function isForwarded(headers: AccessRequest['headers']): boolean {
+  if (!headers) return false;
+  return FORWARDING_HEADERS.some(name => {
+    const value = headers[name];
+    return Array.isArray(value) ? value.length > 0 : typeof value === 'string' && value.trim() !== '';
+  });
+}
+
+/** ORQUESTA_REQUIRE_ACCESS_TOKEN=true: no request gets in without the key */
+export function tokenAlwaysRequired(): boolean {
+  return /^(1|true|si|sí|yes)$/i.test(process.env.ORQUESTA_REQUIRE_ACCESS_TOKEN?.trim() || '');
+}
+
+function configuredFrontendPorts(): string[] {
+  return (process.env.ORQUESTA_FRONTEND_PORTS || '5173,4173')
+    .split(',')
+    .map(p => p.trim())
+    .filter(Boolean);
+}
+
+/**
+ * A page of OrquestaFlow itself: one of this computer's names and the port the frontend is served on
+ * (5173 in development, 4173 with `vite preview`; others in ORQUESTA_FRONTEND_PORTS). Stricter than
+ * isAllowedOrigin, which accepts any port: another program on this computer serving a page on
+ * localhost must not be able to read the access key.
+ */
+export function isFrontendOrigin(origin: string | null | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const url = new URL(origin);
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+    return isAllowedHostname(url.hostname) && configuredFrontendPorts().includes(port);
+  } catch {
+    return false;
+  }
 }
 
 export type AccessDecision =
@@ -159,7 +206,7 @@ export function checkAccess(req: AccessRequest): AccessDecision {
   }
   if (tokenMatches(presentedToken(req))) return { ok: true, via: 'token' };
 
-  if (isLocalAddress(req.remoteAddress)) {
+  if (isLocalAddress(req.remoteAddress) && !isForwarded(req.headers) && !tokenAlwaysRequired()) {
     if (isAllowedHostname(hostnameOf(req.host))) return { ok: true, via: 'local' };
     return {
       ok: false,

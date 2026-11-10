@@ -14,7 +14,8 @@ function retentionDays(): number {
   return Number.isFinite(days) && days >= 0 ? Math.floor(days) : DEFAULT_RETENTION_DAYS;
 }
 
-export const DEFAULT_RETENTION_DAYS = 90;
+// Nothing is deleted until the user chooses a period in Configuración → General (90 days is suggested)
+export const DEFAULT_RETENTION_DAYS = 0;
 
 /**
  * Deletes the execution history older than `days` (0 keeps everything). The latest run of each flow,

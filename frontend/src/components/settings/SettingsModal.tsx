@@ -307,18 +307,19 @@ export function SettingsModal() {
                 <label htmlFor="retention-days" className="text-xs font-semibold text-fg">Historial de ejecuciones</label>
                 <select
                   id="retention-days"
-                  value={formData.execution_log_retention_days ?? 90}
+                  value={formData.execution_log_retention_days ?? 0}
                   onChange={(e) => handleChange('execution_log_retention_days', Number(e.target.value))}
                   className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-3 py-1.5 text-xs focus-visible:outline-none focus-visible:border-accent"
                 >
-                  {[...new Set([30, 90, 180, 365, 0, formData.execution_log_retention_days ?? 90])].map(days => (
+                  {[...new Set([0, 30, 90, 180, 365, formData.execution_log_retention_days ?? 0])].map(days => (
                     <option key={days} value={days}>
-                      {days === 0 ? 'Guardar todo' : `Últimos ${days} días${days === 90 ? ' (recomendado)' : ''}`}
+                      {days === 0 ? 'Guardar todo (no se borra nada)' : `Últimos ${days} días${days === 90 ? ' (recomendado)' : ''}`}
                     </option>
                   ))}
                 </select>
                 <p className="text-[11px] text-muted">
-                  Las ejecuciones más antiguas se borran solas. La última de cada flujo, script y consulta se conserva siempre.
+                  Con un periodo elegido, las ejecuciones más antiguas se borran solas para que la base no crezca sin límite.
+                  La última de cada flujo, script y consulta se conserva siempre.
                 </p>
               </div>
 

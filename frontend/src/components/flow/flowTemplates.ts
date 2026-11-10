@@ -180,7 +180,8 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
               conditions: [
                 {
                   id: '1',
-                  left: `{{${queryId}.rows.length}}`,
+                  // The query node returns the list of rows itself
+                  left: `{{${queryId}.length}}`,
                   operator: 'gt',
                   right: '0',
                 },

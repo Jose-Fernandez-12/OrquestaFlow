@@ -19,6 +19,7 @@ export function initIo(server: HttpServer) {
         origin: req.headers.origin,
         cookie: req.headers.cookie,
         authorization: req.headers.authorization,
+        headers: req.headers,
       });
       callback(decision.ok ? null : decision.code, decision.ok);
     },

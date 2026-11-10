@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { encryptSecret } from '../engine/secrets.js';
+import { openDefinition, sealDefinition, stripNodeSecrets, withOpenDefinition } from '../engine/nodeSecrets.js';
 import crypto from 'crypto';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
@@ -88,16 +89,16 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   // List all flows
   app.get('/', async () => {
     const db = getDb();
-    const flows = db.prepare('SELECT * FROM flows ORDER BY updated_at DESC').all();
-    return { data: flows };
+    const flows = db.prepare('SELECT * FROM flows ORDER BY updated_at DESC').all() as any[];
+    return { data: flows.map(withOpenDefinition) };
   });
 
   // Get single flow
   app.get<{ Params: { id: string } }>('/:id', async (request, reply) => {
     const db = getDb();
-    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id);
+    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
     if (!flow) return reply.status(404).send({ error: 'Flow not found' });
-    return { data: flow };
+    return { data: withOpenDefinition(flow) };
   });
 
   // Create flow
@@ -109,10 +110,10 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     db.prepare(`
       INSERT INTO flows (id, name, description, definition, is_locked)
       VALUES (?, ?, ?, ?, ?)
-    `).run(id, name, description, definition, is_locked);
+    `).run(id, name, description, sealDefinition(typeof definition === 'object' ? JSON.stringify(definition) : definition), is_locked);
 
-    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(id);
-    return { data: flow };
+    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(id) as any;
+    return { data: withOpenDefinition(flow) };
   });
 
   // Import flow from JSON bundle or legacy format
@@ -314,9 +315,9 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     db.prepare(`
       INSERT INTO flows (id, name, description, definition, is_locked)
       VALUES (?, ?, ?, ?, 0)
-    `).run(newFlowId, flowName, flowDesc, finalDefinitionStr);
+    `).run(newFlowId, flowName, flowDesc, sealDefinition(finalDefinitionStr));
 
-    const createdFlow = db.prepare('SELECT * FROM flows WHERE id = ?').get(newFlowId);
+    const createdFlow = withOpenDefinition(db.prepare('SELECT * FROM flows WHERE id = ?').get(newFlowId) as any);
 
     return {
       data: createdFlow,
@@ -440,7 +441,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       if (name !== undefined) { updates.push('name = ?'); values.push(name); }
       if (description !== undefined) { updates.push('description = ?'); values.push(description); }
       if (definition !== undefined) {
-        const definitionStr = typeof definition === 'object' ? JSON.stringify(definition) : definition;
+        // Secrets that did not change keep their ciphertext, so an unchanged flow compares equal
+        const definitionStr = sealDefinition(typeof definition === 'object' ? JSON.stringify(definition) : definition, existing.definition);
         updates.push('definition = ?');
         values.push(definitionStr);
         if (definitionStr !== existing.definition) {
@@ -458,8 +460,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       values.push(request.params.id);
       db.prepare(`UPDATE flows SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
-      const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id);
-      return { data: flow };
+      const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
+      return { data: withOpenDefinition(flow) };
     }
   );
 
@@ -746,7 +748,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     const version = db.prepare('SELECT * FROM flow_versions WHERE id = ? AND flow_id = ?')
       .get(request.params.versionId, request.params.id);
     if (!version) return reply.status(404).send({ error: 'Versión no encontrada' });
-    return { data: version };
+    return { data: withOpenDefinition(version as any) };
   });
 
   app.post<{ Params: { id: string }; Body: { note?: string } }>('/:id/versions', async (request, reply) => {
@@ -755,7 +757,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     if (!flow) return reply.status(404).send({ error: 'Flow not found' });
 
     const version = recordFlowVersion(flow.id, flow.name, flow.definition, 'manual', request.body?.note?.trim() || null);
-    return { data: version };
+    return { data: withOpenDefinition(version as any) };
   });
 
   app.post<{ Params: { id: string; versionId: string } }>('/:id/versions/:versionId/restore', async (request, reply) => {
@@ -777,8 +779,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     db.prepare("UPDATE flows SET definition = ?, updated_at = datetime('now') WHERE id = ?").run(version.definition, flow.id);
     recordFlowVersion(flow.id, flow.name, version.definition, 'restore', `Restaurada desde v${version.version_number}`);
 
-    const updated = db.prepare('SELECT * FROM flows WHERE id = ?').get(flow.id);
-    return { data: updated };
+    const updated = db.prepare('SELECT * FROM flows WHERE id = ?').get(flow.id) as any;
+    return { data: withOpenDefinition(updated) };
   });
 
   // ── Webhook trigger ──
@@ -812,7 +814,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       let targetNode: any = null;
       for (const f of flows) {
         try {
-          const def = JSON.parse(f.definition || '{}');
+          // The webhook secret is stored encrypted
+          const def = JSON.parse(openDefinition(f.definition || '{}'));
           const node = (def.nodes || []).find(
             (n: any) => n.type === 'webhookTrigger' && (n.data?.webhookId === webhookId || n.id === webhookId)
           );
@@ -921,25 +924,8 @@ function verifyWebhookAuth(request: any, secret: string): string | null {
   return 'Este webhook requiere autenticación: envía la cabecera x-webhook-signature o Authorization: Bearer <secreto>';
 }
 
-const SECRET_NODE_FIELDS = ['apiKey', 'clientSecret', 'password', 'refreshToken', 'secret', 'authToken', 'authPassword'];
-
-// Secrets typed directly into nodes are removed from exports. References are kept: env:VARIABLE,
-// cred:nombre and {{values taken from another node}}
-export function stripNodeSecrets(definition: { nodes: any[]; edges: any[] }) {
-  return {
-    ...definition,
-    nodes: (definition.nodes || []).map(node => {
-      if (!node?.data) return node;
-      const data = { ...node.data };
-      for (const field of SECRET_NODE_FIELDS) {
-        if (typeof data[field] === 'string' && data[field] && !/^(env|cred):/.test(data[field]) && !data[field].includes('{{')) {
-          data[field] = '';
-        }
-      }
-      return { ...node, data };
-    })
-  };
-}
+// Moved to engine/nodeSecrets.ts, kept here for existing imports
+export { stripNodeSecrets };
 
 const MAX_VERSIONS_PER_FLOW = 50;
 const AUTO_VERSION_MERGE_WINDOW_MS = 5 * 60 * 1000;

@@ -1,5 +1,6 @@
 import { getDb } from '../db/database.js';
 import { credentialHeaders, credentialSecret } from './credentials.js';
+import { openDefinition } from './nodeSecrets.js';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -182,7 +183,8 @@ export async function executeFlowEngine(
     }
   };
 
-  const definition = JSON.parse(flow.definition || '{"nodes":[],"edges":[]}');
+  // Secrets typed into nodes are stored encrypted
+  const definition = JSON.parse(openDefinition(flow.definition || '{"nodes":[],"edges":[]}'));
   // Notes only document the canvas: they never run
   const nodes: any[] = (definition.nodes || []).filter((n: any) => n.type !== 'note');
   const edges: any[] = definition.edges || [];
@@ -281,9 +283,12 @@ export async function executeFlowEngine(
     options?.params && typeof options.params === 'object' && !Array.isArray(options.params)
       ? { ...options.params }
       : {};
+  // Values typed when the run started. They only replace the values of the Variables node with the
+  // same key, which converts them (types, $today_ymd…), so {{fecha}} reads the converted value. Kept
+  // out of the rest of the context: a raw "$today_ymd" there would be found before the converted one
   const context: Record<string, any> = {
     ...(options?.initialContext || {}),
-    ...(Object.keys(runtimeParams).length > 0 ? { _params: runtimeParams, ...runtimeParams } : {}),
+    ...(Object.keys(runtimeParams).length > 0 ? { _params: runtimeParams } : {}),
   };
   const runningPromises = new Map<string, Promise<void>>();
   const completedNodes = new Set<string>();
@@ -423,7 +428,8 @@ export async function executeFlowEngine(
                   let output: any = {};
                   switch (node.type) {
                     case 'start':
-                      output = { msg: 'Flow started', ...runtimeParams };
+                      // Nested: at the top they would be found by {{nombre}} before the converted values
+                      output = Object.keys(runtimeParams).length > 0 ? { msg: 'Flow started', params: runtimeParams } : { msg: 'Flow started' };
                       break;
                     case 'httpGet':
                     case 'httpPost':
@@ -1291,10 +1297,11 @@ function resolvePath(context: Record<string, any>, pathStr: string): any {
     }
   }
 
-  // 3. Fallback: smart lookup across upstream nodes in context (pure iterative, no recursion)
+  // 3. Fallback: smart lookup across upstream nodes in context (pure iterative, no recursion).
+  // Internal keys (_item, _params, _loops…) are not node outputs
   const lowerTrimmed = trimmed.toLowerCase();
   for (const [ctxKey, ctxVal] of Object.entries(context)) {
-    if (ctxKey === 'start' || ctxKey === '_item') continue;
+    if (ctxKey === 'start' || ctxKey.startsWith('_')) continue;
     if (ctxVal === undefined || ctxVal === null) continue;
 
     if (Array.isArray(ctxVal) && ctxVal.length > 0) {
@@ -1330,6 +1337,12 @@ function resolvePath(context: Record<string, any>, pathStr: string): any {
         if (k.toLowerCase() === lowerTrimmed) return v;
       }
     }
+  }
+
+  // 4. Last: a run parameter no Variables node declares (a subflow can receive any). Raw, as typed
+  if (context._params && typeof context._params === 'object') {
+    const fromParams = evaluatePathOnObject(context._params, trimmed);
+    if (fromParams !== undefined && fromParams !== null) return fromParams;
   }
 
   return undefined;
