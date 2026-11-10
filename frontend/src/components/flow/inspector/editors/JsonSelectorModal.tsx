@@ -301,7 +301,7 @@ export function JsonSelectorModal({
         type="button"
         onClick={handleOpen}
         className={cn(
-          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors border max-w-[160px]",
+          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors border max-w-[160px] shrink-0",
           node.type === 'variables'
             ? "bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/30 hover:bg-violet-500/20"
             : node.type === 'query'
@@ -311,7 +311,7 @@ export function JsonSelectorModal({
         )}
         title={`Mapear campos desde: ${nodeLabel} (${node.type})`}
       >
-        <span className="truncate">{buttonText}</span>
+        <span className="whitespace-normal break-words text-center leading-tight" title={buttonText}>{buttonText}</span>
       </button>
       )}
 
