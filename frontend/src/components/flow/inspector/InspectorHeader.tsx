@@ -83,8 +83,8 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
   return (
     <div className="p-5 border-b border-border flex flex-col gap-3 bg-gradient-to-b from-surface to-bg/20">
       {/* Top row: icon + type badge + status + close */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className={cn('p-2.5 rounded-lg shrink-0 shadow-sm', bgClass, colorClass)}>
             <Icon size={18} />
           </div>

@@ -57,7 +57,7 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
   };
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden">
+    <div className="shrink-0 border border-border rounded-lg overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
@@ -152,14 +152,15 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
                     type="button"
                     onClick={() => updateNodeData('onError', value === 'stop' ? undefined : value)}
                     className={cn(
-                      'flex items-center justify-center gap-1.5 h-9 rounded-sm border text-xs font-medium transition-colors',
+                      'flex items-center justify-center gap-1.5 h-9 px-2 min-w-0 rounded-sm border text-xs font-medium transition-colors',
                       config.onError === value
                         ? 'border-accent bg-accent/5 text-accent'
                         : 'border-border text-muted hover:text-fg hover:border-border-hover'
                     )}
+                    title={label}
                   >
-                    <Icon size={13} />
-                    {label}
+                    <Icon size={13} className="shrink-0" />
+                    <span className="truncate">{label}</span>
                   </button>
                 ))}
               </div>

@@ -210,7 +210,6 @@ export function HttpInspector({
                         if (n.id === selectedNodeId) {
                           return {
                             ...n,
-                            selected: true,
                             data: {
                               ...n.data,
                               endpoint: baseUrl,
