@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchFlows, createFlow, deleteFlow, duplicateFlow, saveFlow, executeFlow, stopFlow, setCurrentFlow, type Flow } from '../../store/flowSlice';
 import { triggerBrowserDownload } from '../../lib/exportUtils';
@@ -57,8 +57,13 @@ export function FlowListView() {
     }, 3000);
   };
 
-  // New flow modal state
-  const [isNewModalOpen, setIsNewModalOpen] = useState(false);
+  // New flow modal state. «Nuevo flujo» on another page (the dashboard) lands here with ?nuevo=1
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [isNewModalOpen, setIsNewModalOpen] = useState(() => searchParams.get('nuevo') === '1');
+  useEffect(() => {
+    // Drop the parameter so reloading or going back does not reopen the dialog
+    if (searchParams.has('nuevo')) setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams]);
   const [newFlowName, setNewFlowName] = useState('');
   const [newFlowDesc, setNewFlowDesc] = useState('');
 

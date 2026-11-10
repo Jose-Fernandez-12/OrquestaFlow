@@ -8,6 +8,8 @@ import { startScriptRun } from './scriptRunner.js';
 const activeJobs: Record<string, cron.ScheduledTask> = {};
 const runningJobIds = new Set<string>();
 
+export const SKIPPED_OVERLAP_MESSAGE = 'Omitida: la ejecución anterior seguía en curso';
+
 export function stopAllSchedulerJobs(): void {
   for (const id of Object.keys(activeJobs)) {
     try {
@@ -25,6 +27,10 @@ export async function initScheduler() {
 
   console.log(`[Scheduler] Initializing with ${schedules.length} active schedules...`);
 
+  // Must run before the jobs start: starting a job overwrites next_run_at
+  const missed = detectMissedRuns();
+  if (missed.length > 0) console.warn(`[Scheduler] ${missed.length} schedule(s) missed a run while the server was off`);
+
   schedules.forEach(schedule => {
     try {
       startCronJob(schedule);
@@ -32,6 +38,34 @@ export async function initScheduler() {
       console.error(`[Scheduler] Failed to start schedule ${schedule.id}:`, e.message);
     }
   });
+}
+
+const MISSED_GRACE_MS = 60_000;
+
+/**
+ * A stored next_run_at in the past means the server was not running at that time.
+ * Remembers it in last_missed_at so the dashboard can say so; returns the ids of the affected schedules.
+ */
+export function detectMissedRuns(now: number = Date.now()): string[] {
+  const db = getDb();
+  const schedules = db.prepare('SELECT id, next_run_at FROM schedules WHERE is_active = 1 AND next_run_at IS NOT NULL').all() as Array<{ id: string; next_run_at: string }>;
+  const missed: string[] = [];
+
+  for (const schedule of schedules) {
+    const due = new Date(schedule.next_run_at).getTime();
+    if (isNaN(due) || due > now - MISSED_GRACE_MS) continue;
+
+    // A run that did happen around that time means next_run_at was simply left stale
+    const ran = db.prepare(`
+      SELECT 1 AS found FROM execution_logs
+      WHERE schedule_id = ? AND started_at >= datetime(?, '-1 minute') LIMIT 1
+    `).get(schedule.id, schedule.next_run_at);
+    if (ran) continue;
+
+    db.prepare('UPDATE schedules SET last_missed_at = ? WHERE id = ?').run(schedule.next_run_at, schedule.id);
+    missed.push(schedule.id);
+  }
+  return missed;
 }
 
 function getNextRunAt(cronExpression: string): string | null {
@@ -60,6 +94,10 @@ function startCronJob(schedule: any) {
   const task = cron.schedule(schedule.cron_expression, async () => {
     if (runningJobIds.has(schedule.id)) {
       console.warn(`[Scheduler] Skipping schedule ${schedule.id} (${schedule.name}): previous execution is still running`);
+      getDb().prepare(`
+        INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type, error_message, duration_ms, completed_at)
+        VALUES (?, ?, ?, ?, 'cancelled', 'schedule', ?, 0, datetime('now'))
+      `).run(require('uuid').v4(), schedule.target_type, schedule.target_id, schedule.id, SKIPPED_OVERLAP_MESSAGE);
       return;
     }
 
@@ -121,12 +159,6 @@ function startCronJob(schedule: any) {
         result: resultJson ? JSON.parse(resultJson) : null,
         trace: schedule.target_type === 'flow' ? tracer.toJSON('completed') : undefined
       });
-      
-      // Update database status for the next run
-      const nextNextRun = getNextRunAt(schedule.cron_expression);
-      if (nextNextRun) {
-        db.prepare("UPDATE schedules SET next_run_at = ? WHERE id = ?").run(nextNextRun, schedule.id);
-      }
     } catch (err: any) {
       console.error(`[Scheduler] Error running job ${schedule.id}:`, err.message);
       const duration = Date.now() - startTime;
@@ -139,6 +171,11 @@ function startCronJob(schedule: any) {
       });
     } finally {
       runningJobIds.delete(schedule.id);
+      // Also after a failed run; otherwise the schedule keeps showing a next run in the past
+      const nextNextRun = getNextRunAt(schedule.cron_expression);
+      if (nextNextRun) {
+        db.prepare("UPDATE schedules SET next_run_at = ? WHERE id = ?").run(nextNextRun, schedule.id);
+      }
     }
   });
 

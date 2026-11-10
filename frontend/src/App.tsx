@@ -1,5 +1,5 @@
 import React from 'react';
-import { RouterProvider, createBrowserRouter } from 'react-router-dom';
+import { Navigate, RouterProvider, createBrowserRouter } from 'react-router-dom';
 import { AppLayout } from './components/layout/AppLayout';
 
 import { FlowListView } from './components/flow/FlowListView';
@@ -16,10 +16,11 @@ const router = createBrowserRouter([
   {
     element: <AppLayout />,
     children: [
-      { path: '/', element: <FlowListView /> },
+      { path: '/', element: <DashboardView /> },
+      // Old address of the dashboard, kept for bookmarks
+      { path: '/dashboard', element: <Navigate to="/" replace /> },
       { path: '/flujos', element: <FlowListView /> },
       { path: '/flujos/:id', element: <FlowEditor /> },
-      { path: '/dashboard', element: <DashboardView /> },
       { path: '/scripts', element: <ScriptsView /> },
       { path: '/bases', element: <DatabaseView /> },
       { path: '/programacion', element: <ScheduleView /> },

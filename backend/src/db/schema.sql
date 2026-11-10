@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS schedules (
   name TEXT,
   cron_expression TEXT NOT NULL,
   next_run_at TEXT,
+  last_missed_at TEXT,
   is_active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))

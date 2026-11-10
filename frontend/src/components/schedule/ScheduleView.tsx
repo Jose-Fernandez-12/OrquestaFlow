@@ -33,6 +33,9 @@ import { Card } from '../ui/card';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
 import cronstrue from 'cronstrue/i18n';
+import { parseDbDate } from '../scripts/scriptDisplay';
+
+const HISTORY_STATUS_LABEL: Record<string, string> = { completed: 'Completada', error: 'Falló', cancelled: 'Cancelada', running: 'En ejecución' };
 
 export function ScheduleView() {
   const dispatch = useAppDispatch();
@@ -752,13 +755,15 @@ export function ScheduleView() {
                             <CheckCircle2 size={16} className="text-success" />
                           ) : log.status === 'error' ? (
                             <AlertCircle size={16} className="text-danger" />
+                          ) : log.status === 'cancelled' ? (
+                            <X size={16} className="text-muted" />
                           ) : (
                             <Loader2 size={16} className="text-accent animate-spin" />
                           )}
-                          <span className="font-medium capitalize">{log.status}</span>
+                          <span className="font-medium">{HISTORY_STATUS_LABEL[log.status] ?? log.status}</span>
                         </div>
                         <span className="text-xs text-muted">
-                          {format(new Date(log.started_at), 'dd MMM yyyy, HH:mm:ss')}
+                          {format(parseDbDate(log.started_at) ?? new Date(log.started_at), 'dd MMM yyyy, HH:mm:ss')}
                         </span>
                       </div>
                       
