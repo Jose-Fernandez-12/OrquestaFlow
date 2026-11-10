@@ -8,6 +8,7 @@
  */
 
 import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes, getWaitDependencies, WAIT_NODE_TYPE } from './graph.js';
+import { credentialSummary } from './credentials.js';
 import { PYTHON_RUNTIME } from './python/runtime.js';
 import { RUN_SCRIPT_NODE_TYPE, splitArgs } from './scriptNode.js';
 import { envKey, pyCall, pyComment, pyIdentifier, pyLiteral, pyStr, slugify, type PyArg } from './python/pyCode.js';
@@ -376,6 +377,21 @@ class Generator {
       case 'aiChatCompletion': return this.aiBody(node);
       case 'scraping': return this.scrapingBody(node);
       case RUN_SCRIPT_NODE_TYPE: return this.runScriptBody(node);
+      case 'runFlow': {
+        this.use('log');
+        const targetId = String(node.data?.targetFlowId || '').trim();
+        const targetName = String(node.data?.targetFlowName || targetId || 'subflujo');
+        const rawParams = Array.isArray(node.data?.flowParams) ? node.data.flowParams : [];
+        const paramPairs = rawParams
+          .filter((p: any) => p && typeof p.key === 'string' && p.key.trim())
+          .map((p: any) => `${pyStr(p.key.trim())}: ctx.resolve(${pyStr(String(p.value ?? ''))})`);
+        return [
+          `# Subflujo: ${pyComment(targetName)} (${pyComment(targetId || 'sin asignar')})`,
+          `params = {${paramPairs.join(', ')}}`,
+          `log.info(${pyStr(`Ejecutar subflujo '${targetName}'`)})`,
+          `return {"data": None, "params": params, "flowId": ${pyStr(targetId)}, "flowName": ${pyStr(targetName)}}`,
+        ];
+      }
       default:
         this.use('log');
         return [
@@ -428,6 +444,21 @@ class Generator {
       const user = pyStr(String(data.authUsername || ''));
       const password = this.secretExpr(data.authPassword, `HTTP_PASSWORD_${key}`, `Contraseña Basic Auth de '${this.label(node)}'`) || '""';
       args.push(['basic_auth', `(${user}, ${password})`]);
+    } else if (data.authType === 'credential') {
+      // The stored secret is never exported: the script reads it from the environment
+      const credential = credentialSummary(data.credentialId);
+      const name = envKey(credential?.name || this.label(node));
+      const about = `credencial «${credential?.name || 'eliminada'}» de '${this.label(node)}'`;
+      if (credential?.type === 'basic') {
+        const password = this.secretExpr('-', `HTTP_PASSWORD_${name}`, `Contraseña de la ${about}`) || '""';
+        args.push(['basic_auth', `(${pyStr(credential.username || '')}, ${password})`]);
+      } else if (credential?.type === 'api_key') {
+        const value = this.secretExpr('-', `HTTP_API_KEY_${name}`, `Clave de la ${about}`);
+        if (value) args.push(['extra_headers', `{${pyStr(credential.header_name || 'X-API-Key')}: ${value}}`]);
+      } else {
+        const token = this.secretExpr('-', `HTTP_TOKEN_${name}`, `Token de la ${about}`);
+        if (token) args.push(['bearer_token', token]);
+      }
     }
     if (data.extractPath) args.push(['extract', pyStr(data.extractPath)]);
     const timeout = readSeconds(data.timeout) ?? this.ctx.settings?.httpTimeoutSeconds ?? 30;

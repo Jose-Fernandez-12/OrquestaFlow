@@ -13,6 +13,8 @@ export interface SystemSettings {
   experimental_nodes_enabled: boolean;
   /** Python minor version for the managed environment, e.g. "3.12" */
   python_version: string;
+  /** Days of execution history to keep; 0 keeps everything */
+  execution_log_retention_days: number;
 }
 
 export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -26,6 +28,7 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   user_role_label: 'Administrador',
   experimental_nodes_enabled: false,
   python_version: '3.12',
+  execution_log_retention_days: 90,
 };
 
 // Safe load from localStorage if available

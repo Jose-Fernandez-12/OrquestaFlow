@@ -12,7 +12,11 @@ export interface Connection {
   port: number;
   driver: string;
   username?: string | null;
+  /** The API never sends the password, only whether one is saved */
+  has_password?: boolean;
   env_credential_key: string | null;
+  /** Stored credential that supplies the user and password, when one is chosen */
+  credential_id?: string | null;
   is_active: number;
   last_tested_at: string | null;
   created_at: string;

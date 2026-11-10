@@ -1,6 +1,7 @@
 import initSqlJs from 'sql.js';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'fs';
 import { join } from 'path';
+import { encryptSecret } from '../engine/secrets.js';
 
 // ORQUESTA_DB_PATH=':memory:' keeps the database in memory only (used by the automated tests)
 const DB_PATH = process.env.ORQUESTA_DB_PATH || join(process.cwd(), 'data', 'orquesta.sqlite');
@@ -47,7 +48,7 @@ class SqlJsWrapper {
         const stmt = this.db.prepare(sql);
         try {
           stmt.run(params);
-          saveToDisk(); // Auto-save on writes
+          scheduleSave();
           return { changes: 1 }; // Mock
         } finally {
           stmt.free();
@@ -58,12 +59,12 @@ class SqlJsWrapper {
 
   exec(sql: string) {
     this.db.run(sql);
-    saveToDisk();
+    scheduleSave();
   }
 
   close() {
     if (this.db) {
-      saveToDisk();
+      flushToDisk();
       this.db.close();
     }
   }
@@ -133,6 +134,17 @@ export async function initDb(): Promise<void> {
   } catch (e: any) {
     // Ignore if exists
   }
+  try {
+    // A connection can take its user and password from the credential store (engine/credentials.ts)
+    wrappedDb.exec('ALTER TABLE connections ADD COLUMN credential_id TEXT;');
+    console.log('[DB] Migrated: added credential_id to connections');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+
+  encryptStoredPasswords(wrappedDb);
+  compactQueryResults(wrappedDb);
+
   try {
     // Scheduled time of a run that did not happen because the server was off: see engine/scheduler.ts
     wrappedDb.exec('ALTER TABLE schedules ADD COLUMN last_missed_at TEXT;');
@@ -229,14 +241,71 @@ function migrateExecutionLogs(db: SqlJsWrapper) {
   db.exec("UPDATE execution_logs SET status = 'error', error_message = COALESCE(error_message, 'Interrumpido: el servidor se reinició durante la ejecución'), completed_at = COALESCE(completed_at, datetime('now')) WHERE status = 'running'");
 }
 
-function saveToDisk() {
+// Passwords saved before they were encrypted (see engine/secrets.ts)
+function encryptStoredPasswords(db: SqlJsWrapper) {
+  const rows = db.prepare("SELECT id, password FROM connections WHERE password IS NOT NULL AND password != '' AND password NOT LIKE 'enc:v1:%'").all() as Array<{ id: string; password: string }>;
+  for (const row of rows) {
+    db.prepare('UPDATE connections SET password = ? WHERE id = ?').run(encryptSecret(row.password), row.id);
+  }
+  if (rows.length > 0) console.log(`[DB] Migrated: encrypted ${rows.length} connection password(s)`);
+}
+
+// Query runs used to keep every returned row in the history; now only their count is kept
+function compactQueryResults(db: SqlJsWrapper) {
+  const count = (db.prepare("SELECT COUNT(*) AS count FROM execution_logs WHERE target_type = 'query' AND result LIKE '[%'").get() as { count: number }).count;
+  if (count === 0) return;
+  db.exec(`
+    UPDATE execution_logs
+    SET result = CASE WHEN json_valid(result) THEN json_object('rowCount', json_array_length(result)) ELSE NULL END
+    WHERE target_type = 'query' AND result LIKE '[%'
+  `);
+  db.exec('VACUUM');
+  console.log(`[DB] Migrated: removed the stored rows of ${count} query run(s)`);
+}
+
+/*
+ * The whole database lives in memory (sql.js) and is written to disk as one file. Writing it after
+ * every statement made each save cost a full copy of the file, so writes are grouped: the first
+ * change schedules one save a moment later, and closing the database (or the process) saves at once.
+ * The file is written next to the real one and then renamed over it, so a crash in the middle of a
+ * save leaves the previous complete file instead of a truncated one.
+ */
+const SAVE_DELAY_MS = 250;
+let saveTimer: NodeJS.Timeout | null = null;
+let unsavedChanges = false;
+
+function scheduleSave() {
   if (IN_MEMORY) return;
-  if (sqlDb) {
-    const data = sqlDb.export();
-    const buffer = Buffer.from(data);
-    writeFileSync(DB_PATH, buffer);
+  unsavedChanges = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    flushToDisk();
+  }, SAVE_DELAY_MS);
+  // The exit handler below saves anything still pending, so the timer must not keep the process alive
+  saveTimer.unref();
+}
+
+/** Writes pending changes to disk now */
+export function flushToDisk(): void {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  if (IN_MEMORY || !sqlDb || !unsavedChanges) return;
+  unsavedChanges = false;
+  const tmpPath = `${DB_PATH}.tmp`;
+  try {
+    writeFileSync(tmpPath, Buffer.from(sqlDb.export()));
+    renameSync(tmpPath, DB_PATH);
+  } catch (err) {
+    // Try again with the next change; the previous file on disk is still complete
+    unsavedChanges = true;
+    console.error('[DB] Could not save the database to disk:', err);
   }
 }
+
+process.on('exit', () => flushToDisk());
 
 function seedDemoData(db: SqlJsWrapper): void {
   const { v4: uuid } = require('uuid');

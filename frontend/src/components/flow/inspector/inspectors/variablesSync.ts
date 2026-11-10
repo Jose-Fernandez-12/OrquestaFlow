@@ -6,6 +6,7 @@ export interface FlowVariable {
   type: 'string' | 'number' | 'boolean' | 'date' | 'json';
   value: any;
   description?: string;
+  promptOnRun?: boolean;
 }
 
 export function variablesToJson(variables: FlowVariable[]): string {
@@ -55,6 +56,7 @@ export function variablesFromJson(text: string, previous: FlowVariable[] = []): 
       type,
       value: typeof val === 'object' && val !== null ? JSON.stringify(val) : val,
       description: prev?.description || '',
+      ...(prev?.promptOnRun ? { promptOnRun: true } : {}),
     };
   });
 }

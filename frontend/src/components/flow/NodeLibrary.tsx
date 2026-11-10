@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Play,
   Globe,
@@ -19,7 +19,9 @@ import {
   Bot,
   FlaskConical,
   SlidersHorizontal,
-  StickyNote
+  StickyNote,
+  Search,
+  Workflow
 } from 'lucide-react';
 import { useAppSelector } from '../../store/hooks';
 
@@ -51,6 +53,7 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
       { type: 'conditionalBranch', label: 'Bifurcación', icon: GitFork, desc: 'Condiciones Sí/No o Switch' },
       { type: 'jsonTransform', label: 'Transformar datos', icon: Braces, desc: 'Mapear campos o JavaScript' },
       { type: 'runScript', label: 'Ejecutar script', icon: SquareTerminal, desc: 'Script de la sección Scripts con argumentos' },
+      { type: 'runFlow', label: 'Ejecutar flujo', icon: Workflow, desc: 'Lanzar otro flujo como subflujo con parámetros' },
       { type: 'forEach', label: 'Para cada elemento', icon: Repeat, desc: 'Inicio de bucle iterativo' },
       { type: 'forEachEnd', label: 'Fin de bucle', icon: Square, desc: 'Cierre del bucle forEach' },
       { type: 'timer', label: 'Temporizador', icon: Clock, desc: 'Pausar ciclo por tiempo' },
@@ -83,8 +86,16 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
   },
 ];
 
-export function NodeLibrary() {
+interface NodeLibraryProps {
+  /** Adds the node to the middle of the canvas (click or Enter); dragging places it where it is dropped */
+  onAdd?: (type: string, label: string) => void;
+}
+
+const normalize = (text: string) => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+export function NodeLibrary({ onAdd }: NodeLibraryProps) {
   const experimentalEnabled = useAppSelector(state => state.settings.settings.experimental_nodes_enabled);
+  const [query, setQuery] = useState('');
 
   const onDragStart = (event: React.DragEvent, nodeType: string, label: string) => {
     event.dataTransfer.setData('application/reactflow', nodeType);
@@ -92,11 +103,36 @@ export function NodeLibrary() {
     event.dataTransfer.effectAllowed = 'move';
   };
 
+  const needle = normalize(query.trim());
+  const groups = NODE_GROUPS
+    .filter(group => !group.experimental || experimentalEnabled)
+    .map(group => ({
+      ...group,
+      nodes: needle ? group.nodes.filter(node => normalize(`${node.label} ${node.desc} ${node.type}`).includes(needle)) : group.nodes,
+    }))
+    .filter(group => group.nodes.length > 0);
+
   return (
     <div className="w-[260px] bg-surface border-r border-border flex flex-col h-full z-10 shrink-0">
-      <div className="p-4 border-b border-border font-medium">Librería de nodos</div>
+      <div className="p-4 pb-3 border-b border-border space-y-3">
+        <div className="font-medium">Librería de nodos</div>
+        <div className="relative">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar nodo…"
+            aria-label="Buscar en la librería de nodos"
+            className="w-full h-8 pl-8 pr-2 text-xs bg-bg border border-border rounded-sm focus:outline-none focus:border-accent text-fg"
+          />
+        </div>
+      </div>
       <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-4">
-        {NODE_GROUPS.filter(group => !group.experimental || experimentalEnabled).map(group => (
+        {groups.length === 0 && (
+          <p className="text-xs text-muted text-center py-6">Ningún nodo coincide con «{query.trim()}».</p>
+        )}
+        {groups.map(group => (
           <div key={group.id} className="flex flex-col gap-2">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-muted flex items-center gap-1.5">
               {group.experimental && <FlaskConical size={11} className="text-fuchsia-600" />}
@@ -108,11 +144,14 @@ export function NodeLibrary() {
               )}
             </div>
             {group.nodes.map(node => (
-              <div
+              <button
                 key={node.type}
-                className="p-3 border border-border rounded-sm flex items-center gap-3 cursor-grab hover:border-muted hover:bg-bg transition-colors active:cursor-grabbing"
+                type="button"
+                className="p-3 border border-border rounded-sm flex items-center gap-3 text-left cursor-grab hover:border-muted hover:bg-bg transition-colors active:cursor-grabbing"
                 draggable
                 onDragStart={(e) => onDragStart(e, node.type, node.label)}
+                onClick={() => onAdd?.(node.type, node.label)}
+                title="Arrastra al lienzo, o haz clic para añadirlo en el centro"
               >
                 <div className="p-2 bg-bg rounded-sm text-fg">
                   <node.icon size={16} />
@@ -121,11 +160,11 @@ export function NodeLibrary() {
                   <div className="text-sm font-medium">{node.label}</div>
                   <div className="text-xs text-muted truncate">{node.desc}</div>
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         ))}
-        {!experimentalEnabled && (
+        {!experimentalEnabled && !needle && (
           <p className="text-[10px] text-muted leading-relaxed border border-dashed border-border rounded p-2">
             Hay nodos experimentales (Webhook, OAuth2, IA) disponibles. Actívalos en <b>Configuración → Experimental</b>.
           </p>

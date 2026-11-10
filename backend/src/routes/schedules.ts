@@ -102,6 +102,15 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     return { data: { deleted: true } };
   });
 
+  // Run the schedule's flow or script right now, without changing its timing
+  app.post<{ Params: { id: string } }>('/:id/run', async (request, reply) => {
+    const { runScheduleNow } = await import('../engine/scheduler.js');
+    const outcome = runScheduleNow(request.params.id);
+    if (outcome === 'not_found') return reply.status(404).send({ error: 'Schedule not found' });
+    if (outcome === 'running') return reply.status(409).send({ error: 'Esta programación ya se está ejecutando.' });
+    return { data: { started: true } };
+  });
+
   // Get schedule logs
   app.get<{ Params: { id: string } }>('/:id/logs', async (request, reply) => {
     const db = getDb();

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import type { Node, Edge } from '@xyflow/react';
 import { validateFlow } from './flowValidation';
+import { getFlowParameters, hasPromptParameters } from '../flowParameters';
+import { FLOW_TEMPLATES } from '../flowTemplates';
 
 const n = (id: string, type: string, data: Record<string, unknown> = {}): Node =>
   ({ id, type, position: { x: 0, y: 0 }, data: { label: id, ...data } }) as Node;
@@ -156,5 +158,57 @@ describe('validateFlow · Esperar nodo', () => {
     ];
     const edges = [e('start', 'a'), e('a', 'loop'), e('loop', 'dentro'), e('dentro', 'fin'), e('a', 'w')];
     expect(messagesFor(validateFlow(nodes, edges), 'w')).toEqual([expect.stringMatching(/^warning: Esperar a "dentro": Dentro de un bucle/)]);
+  });
+});
+
+describe('validateFlow · Ejecutar flujo (runFlow), parámetros y plantillas', () => {
+  it('flags a runFlow node without targetFlowId as an error and accepts one with targetFlowId', () => {
+    const nodes = [
+      n('start', 'start'),
+      n('subSin', 'runFlow', { targetFlowId: '' }),
+      n('subOk', 'runFlow', { targetFlowId: 'flow_123' }),
+    ];
+    const issues = validateFlow(nodes, [e('start', 'subSin'), e('subSin', 'subOk')]);
+    expect(messagesFor(issues, 'subSin')).toEqual(['error: No hay un flujo de destino seleccionado.']);
+    expect(messagesFor(issues, 'subOk')).toEqual([]);
+  });
+
+  it('extracts flow parameters and promptOnRun flags from variables nodes', () => {
+    const nodes = [
+      n('start', 'start'),
+      n('v1', 'variables', {
+        label: 'Config',
+        variables: [
+          { key: 'fechaCorte', type: 'date', value: '$today_ymd', description: 'Fecha corte', promptOnRun: true },
+          { key: 'ambiente', type: 'string', value: 'prod', promptOnRun: false },
+        ],
+      }),
+    ];
+    const params = getFlowParameters(nodes);
+    expect(params).toHaveLength(2);
+    expect(params[0]).toMatchObject({ key: 'fechaCorte', type: 'date', promptOnRun: true, nodeLabel: 'Config' });
+    expect(hasPromptParameters(nodes)).toBe(true);
+  });
+
+  it('builds valid definitions with unique node IDs for all flow templates', () => {
+    expect(FLOW_TEMPLATES.length).toBeGreaterThanOrEqual(5);
+    for (const tpl of FLOW_TEMPLATES) {
+      const def1 = tpl.buildDefinition();
+      const def2 = tpl.buildDefinition();
+      expect(def1.nodes.length).toBeGreaterThan(0);
+      expect(def1.nodes[0].type).toBe('start');
+      // Each instantiation generates fresh IDs
+      expect(def1.nodes[0].id).not.toBe(def2.nodes[0].id);
+    }
+  });
+
+  it('templates that need no user setup pass validation without errors', () => {
+    // SQL needs a saved query and the orchestrator a target flow: those errors are expected
+    const needsSetup = new Set(['sql-conditional-export', 'subflow-orchestrator']);
+    for (const tpl of FLOW_TEMPLATES.filter(t => !needsSetup.has(t.id))) {
+      const { nodes, edges } = tpl.buildDefinition();
+      const errors = validateFlow(nodes as Node[], edges as Edge[]).filter(i => i.level === 'error');
+      expect(errors, tpl.id).toEqual([]);
+    }
   });
 });

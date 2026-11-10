@@ -4,13 +4,12 @@ import {
   AlertCircle, AlertTriangle, Calendar, CalendarX, CheckCircle2, Circle, CircleDashed, Clock, Code2, Database, Download,
   FileCode2, GitMerge, Loader2, Lock, Plus, RefreshCw, Square,
 } from 'lucide-react';
-import { io } from 'socket.io-client';
 import cronstrue from 'cronstrue/i18n';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchFlows, stopFlow } from '../../store/flowSlice';
 import { fetchScripts, type Script } from '../../store/scriptSlice';
 import { showToast } from '../../store/uiSlice';
-import { SOCKET_URL, getApiUrl, getFileUrl } from '../../lib/api';
+import { getApiUrl, getFileUrl, createSocket } from '../../lib/api';
 import { parseDbDate, relativeTime } from '../scripts/scriptDisplay';
 import { envRequest, type PythonEnvState } from '../scripts/pythonEnvApi';
 import { ScriptConsoleModal } from '../scripts/ScriptConsoleModal';
@@ -75,7 +74,7 @@ function useDashboardSummary(range: DashboardRange, onlyFailed: boolean) {
     const run = () => { if (!document.hidden) void refreshRef.current(); };
     const interval = setInterval(run, REFRESH_MS);
     document.addEventListener('visibilitychange', run);
-    const socket = io(SOCKET_URL);
+    const socket = createSocket();
     for (const event of ['flow-completed', 'flow-failed', 'flow-stopped', 'script-exit']) socket.on(event, run);
     return () => {
       clearInterval(interval);

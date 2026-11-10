@@ -202,15 +202,20 @@ export const importFlowBundle = createAsyncThunk('flows/importBundle', async (pa
   return data as ImportFlowResponse;
 });
 
-export const executeFlow = createAsyncThunk('flows/execute', async ({ id, mode = 'normal' }: { id: string; mode?: 'normal' | 'debug' }) => {
-  const res = await fetch(`${API_URL}/flows/${id}/execute`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode })
-  });
-  const data = await res.json();
-  return data.data;
-});
+export const executeFlow = createAsyncThunk(
+  'flows/execute',
+  async ({ id, mode = 'normal', params }: { id: string; mode?: 'normal' | 'debug'; params?: Record<string, any> }) => {
+    const res = await fetch(`${API_URL}/flows/${id}/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, ...(params ? { params } : {}) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    // Without this a failed run resolved with `undefined` and callers reported it as a success
+    if (!res.ok) throw new Error(data.message || data.error || `Error ${res.status}`);
+    return data.data;
+  }
+);
 
 export const resumeDebugNode = createAsyncThunk('flows/resumeDebug', async ({ id, nodeId, action }: { id: string, nodeId?: string, action: 'step_over' | 'continue' | 'continue_node' | 'step_request' }, { rejectWithValue }) => {
   const res = await fetch(`${API_URL}/flows/${id}/debug/resume`, {

@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
-import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 import {
   X, Play, Square, Send, Loader2, CheckCircle2, AlertCircle, Code, PanelLeftClose, PanelLeftOpen, Eraser, CornerDownLeft,
@@ -9,7 +8,7 @@ import {
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/utils';
-import { getApiUrl, SOCKET_URL } from '../../lib/api';
+import { getApiUrl, createSocket } from '../../lib/api';
 import type { Script, ScriptEnvView } from '../../store/scriptSlice';
 import { parseArgs } from './parseArgs';
 import { ConsoleOutput, type ConsoleStream } from '../ui/ConsoleOutput';
@@ -145,7 +144,7 @@ export function ScriptConsoleModal({ script, autoRun = false, initialTab = 'code
 
   // Socket first, so nothing printed between the snapshot and the subscription is lost
   useEffect(() => {
-    const socket = io(SOCKET_URL);
+    const socket = createSocket();
     socket.on('script-output', (data: Chunk & { runId: string }) => {
       if (data.runId !== runIdRef.current) {
         earlyEventsRef.current?.push(data);

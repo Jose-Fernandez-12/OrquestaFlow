@@ -1,5 +1,4 @@
-import { io } from 'socket.io-client';
-import { getApiUrl, SOCKET_URL } from '../../lib/api';
+import { getApiUrl, createSocket } from '../../lib/api';
 import type { ConsoleChunk } from '../ui/ConsoleOutput';
 
 export interface EnvJob {
@@ -46,7 +45,7 @@ export const envRequest = <T = any>(path: string, method = 'GET', body?: unknown
  */
 export function followEnvJob(start: () => Promise<EnvJob>, onOutput: (chunks: ConsoleChunk[]) => void): Promise<EnvJob> {
   return new Promise((resolve, reject) => {
-    const socket = io(SOCKET_URL);
+    const socket = createSocket();
     let jobId: string | null = null;
     let chunks: Array<ConsoleChunk & { ts: number }> = [];
     const early: Array<ConsoleChunk & { ts: number; jobId: string }> = [];

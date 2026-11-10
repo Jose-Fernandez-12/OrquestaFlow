@@ -1,6 +1,9 @@
 import mssql from 'mssql';
+import { createHash } from 'crypto';
 import { getDb } from '../db/database.js';
 import dotenv from 'dotenv';
+import { decryptSecret } from './secrets.js';
+import { credentialLogin } from './credentials.js';
 
 dotenv.config();
 
@@ -21,7 +24,7 @@ export function resolveMssqlCredentials(
   const pick = (...names: string[]) => names.map(n => env[n]).find(v => v !== undefined && v !== '');
 
   const user = connection.username || pick(`${key}_USER`, `DB_USER_${key}`, 'DB_USER_DEFAULT');
-  const password = connection.password || pick(`${key}_PASSWORD`, `DB_PASSWORD_${key}`, 'DB_PASSWORD_DEFAULT');
+  const password = decryptSecret(connection.password) || pick(`${key}_PASSWORD`, `DB_PASSWORD_${key}`, 'DB_PASSWORD_DEFAULT');
 
   if (!user || !password) {
     const missing = [!user && 'usuario', !password && 'contraseña'].filter(Boolean).join(' y ');
@@ -33,17 +36,18 @@ export function resolveMssqlCredentials(
   return { user, password };
 }
 
-export type CredentialSource = 'connection' | 'env' | 'missing';
+export type CredentialSource = 'credential' | 'connection' | 'env' | 'missing';
 
 /**
  * Where a SQL Server connection takes its credentials from, without revealing them: saved in the
  * connection, from backend/.env (and which variables), or missing. Shown in Configuración.
  */
 export function describeMssqlCredentials(
-  connection: { username?: string; password?: string; env_credential_key?: string | null },
+  connection: { username?: string; password?: string; env_credential_key?: string | null; credential_id?: string | null },
   env: Record<string, string | undefined> = process.env
 ): { source: CredentialSource; key: string; variables: string[] } {
   const key = (connection.env_credential_key || 'SQLSERVER').trim();
+  if (connection.credential_id) return { source: 'credential', key, variables: [] };
   const has = (name: string) => env[name] !== undefined && env[name] !== '';
   // Same order resolveMssqlCredentials uses
   const userVar = [`${key}_USER`, `DB_USER_${key}`, 'DB_USER_DEFAULT'].find(has);
@@ -76,7 +80,11 @@ export function readMssqlTimeouts(): { connectionMs: number; requestMs: number }
 
 // Create connection config from SQLite database entry
 function buildMssqlConfig(connection: any, connectionTimeoutMs: number) {
-  const { user, password } = resolveMssqlCredentials(connection);
+  // The stored credential, when the connection points at one, replaces its own user and password
+  const login = connection.credential_id
+    ? credentialLogin(connection.credential_id, `La conexión «${connection.name || 'sin nombre'}»`)
+    : null;
+  const { user, password } = resolveMssqlCredentials(login ? { ...connection, ...login } : connection);
 
   return {
     user,
@@ -101,7 +109,9 @@ function buildMssqlConfig(connection: any, connectionTimeoutMs: number) {
 const poolCache = new Map<string, { pool: Promise<mssql.ConnectionPool>; connectionTimeout: number }>();
 
 async function getOrCreatePool(config: any): Promise<mssql.ConnectionPool> {
-  const cacheKey = `${config.server}:${config.port || 1433}:${config.database}:${config.user}`;
+  // The password is part of the key (as a fingerprint) so a changed password opens a new pool
+  const fingerprint = createHash('sha256').update(String(config.password)).digest('hex').slice(0, 12);
+  const cacheKey = `${config.server}:${config.port || 1433}:${config.database}:${config.user}:${fingerprint}`;
   const cached = poolCache.get(cacheKey);
 
   if (cached && cached.connectionTimeout === config.connectionTimeout) {

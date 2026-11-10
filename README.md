@@ -150,6 +150,12 @@ El proyecto estara disponible en:
 - **Frontend (Aplicacion Web):** [http://localhost:5173](http://localhost:5173)
 - **Backend (API Fastify):** [http://localhost:3001](http://localhost:3001) (Health check: `/api/health`)
 
+### 3b. Acceso, claves y datos
+- **Desde este equipo** OrquestaFlow abre sin pedir nada. **Desde otro equipo de la red** (`http://<ip-del-servidor>:5173`) pide una vez la clave de acceso, que se ve en *Configuracion → General* del equipo servidor y se guarda en `backend/data/access-token`. Para fijarla tu, define `ORQUESTA_ACCESS_TOKEN` en `backend/.env`.
+- La API solo atiende paginas servidas con los nombres de este equipo (localhost, su nombre o sus IP). Si entras con otro nombre (un alias DNS o un proxy), añadelo a `ORQUESTA_ALLOWED_HOSTS` (separados por comas).
+- Las contraseñas de las conexiones SQL Server se guardan cifradas con la clave de `backend/data/secret.key` (o `ORQUESTA_SECRET_KEY`). **Una copia de seguridad de `orquesta.sqlite` debe incluir `secret.key`**: sin ella las contraseñas guardadas no se pueden leer y hay que volver a escribirlas.
+- El historial de ejecuciones se limpia solo segun *Configuracion → General → Historial de ejecuciones* (90 dias por defecto); la ultima ejecucion de cada flujo, script y consulta se conserva siempre. De las consultas se guarda el numero de filas, no las filas.
+
 ### 4. Pruebas automatizadas
 Las pruebas usan [Vitest](https://vitest.dev). Las del motor corren contra una base SQLite en memoria (`ORQUESTA_DB_PATH=:memory:`), nunca contra `backend/data/orquesta.sqlite`.
 ```bash
