@@ -210,7 +210,6 @@ export function HttpInspector({
                         if (n.id === selectedNodeId) {
                           return {
                             ...n,
-                            selected: true,
                             data: {
                               ...n.data,
                               endpoint: baseUrl,
@@ -300,7 +299,7 @@ export function HttpInspector({
                   <Clock size={13} className="text-accent" />
                   Tiempo de espera (Timeout)
                 </label>
-                <span className="text-[11px] text-muted">segundos</span>
+                <span className="text-[11px] text-muted shrink-0">segundos</span>
               </div>
               <Input
                 type="number"
@@ -675,6 +674,7 @@ export function HttpInspector({
                 node={node}
                 customLabel="Enviar petición y elegir propiedad"
                 updateNodeData={updateNodeData}
+                className="w-full max-w-none min-h-[32px] h-auto py-1.5 px-2.5 text-xs justify-center"
               />
             </div>
 
@@ -686,15 +686,19 @@ export function HttpInspector({
                 {upstreamDataNodes.map(upNode => (
                   <div
                     key={upNode.id}
-                    className="p-2.5 bg-bg border border-border rounded flex items-center justify-between"
+                    className="p-2.5 bg-bg border border-border rounded flex items-center justify-between gap-2"
                   >
-                    <span className="text-xs font-medium truncate">
+                    <span
+                      className="flex-1 min-w-0 truncate text-xs font-medium"
+                      title={(upNode.data?.label as string) || upNode.type}
+                    >
                       {(upNode.data?.label as string) || upNode.type}
                     </span>
                     <JsonSelectorModal
                       node={upNode}
                       customLabel="Ver JSON"
                       updateNodeData={updateNodeData}
+                      className="w-auto shrink-0"
                     />
                   </div>
                 ))}

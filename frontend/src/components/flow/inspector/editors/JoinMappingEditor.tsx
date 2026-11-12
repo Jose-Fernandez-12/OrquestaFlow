@@ -104,6 +104,8 @@ export function getNodeColumns(
   return Array.from(keys);
 }
 
+const EMPTY_RESULTS: Record<string, any> = {};
+
 export function JoinMappingEditor({
   joins,
   onChange,
@@ -116,7 +118,7 @@ export function JoinMappingEditor({
   const [manualLocal, setManualLocal] = useState<Record<number, boolean>>({});
   const [manualForeign, setManualForeign] = useState<Record<number, boolean>>({});
 
-  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults || {});
+  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults) || EMPTY_RESULTS;
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
   const queries = useAppSelector(state => state.queries.queries);
 

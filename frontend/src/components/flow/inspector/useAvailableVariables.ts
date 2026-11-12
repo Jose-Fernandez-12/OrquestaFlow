@@ -96,8 +96,10 @@ function inferResultFromConfig(node: Node): any {
   return undefined;
 }
 
+const EMPTY_OBJECT: Record<string, any> = {};
+
 export function useAvailableVariables(node: Node, nodes: Node[], edges: Edge[]): VariableGroup[] {
-  const nodeResults = useAppSelector(state => state.flows.nodeResults || {});
+  const nodeResults = useAppSelector(state => state.flows.nodeResults) || EMPTY_OBJECT;
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
 
   const parentForEachNode = useMemo(() => findParentForEachNode(node, edges, nodes), [node, edges, nodes]);

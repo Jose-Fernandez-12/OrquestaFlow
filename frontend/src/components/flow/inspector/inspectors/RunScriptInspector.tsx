@@ -35,11 +35,14 @@ function firstRow(value: any): any {
   return value;
 }
 
+const EMPTY_SCRIPTS: any[] = [];
+const EMPTY_RESULTS: Record<string, any> = {};
+
 export function RunScriptInspector({ node, nodes, edges, updateNodeData }: RunScriptInspectorProps) {
   const dispatch = useAppDispatch();
-  const scripts = useAppSelector(state => state.scripts.scripts) || [];
+  const scripts = useAppSelector(state => state.scripts.scripts) || EMPTY_SCRIPTS;
   const loading = useAppSelector(state => state.scripts.loading);
-  const nodeResults = useAppSelector(state => state.flows.nodeResults || {});
+  const nodeResults = useAppSelector(state => state.flows.nodeResults) || EMPTY_RESULTS;
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
   const data = (node.data || {}) as Record<string, any>;
   const scriptRun = useAppSelector(state => state.flows.nodeScriptRuns?.[node.id]);

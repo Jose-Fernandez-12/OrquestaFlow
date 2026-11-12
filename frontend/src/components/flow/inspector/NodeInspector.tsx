@@ -118,7 +118,7 @@ export function NodeInspector({
       setNodes(nds =>
         nds.map(n => {
           if (n.id === selectedNodeId) {
-            return { ...n, selected: true, data: { ...n.data, [key]: value } };
+            return { ...n, data: { ...n.data, [key]: value } };
           }
           return n;
         })
@@ -334,7 +334,7 @@ export function NodeInspector({
       )}
 
       {/* Main Content Area */}
-      <div className="p-5 flex-1 overflow-y-auto flex flex-col gap-5">
+      <div className="p-5 flex-1 overflow-y-auto flex flex-col gap-5 [&>*]:shrink-0">
         <NodeIssuesBanner issues={nodeIssues} />
 
         {/* Compact Loop Quick-Access Bar (if inside forEach) */}

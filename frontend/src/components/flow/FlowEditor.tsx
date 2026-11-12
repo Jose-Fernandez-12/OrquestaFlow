@@ -168,6 +168,24 @@ function FlowCanvas() {
     selectedNodeIdRef.current = selectedNodeId;
   }, [selectedNodeId]);
 
+  const selectSingleNode = useCallback((nodeId: string | null) => {
+    if (selectedNodeIdRef.current === nodeId) return;
+    selectedNodeIdRef.current = nodeId;
+    setNodes(nds => {
+      let hasChanges = false;
+      const updated = nds.map(n => {
+        const shouldBeSelected = nodeId !== null && n.id === nodeId;
+        if (!!n.selected !== shouldBeSelected) {
+          hasChanges = true;
+          return { ...n, selected: shouldBeSelected };
+        }
+        return n;
+      });
+      return hasChanges ? updated : nds;
+    });
+    dispatch(selectNode(nodeId));
+  }, [dispatch, setNodes]);
+
   const isDebugModalOpen = useAppSelector(state => state.flows.isDebugModalOpen);
   const allNodePreviews = useAppSelector(state => state.flows.debugPreviewsByNode);
   const globalRequestPreview = useAppSelector(state => state.flows.debugRequestPreview);
@@ -179,7 +197,7 @@ function FlowCanvas() {
 
   useEffect(() => {
     if (activeDebugNodeId) {
-      setPersistedDebugNodeId(activeDebugNodeId);
+      setPersistedDebugNodeId(prev => (prev !== activeDebugNodeId ? activeDebugNodeId : prev));
     }
   }, [activeDebugNodeId]);
 
@@ -192,6 +210,7 @@ function FlowCanvas() {
 
   // Keep React Flow nodes.selected in sync with Redux selectedNodeId without circular triggers
   useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
     setNodes(nds => {
       let hasChanges = false;
       const updated = nds.map(n => {
@@ -557,28 +576,40 @@ function FlowCanvas() {
     }));
   }, [isLocked, setEdges]);
 
-  // Load flow definition when currentFlow changes
+  // Load flow definition only when opening a different flow or on initial load
+  const loadedFlowIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (currentFlow && currentFlow.definition) {
-      try {
-        const def = JSON.parse(currentFlow.definition);
-        // Older saves stored the canvas selection; a flow always opens with nothing selected
-        setNodes((def.nodes || []).map((n: Node) => (n.selected || n.dragging ? { ...n, selected: false, dragging: false } : n)));
-        const loadedEdges = (def.edges || []).map((e: Edge) => ({
-          ...e,
-          markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
-        }));
-        setEdges(loadedEdges);
-        setSavedSignature(canvasSignature(def.nodes || [], loadedEdges));
-      } catch (e) {
-        console.error("Failed to parse flow definition", e);
-      }
-    } else {
+    if (!currentFlow) {
+      loadedFlowIdRef.current = null;
       setNodes([]);
       setEdges([]);
       setSavedSignature(canvasSignature([], []));
+      return;
     }
-  }, [currentFlow, setNodes, setEdges]);
+
+    if (loadedFlowIdRef.current !== currentFlow.id || nodes.length === 0) {
+      loadedFlowIdRef.current = currentFlow.id;
+      if (currentFlow.definition) {
+        try {
+          const def = JSON.parse(currentFlow.definition);
+          // Older saves stored the canvas selection; a flow always opens with nothing selected
+          setNodes((def.nodes || []).map((n: Node) => (n.selected || n.dragging ? { ...n, selected: false, dragging: false } : n)));
+          const loadedEdges = (def.edges || []).map((e: Edge) => ({
+            ...e,
+            markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
+          }));
+          setEdges(loadedEdges);
+          setSavedSignature(canvasSignature(def.nodes || [], loadedEdges));
+        } catch (e) {
+          console.error("Failed to parse flow definition", e);
+        }
+      } else {
+        setNodes([]);
+        setEdges([]);
+        setSavedSignature(canvasSignature([], []));
+      }
+    }
+  }, [currentFlow?.id, currentFlow?.definition, setNodes, setEdges, nodes.length]);
 
   const canvasHistory = useCanvasHistory({
     nodes,
@@ -603,9 +634,9 @@ function FlowCanvas() {
   const errorCount = issues.filter(i => i.level === 'error').length;
 
   const focusNode = useCallback((nodeId: string) => {
-    dispatch(selectNode(nodeId));
+    selectSingleNode(nodeId);
     reactFlowInstance?.fitView({ nodes: [{ id: nodeId }], duration: 300, maxZoom: 1.2 });
-  }, [dispatch, reactFlowInstance]);
+  }, [selectSingleNode, reactFlowInstance]);
 
   const onConnect = useCallback(
     (params: Connection | Edge) => {
@@ -666,24 +697,51 @@ function FlowCanvas() {
     const area = wrapper.getBoundingClientRect();
     const offset = (addedByClick.current++ % 6) * 28;
     const position = reactFlowInstance.screenToFlowPosition({ x: area.left + area.width / 2 - 100 + offset, y: area.top + area.height / 2 - 30 + offset });
-    const node = buildNode(type, label, position);
-    setNodes((nds) => nds.concat(node));
-    if (type !== 'note') dispatch(selectNode(node.id));
+    const shouldSelect = type !== 'note';
+    const node = { ...buildNode(type, label, position), selected: shouldSelect };
+    setNodes((nds) => nds.map(n => (shouldSelect && n.selected ? { ...n, selected: false } : n)).concat(node));
+    if (shouldSelect) {
+      selectedNodeIdRef.current = node.id;
+      dispatch(selectNode(node.id));
+    }
   }, [reactFlowInstance, setNodes, dispatch]);
+
+  const handleNodesChange = useCallback(
+    (changes: any[]) => {
+      if (isLocked) {
+        const allowed = changes.filter(c => c.type === 'select' || c.type === 'dimensions');
+        if (allowed.length > 0) onNodesChange(allowed);
+        return;
+      }
+      onNodesChange(changes);
+    },
+    [isLocked, onNodesChange]
+  );
 
   const onSelectionChange = useCallback(({ nodes: selNodes }: { nodes: Node[] }) => {
     if (selNodes.length === 1) {
       if (selNodes[0].id !== selectedNodeIdRef.current) {
+        selectedNodeIdRef.current = selNodes[0].id;
         dispatch(selectNode(selNodes[0].id));
       }
-    } else if (selNodes.length === 0 && selectedNodeIdRef.current !== null) {
-      dispatch(selectNode(null));
     }
   }, [dispatch]);
 
+  const handleNodeClick = useCallback((event: React.MouseEvent, node: Node) => {
+    if (event.shiftKey || event.ctrlKey || event.metaKey) return;
+    selectSingleNode(node.id);
+  }, [selectSingleNode]);
+
+  const handleNodeDragStart = useCallback((event: React.MouseEvent | MouseEvent | TouchEvent, node: Node) => {
+    if ('shiftKey' in event && (event.shiftKey || event.ctrlKey || event.metaKey)) return;
+    if (selectedNodeIdRef.current !== node.id) {
+      selectSingleNode(node.id);
+    }
+  }, [selectSingleNode]);
+
   const handlePaneClick = useCallback(() => {
-    dispatch(selectNode(null));
-  }, [dispatch]);
+    selectSingleNode(null);
+  }, [selectSingleNode]);
 
   const handleNodeDoubleClick = useCallback((event: React.MouseEvent, node: Node) => {
     event.stopPropagation();
@@ -1721,7 +1779,7 @@ function FlowCanvas() {
               nodes={nodes}
               edges={edges}
               connectionMode={ConnectionMode.Loose}
-              onNodesChange={isLocked ? undefined : onNodesChange}
+              onNodesChange={handleNodesChange}
               onEdgesChange={isLocked ? undefined : onEdgesChange}
               onConnect={isLocked ? undefined : onConnect}
               isValidConnection={isValidConnection}
@@ -1729,6 +1787,8 @@ function FlowCanvas() {
               onDrop={isLocked ? undefined : onDrop}
               onDragOver={isLocked ? undefined : onDragOver}
               onSelectionChange={onSelectionChange}
+              onNodeClick={handleNodeClick}
+              onNodeDragStart={handleNodeDragStart}
               onPaneClick={handlePaneClick}
               onNodeDoubleClick={handleNodeDoubleClick}
               onEdgeDoubleClick={handleEdgeDoubleClick}
@@ -1737,6 +1797,8 @@ function FlowCanvas() {
               nodesDraggable={!isLocked}
               nodesConnectable={!isLocked}
               elementsSelectable={true}
+              nodeClickDistance={5}
+              nodeDragThreshold={2}
               fitView
               className="bg-bg select-none"
               proOptions={{ hideAttribution: true }}

@@ -7,12 +7,14 @@ import { getForEachItems } from '../utils';
 import type { InspectorProps } from '../types';
 import type { Node } from '@xyflow/react';
 
+const EMPTY_RESULTS: Record<string, any> = {};
+
 type ForEachInspectorProps = Pick<InspectorProps, 'node' | 'nodes' | 'edges' | 'updateNodeData'>;
 
 export function ForEachInspector({ node, nodes, edges, updateNodeData }: ForEachInspectorProps) {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults || {});
+  const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults) || EMPTY_RESULTS;
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
 
   const copyVariable = (text: string) => {

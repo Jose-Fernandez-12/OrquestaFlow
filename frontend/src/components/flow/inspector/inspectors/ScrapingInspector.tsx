@@ -8,9 +8,11 @@ import type { InspectorProps } from '../types';
 
 type ScrapingInspectorProps = Pick<InspectorProps, 'node' | 'updateNodeData'>;
 
+const EMPTY_SCRIPTS: any[] = [];
+
 export function ScrapingInspector({ node, updateNodeData }: ScrapingInspectorProps) {
   const dispatch = useAppDispatch();
-  const scripts = useAppSelector(state => state.scripts.scripts) || [];
+  const scripts = useAppSelector(state => state.scripts.scripts) || EMPTY_SCRIPTS;
   const loading = useAppSelector(state => state.scripts.loading);
 
   useEffect(() => {
