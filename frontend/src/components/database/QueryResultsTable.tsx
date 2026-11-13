@@ -1,12 +1,10 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, FileSpreadsheet } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { QueryExportModal } from './QueryExportModal';
 
 interface QueryResultsTableProps {
   rows: Array<Record<string, any>>;
   columns: string[];
-  queryName?: string;
 }
 
 const PAGE_SIZES = [25, 50, 100, 250, 500];
@@ -26,12 +24,11 @@ function formatCell(value: any): string {
   return String(value);
 }
 
-export function QueryResultsTable({ rows, columns, queryName }: QueryResultsTableProps) {
+export function QueryResultsTable({ rows, columns }: QueryResultsTableProps) {
   const [pageSize, setPageSize] = useState(loadPageSize);
   const [page, setPage] = useState(1);
   const [pageDraft, setPageDraft] = useState<string | null>(null);
   const [prevRows, setPrevRows] = useState(rows);
-  const [isExportOpen, setIsExportOpen] = useState(false);
 
   // New result set: go back to the first page
   if (rows !== prevRows) {
@@ -112,7 +109,7 @@ export function QueryResultsTable({ rows, columns, queryName }: QueryResultsTabl
 
       {total > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 border-t border-border bg-bg/30 text-xs">
-          <div className="flex flex-wrap items-center gap-2 text-muted">
+          <div className="flex items-center gap-2 text-muted">
             <span>
               Mostrando <b className="text-fg">{start + 1}–{Math.min(start + pageSize, total)}</b> de <b className="text-fg">{total.toLocaleString('es')}</b>
             </span>
@@ -127,16 +124,6 @@ export function QueryResultsTable({ rows, columns, queryName }: QueryResultsTabl
                 {PAGE_SIZES.map(size => <option key={size} value={size}>{size}</option>)}
               </select>
             </label>
-            <span className="text-border">|</span>
-            <button
-              type="button"
-              onClick={() => setIsExportOpen(true)}
-              title="Exportar los resultados a Excel"
-              className="h-7 px-2 flex items-center gap-1.5 shrink-0 whitespace-nowrap rounded-sm border border-border text-muted hover:text-fg hover:bg-bg"
-            >
-              <FileSpreadsheet size={14} />
-              Exportar a Excel
-            </button>
           </div>
 
           <div className="flex items-center gap-1">
@@ -158,16 +145,6 @@ export function QueryResultsTable({ rows, columns, queryName }: QueryResultsTabl
             {navButton('Última página', pageCount, currentPage === pageCount, ChevronsRight)}
           </div>
         </div>
-      )}
-
-      {isExportOpen && (
-        <QueryExportModal
-          queryName={queryName}
-          columns={columns}
-          allRows={rows}
-          pageRows={pageRows}
-          onClose={() => setIsExportOpen(false)}
-        />
       )}
     </div>
   );

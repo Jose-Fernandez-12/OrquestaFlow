@@ -1,41 +1,11 @@
-const DEFAULT_HEADER_COLOR = '#1E293B';
-
-/** Normaliza "#abc123" o "abc123" a "#ABC123". Devuelve null si no es un color hexadecimal de 6 dígitos. */
-export function normalizeHexColor(value: string): string | null {
-  const match = /^#?([0-9a-f]{6})$/i.exec(value.trim());
-  return match ? `#${match[1].toUpperCase()}` : null;
-}
-
-/**
- * Color del texto de la cabecera: blanco salvo en fondos claros.
- * Usa la luminancia relativa (WCAG); solo cambia a oscuro cuando el blanco
- * quedaría por debajo de 3:1 de contraste.
- */
-export function getHeaderTextColor(background: string): string {
-  const hex = normalizeHexColor(background) ?? DEFAULT_HEADER_COLOR;
-  const linear = (offset: number) => {
-    const c = parseInt(hex.slice(1 + offset, 3 + offset), 16) / 255;
-    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-  };
-  const luminance = 0.2126 * linear(0) + 0.7152 * linear(2) + 0.0722 * linear(4);
-  return luminance > 0.3 ? '#0F172A' : '#FFFFFF';
-}
-
-/**
- * Genera un XML Spreadsheet 2003 (.xls) con la primera fila como cabecera
- * coloreada. Se usa en lugar de .xlsx porque la versión community de SheetJS
- * (xlsx 0.18.x) descarta el relleno de las celdas al escribir, así que no
- * puede aplicar el color de la cabecera.
- */
-export function buildSpreadsheetXml(
+export function downloadAsXMLSpreadsheet(
   data: any[],
   columns: { header: string; key: string }[],
+  fileName: string,
   headerColor?: string
-): string {
-  const background = (headerColor ? normalizeHexColor(headerColor) : null) ?? DEFAULT_HEADER_COLOR;
-  const textColor = getHeaderTextColor(background);
-  const cells = data.map(row => columns.map(col => toExportCell(resolveDotPath(row, col.key))));
-
+) {
+  console.log('Downloading XML Spreadsheet, headerColor:', headerColor);
+  
   let xml = `<?xml version="1.0"?>
 <?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
@@ -55,8 +25,8 @@ export function buildSpreadsheetXml(
     <Style ss:ID="Header">
       <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
       <Borders/>
-      <Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="${textColor}" ss:Bold="1"/>
-      <Interior ss:Color="${background}" ss:Pattern="Solid"/>
+      <Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#FFFFFF" ss:Bold="1"/>
+      <Interior ss:Color="${headerColor ? (headerColor.startsWith('#') ? headerColor : '#' + headerColor) : '#1E293B'}" ss:Pattern="Solid"/>
     </Style>
     <Style ss:ID="Data">
       <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
@@ -66,10 +36,9 @@ export function buildSpreadsheetXml(
     <Table>
 `;
 
-  // Ancho según el contenido (cabecera incluida), con límites para no quedar ni minúsculo ni desbordado
-  columns.forEach((col, i) => {
-    const longest = cells.reduce((max, row) => Math.max(max, row[i].text.length), col.header.length);
-    const width = Math.min(320, Math.max(80, longest * 7 + 16));
+  // Define columns widths
+  columns.forEach((col) => {
+    const width = Math.max(col.header.length * 8, 80);
     xml += `      <Column ss:Width="${width}"/>\n`;
   });
 
@@ -81,10 +50,12 @@ export function buildSpreadsheetXml(
   xml += `      </Row>\n`;
 
   // Data Rows
-  cells.forEach((row) => {
+  data.forEach((row) => {
     xml += `      <Row ss:Height="18">\n`;
-    row.forEach((cell) => {
-      xml += `        <Cell ss:StyleID="Data"><Data ss:Type="${cell.type}">${escapeXml(cell.text)}</Data></Cell>\n`;
+    columns.forEach((col) => {
+      const val = resolveDotPath(row, col.key);
+      const strVal = val === null || val === undefined ? '' : String(val);
+      xml += `        <Cell ss:StyleID="Data"><Data ss:Type="String">${escapeXml(strVal)}</Data></Cell>\n`;
     });
     xml += `      </Row>\n`;
   });
@@ -93,23 +64,12 @@ export function buildSpreadsheetXml(
   </Worksheet>
 </Workbook>`;
 
-  return xml;
-}
-
-export function downloadAsXMLSpreadsheet(
-  data: any[],
-  columns: { header: string; key: string }[],
-  fileName: string,
-  headerColor?: string
-) {
-  const xml = buildSpreadsheetXml(data, columns, headerColor);
-
-  // Blob en lugar de data URI: las URIs muy grandes fallan en exportaciones de muchas filas
-  const blobUrl = URL.createObjectURL(new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8' }));
-
+  const encodedXml = encodeURIComponent(xml);
+  const dataUri = `data:application/vnd.ms-excel;charset=utf-8,${encodedXml}`;
+  
   const link = document.createElement('a');
-  link.href = blobUrl;
-
+  link.href = dataUri;
+  
   let safeName = (fileName || 'exportacion').trim();
   if (safeName === '') safeName = 'exportacion';
   safeName = safeName.replace(/\.xlsx?$/, '') + '.xls';
@@ -118,25 +78,14 @@ export function downloadAsXMLSpreadsheet(
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
   link.onclick = (e) => e.stopPropagation();
-
+  
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
-}
-
-/** Números finitos como Number (Excel los trata como valores); el resto como texto; nulos como celda vacía. */
-export function toExportCell(value: unknown): { type: 'Number' | 'String'; text: string } {
-  if (value === null || value === undefined) return { type: 'String', text: '' };
-  if (typeof value === 'number' && Number.isFinite(value)) return { type: 'Number', text: String(value) };
-  if (typeof value === 'object') return { type: 'String', text: JSON.stringify(value) };
-  return { type: 'String', text: String(value) };
 }
 
 function resolveDotPath(obj: any, path: string): any {
   if (!obj || !path) return undefined;
-  // Una clave literal (p. ej. una columna SQL "cliente.id") tiene prioridad sobre la ruta anidada
-  if (Object.prototype.hasOwnProperty.call(obj, path)) return obj[path];
   return path.split('.').reduce((acc, part) => {
     if (acc == null) return undefined;
     const bracketMatch = part.match(/^([^\[]*)\[(\d+)\]$/);
@@ -151,19 +100,16 @@ function resolveDotPath(obj: any, path: string): any {
 }
 
 function escapeXml(unsafe: string): string {
-  return unsafe
-    // Caracteres de control no permitidos en XML: Excel no abriría el archivo
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
-    .replace(/[<>&'"]/g, function (c) {
-      switch (c) {
-        case '<': return '&lt;';
-        case '>': return '&gt;';
-        case '&': return '&amp;';
-        case '\'': return '&apos;';
-        case '"': return '&quot;';
-        default: return c;
-      }
-    });
+  return unsafe.replace(/[<>&'"]/g, function (c) {
+    switch (c) {
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '&': return '&amp;';
+      case '\'': return '&apos;';
+      case '"': return '&quot;';
+      default: return c;
+    }
+  });
 }
 
 export function resolveExportData(context: Record<string, any>, dataSource?: string): any[] {
