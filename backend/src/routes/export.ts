@@ -1,4 +1,5 @@
 import { FastifyInstance } from 'fastify';
+import ExcelJS from 'exceljs';
 
 const DEFAULT_HEADER_COLOR = 'FF1E293B';
 const LIGHT_TEXT_COLOR = 'FFFFFFFF';
@@ -60,7 +61,6 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       const textArgb = toArgbColor(headerTextColor) ?? autoHeaderTextColor(fillArgb);
 
       try {
-        const ExcelJS = await import('exceljs');
         const workbook = new ExcelJS.Workbook();
         const sheet = workbook.addWorksheet('Resultados');
 
@@ -102,7 +102,8 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
           .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
           .header('Content-Disposition', `attachment; filename="${safeFileName(fileName)}.xlsx"`)
           .send(Buffer.from(buffer as ArrayBuffer));
-      } catch {
+      } catch (err) {
+        request.log.error(err, 'Error al generar el archivo Excel');
         reply.status(500).send({ error: 'Error al generar el archivo Excel' });
       }
     }
