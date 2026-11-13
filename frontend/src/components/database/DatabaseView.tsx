@@ -1073,7 +1073,7 @@ export function DatabaseView() {
                     </div>
                   )}
 
-                  <QueryResultsTable rows={queriesState.results.rows || []} columns={activeColumns} />
+                  <QueryResultsTable rows={queriesState.results.rows || []} columns={activeColumns} queryName={queriesState.currentQuery?.name} />
                 </div>
               )}
             </div>
