@@ -17,7 +17,8 @@ import {
   KeyRound,
   Bot,
   PlugZap,
-  Palette
+  Palette,
+  Layers
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { closeSettingsModal, showToast } from '../../store/uiSlice';
@@ -29,14 +30,16 @@ import { ConnectionsDataSettings } from './ConnectionsDataSettings';
 import { ThemeSettings } from './ThemeSettings';
 import { AccessSettings } from './AccessSettings';
 import { CredentialsSettings } from './CredentialsSettings';
+import { EnvironmentsSettings } from './EnvironmentsSettings';
 
-type SettingsTab = 'general' | 'theme' | 'timeouts' | 'credentials' | 'connections' | 'experimental';
+type SettingsTab = 'general' | 'theme' | 'timeouts' | 'credentials' | 'environments' | 'connections' | 'experimental';
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: typeof Clock }> = [
   { id: 'general', label: 'General', icon: Sliders },
   { id: 'theme', label: 'Colores y tema', icon: Palette },
   { id: 'timeouts', label: 'Tiempos y reintentos', icon: Clock },
   { id: 'credentials', label: 'Credenciales', icon: KeyRound },
+  { id: 'environments', label: 'Entornos', icon: Layers },
   { id: 'connections', label: 'Conexiones y datos', icon: PlugZap },
   { id: 'experimental', label: 'Experimental', icon: FlaskConical },
 ];
@@ -99,7 +102,12 @@ export function SettingsModal() {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Configuración del Sistema"
+    >
       <div className="bg-surface border border-border rounded-lg shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between px-6 py-4 border-b border-border bg-surface">
@@ -109,10 +117,12 @@ export function SettingsModal() {
             </div>
             <div>
               <h2 className="text-base font-semibold text-fg">Configuración del Sistema</h2>
-              <p className="text-xs text-muted">Tiempos de espera, reintentos, credenciales y funciones en prueba</p>
+              <p className="text-xs text-muted">Tiempos de espera, reintentos, credenciales, entornos y funciones en prueba</p>
             </div>
           </div>
           <button
+            type="button"
+            aria-label="Cerrar configuración"
             onClick={() => dispatch(closeSettingsModal())}
             className="p-1 rounded-md text-muted hover:text-fg hover:bg-bg transition-colors"
           >
@@ -267,10 +277,11 @@ export function SettingsModal() {
             <div className="space-y-4">
               <div className="p-3.5 bg-bg rounded-md border border-border space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-fg">Filas en la vista previa de exportaciones</label>
+                  <label htmlFor="table-preview-limit" className="text-xs font-semibold text-fg">Filas en la vista previa de exportaciones</label>
                   <span className="text-[11px] font-mono text-muted">filas</span>
                 </div>
                 <select
+                  id="table-preview-limit"
                   value={formData.table_preview_row_limit || 500}
                   onChange={(e) => handleNumberChange('table_preview_row_limit', e.target.value, 50)}
                   className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-3 py-1.5 text-xs focus-visible:outline-none focus-visible:border-accent"
@@ -287,8 +298,9 @@ export function SettingsModal() {
               </div>
 
               <div className="p-3.5 bg-bg rounded-md border border-border space-y-2">
-                <label className="text-xs font-semibold text-fg">Versión de Python de los scripts</label>
+                <label htmlFor="python-version-select" className="text-xs font-semibold text-fg">Versión de Python de los scripts</label>
                 <select
+                  id="python-version-select"
                   value={formData.python_version || '3.12'}
                   onChange={(e) => handleChange('python_version', e.target.value)}
                   className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-3 py-1.5 text-xs focus-visible:outline-none focus-visible:border-accent"
@@ -330,6 +342,8 @@ export function SettingsModal() {
           {activeTab === 'theme' && <ThemeSettings />}
 
           {activeTab === 'credentials' && <CredentialsSettings />}
+
+          {activeTab === 'environments' && <EnvironmentsSettings />}
 
           {activeTab === 'connections' && <ConnectionsDataSettings />}
 

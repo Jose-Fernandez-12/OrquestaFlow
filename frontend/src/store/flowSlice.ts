@@ -1,5 +1,5 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit';
-import { API_URL } from '../lib/api';
+import { API_URL, readApiResponse } from '../lib/api';
 
 export interface NodeScriptRun {
   runId: string;
@@ -27,6 +27,8 @@ export interface Flow {
   definition: string; // JSON string of { nodes, edges }
   status: string;
   is_locked?: number;
+  published_version_id?: string | null;
+  published_definition?: string | null;
   last_run_at: string | null;
   last_run_duration_ms: number | null;
   last_run_record_count: number | null;
@@ -117,14 +119,14 @@ const initialState: FlowState = {
 
 export const fetchFlows = createAsyncThunk('flows/fetchAll', async () => {
   const res = await fetch(`${API_URL}/flows`);
-  const data = await res.json();
-  return data.data as Flow[];
+  const data = await readApiResponse<{ data: Flow[] }>(res, 'Error al cargar flujos');
+  return data.data;
 });
 
 export const fetchFlow = createAsyncThunk('flows/fetchOne', async (id: string) => {
   const res = await fetch(`${API_URL}/flows/${id}`);
-  const data = await res.json();
-  return data.data as Flow;
+  const data = await readApiResponse<{ data: Flow }>(res, 'Error al cargar el flujo');
+  return data.data;
 });
 
 export const createFlow = createAsyncThunk('flows/create', async (flowData: { name: string; description?: string; definition?: string; is_locked?: number }) => {
@@ -133,8 +135,8 @@ export const createFlow = createAsyncThunk('flows/create', async (flowData: { na
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(flowData),
   });
-  const data = await res.json();
-  return data.data as Flow;
+  const data = await readApiResponse<{ data: Flow }>(res, 'Error al crear flujo');
+  return data.data;
 });
 
 export const saveFlow = createAsyncThunk('flows/save', async (flow: { id: string; definition?: string; name?: string; description?: string; status?: string; is_locked?: number }) => {
@@ -149,14 +151,15 @@ export const saveFlow = createAsyncThunk('flows/save', async (flow: { id: string
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const data = await res.json();
-  return data.data as Flow;
+  const data = await readApiResponse<{ data: Flow }>(res, 'Error al guardar flujo');
+  return data.data;
 });
 
 export const deleteFlow = createAsyncThunk('flows/delete', async (id: string) => {
-  await fetch(`${API_URL}/flows/${id}`, {
+  const res = await fetch(`${API_URL}/flows/${id}`, {
     method: 'DELETE',
   });
+  await readApiResponse(res, 'Error al eliminar flujo');
   return id;
 });
 
@@ -171,8 +174,8 @@ export const duplicateFlow = createAsyncThunk('flows/duplicate', async (flow: Fl
       is_locked: 0
     }),
   });
-  const data = await res.json();
-  return data.data as Flow;
+  const data = await readApiResponse<{ data: Flow }>(res, 'Error al duplicar flujo');
+  return data.data;
 });
 
 export interface ImportSummary {
@@ -223,11 +226,12 @@ export const resumeDebugNode = createAsyncThunk('flows/resumeDebug', async ({ id
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ nodeId, action })
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     // The backend no longer tracks this run (finished, stopped or server restarted): leave the paused UI
     const state = await fetch(`${API_URL}/flows/${id}/execution-state`).then(r => r.json()).catch(() => null);
     if (!state?.data?.isRunning) return rejectWithValue('not_running');
+    throw new Error(data.message || data.error || `Error ${res.status}`);
   }
   return data.data;
 });
@@ -238,7 +242,7 @@ export const pauseDebugExecution = createAsyncThunk('flows/pauseDebug', async (i
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
   });
-  const data = await res.json();
+  const data = await readApiResponse<{ data: any }>(res, 'Error al pausar depuración');
   return data.data;
 });
 
@@ -248,7 +252,7 @@ export const stopFlow = createAsyncThunk('flows/stop', async (id: string) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
   });
-  const data = await res.json();
+  const data = await readApiResponse<{ data: any }>(res, 'Error al detener flujo');
   return data.data;
 });
 
@@ -455,7 +459,10 @@ const flowSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchFlows.pending, (state) => { state.loading = true; })
+      .addCase(fetchFlows.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
       .addCase(fetchFlows.fulfilled, (state, action) => {
         state.loading = false;
         state.flows = action.payload;
@@ -467,49 +474,105 @@ const flowSlice = createSlice({
         state.loading = false;
         state.error = action.error.message || 'Error loading flows';
       })
+      .addCase(fetchFlow.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
       .addCase(fetchFlow.fulfilled, (state, action) => {
+        state.loading = false;
         state.currentFlow = action.payload;
       })
+      .addCase(fetchFlow.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al cargar flujo';
+      })
       .addCase(createFlow.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         state.flows.unshift(action.payload);
         state.currentFlow = action.payload;
       })
+      .addCase(createFlow.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al crear flujo';
+      })
       .addCase(saveFlow.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         state.currentFlow = action.payload;
         const idx = state.flows.findIndex(f => f.id === action.payload.id);
         if (idx >= 0) state.flows[idx] = action.payload;
       })
+      .addCase(saveFlow.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al guardar flujo';
+      })
       .addCase(executeFlow.fulfilled, (state) => {
+        state.loading = false;
         state.executingNodeIds = [];
         state.pausedNodeIds = [];
       })
+      .addCase(executeFlow.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al ejecutar flujo';
+      })
       .addCase(resumeDebugNode.rejected, (state, action) => {
+        state.loading = false;
         if (action.payload === 'not_running') {
           state.executingNodeIds = [];
           state.pausedNodeIds = [];
           state.nodeTimers = {};
           state.isDebugModalOpen = false;
           state.debugSessionLostAt = Date.now();
+        } else {
+          state.error = action.error.message || 'Error en depuración';
         }
       })
+      .addCase(pauseDebugExecution.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al pausar flujo';
+      })
       .addCase(stopFlow.fulfilled, (state) => {
+        state.loading = false;
         state.executingNodeIds = [];
         state.pausedNodeIds = [];
         state.nodeTimers = {};
         state.isDebugModalOpen = false;
       })
+      .addCase(stopFlow.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al detener flujo';
+      })
       .addCase(deleteFlow.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         state.flows = state.flows.filter(f => f.id !== action.payload);
         if (state.currentFlow?.id === action.payload) {
           state.currentFlow = state.flows[0] || null;
         }
       })
+      .addCase(deleteFlow.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al eliminar flujo';
+      })
       .addCase(duplicateFlow.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         state.flows.unshift(action.payload);
       })
+      .addCase(duplicateFlow.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al duplicar flujo';
+      })
       .addCase(importFlowBundle.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         state.flows.unshift(action.payload.data);
         state.currentFlow = action.payload.data;
+      })
+      .addCase(importFlowBundle.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al importar flujo';
       });
   },
 });

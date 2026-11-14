@@ -17,6 +17,9 @@ export interface NodeTraceEntry {
   retries: number;
   error?: string;
   records?: number;
+  mocked?: boolean;
+  errorBranch?: boolean;
+  failedItems?: Array<{ index: number; item: any; error: string }>;
 }
 
 const MAX_ERROR_LENGTH = 500;
@@ -105,6 +108,10 @@ export class ExecutionTracer {
       this.stop(nodeId, e);
       e.runs++;
       if (e.status !== 'error' && e.status !== 'continued') e.status = 'completed';
+      if (result?.mocked) e.mocked = true;
+      if (Array.isArray(result?.failed_items) && result.failed_items.length > 0) {
+        e.failedItems = result.failed_items;
+      }
       const records = countRecords(result);
       if (records !== undefined) e.records = records;
       return;
@@ -115,6 +122,10 @@ export class ExecutionTracer {
       this.stop(nodeId, e);
       e.runs++;
       e.status = result?.continued ? 'continued' : 'error';
+      if (result?.errorBranch) e.errorBranch = true;
+      if (Array.isArray(result?.failed_items) && result.failed_items.length > 0) {
+        e.failedItems = result.failed_items;
+      }
       const message = String(result?.error ?? 'Error desconocido');
       e.error = message.length > MAX_ERROR_LENGTH ? message.slice(0, MAX_ERROR_LENGTH) + '…' : message;
     }
@@ -135,12 +146,17 @@ export class ExecutionTracer {
 
 // ── Persistence ──
 
-export function startExecutionLog(targetId: string, trigger: ExecutionTrigger, scheduleId?: string | null): string {
+export function startExecutionLog(
+  targetId: string,
+  trigger: ExecutionTrigger,
+  scheduleId?: string | null,
+  parentExecutionId?: string | null
+): string {
   const logId = uuid();
   getDb().prepare(`
-    INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type)
-    VALUES (?, 'flow', ?, ?, 'running', ?)
-  `).run(logId, targetId, scheduleId ?? null, trigger);
+    INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type, parent_execution_id)
+    VALUES (?, 'flow', ?, ?, 'running', ?, ?)
+  `).run(logId, targetId, scheduleId ?? null, trigger, parentExecutionId ?? null);
   return logId;
 }
 

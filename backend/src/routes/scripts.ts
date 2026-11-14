@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
-import { join } from 'path';
+import { basename, extname, join } from 'path';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import {
   startScriptRun, sendScriptInput, stopScriptRun, getScriptRun, getLatestScriptRun,
@@ -191,20 +191,29 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Upload script
+  const ALLOWED_SCRIPT_EXTENSIONS = ['.py', '.js'];
+
   const handleUpload = async (request: any, reply: any) => {
     const data = await request.file();
     if (!data) return reply.status(400).send({ error: 'No file uploaded' });
+
+    const safeOriginalName = basename(String(data.filename || '').replace(/\\/g, '/')).trim();
+    const ext = extname(safeOriginalName).toLowerCase();
+    if (!safeOriginalName || safeOriginalName === '.' || safeOriginalName === '..' || !ALLOWED_SCRIPT_EXTENSIONS.includes(ext)) {
+      data.file?.resume();
+      return reply.status(400).send({ error: 'Extensión de archivo no permitida. Solo se aceptan scripts .py o .js.' });
+    }
 
     const id = uuid();
     const uploadsDir = join(process.cwd(), 'uploads', 'scripts');
     if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
 
-    const fileName = `${id}_${data.filename}`;
+    const fileName = `${id}_${safeOriginalName}`;
     const filePath = join(uploadsDir, fileName);
     const buffer = await data.toBuffer();
     writeFileSync(filePath, buffer);
 
-    const name = data.filename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
+    const name = safeOriginalName.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ') || safeOriginalName;
     const db = getDb();
 
     db.prepare(`

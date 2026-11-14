@@ -242,19 +242,56 @@ export function clearedAccessCookie(): string {
 
 const MAX_FAILURES = 10;
 const LOCKOUT_MS = 10 * 60_000;
-const failures = new Map<string, { count: number; until: number }>();
+const MAX_FAILURE_ENTRIES = 1000;
+const failures = new Map<string, { count: number; until: number; lastAttempt: number }>();
+
+/** Elimina lockouts expirados e intentos parciales obsoletos antes de leer o escribir */
+function pruneExpiredFailures(now: number): void {
+  for (const [key, entry] of failures) {
+    const expiredLock = entry.until > 0 && entry.until <= now;
+    const stalePartial = entry.until === 0 && now - entry.lastAttempt > LOCKOUT_MS;
+    if (expiredLock || stalePartial) {
+      failures.delete(key);
+    }
+  }
+}
 
 export function loginLockedUntil(address: string, now = Date.now()): number | null {
+  pruneExpiredFailures(now);
   const entry = failures.get(address);
   return entry && entry.until > now ? entry.until : null;
 }
 
 export function recordLoginFailure(address: string, now = Date.now()): void {
+  pruneExpiredFailures(now);
   const entry = failures.get(address);
   const count = (entry && entry.until <= now && entry.count >= MAX_FAILURES ? 0 : entry?.count ?? 0) + 1;
-  failures.set(address, { count, until: count >= MAX_FAILURES ? now + LOCKOUT_MS : 0 });
+  if (entry) {
+    // Reinsertar para mantener orden LRU de acceso más reciente
+    failures.delete(address);
+  } else {
+    while (failures.size >= MAX_FAILURE_ENTRIES) {
+      const oldestKey = failures.keys().next().value;
+      if (oldestKey === undefined) break;
+      failures.delete(oldestKey);
+    }
+  }
+  failures.set(address, {
+    count,
+    until: count >= MAX_FAILURES ? now + LOCKOUT_MS : 0,
+    lastAttempt: now,
+  });
 }
 
 export function clearLoginFailures(address: string): void {
   failures.delete(address);
+}
+
+/** Valida que una ruta SQLite no contenga '..' ni apunte a la BD interna orquesta.sqlite */
+export function isUnsafeSqlitePath(rawPath: unknown): boolean {
+  if (typeof rawPath !== 'string') return true;
+  const trimmed = rawPath.trim();
+  if (!trimmed || trimmed.includes('..')) return true;
+  const base = path.basename(trimmed.replace(/\\/g, '/')).toLowerCase();
+  return base === 'orquesta.sqlite';
 }

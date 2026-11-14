@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { Node } from '@xyflow/react';
-import { ChevronDown, RotateCw, ShieldAlert, OctagonX, ArrowRightCircle } from 'lucide-react';
+import { ChevronDown, RotateCw, ShieldAlert, OctagonX, ArrowRightCircle, GitBranch } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
 import {
@@ -37,14 +37,21 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
   const isHttp = HTTP_NODE_TYPES.includes(type);
 
   const effectiveRetries = config.retryCount ?? (isHttp ? globalHttpRetries : 0);
-  const isCustomized = config.retryCount !== null || config.onError === 'continue';
+  const isCustomized = config.retryCount !== null || config.onError !== 'stop';
   const [open, setOpen] = useState(isCustomized);
 
   if ((!canRetry && !canContinue) || type === 'note') return null;
 
+  const onErrorSummary =
+    config.onError === 'error_branch'
+      ? 'rama de error si falla'
+      : config.onError === 'continue'
+        ? 'continúa si falla'
+        : 'detiene el flujo si falla';
+
   const summary = [
     canRetry && (effectiveRetries > 0 ? `${effectiveRetries} ${effectiveRetries === 1 ? 'reintento' : 'reintentos'}` : 'Sin reintentos'),
-    config.onError === 'continue' ? 'continúa si falla' : 'detiene el flujo si falla',
+    onErrorSummary,
   ].filter(Boolean).join(' · ');
 
   const setRetryCount = (raw: string) => {
@@ -100,6 +107,7 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
                     <div className="space-y-1">
                       <span className="text-[10px] text-muted">Espera inicial</span>
                       <select
+                        aria-label="Espera inicial entre reintentos"
                         value={DELAY_OPTIONS.some(o => o.value === config.retryDelayMs) ? config.retryDelayMs : 1000}
                         onChange={e => updateNodeData('retryDelayMs', Number(e.target.value))}
                         className="w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
@@ -142,19 +150,22 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
           {canContinue && (
             <div className="space-y-2">
               <label className="text-xs font-medium">Si el nodo falla</label>
-              <div className="grid grid-cols-2 gap-1.5">
+              <div className="grid grid-cols-1 gap-1.5">
                 {([
                   ['stop', 'Detener el flujo', OctagonX],
                   ['continue', 'Continuar', ArrowRightCircle],
+                  ['error_branch', 'Ir a rama de error (try / catch)', GitBranch],
                 ] as const).map(([value, label, Icon]) => (
                   <button
                     key={value}
                     type="button"
                     onClick={() => updateNodeData('onError', value === 'stop' ? undefined : value)}
                     className={cn(
-                      'flex items-center justify-center gap-1.5 h-9 px-2 min-w-0 rounded-sm border text-xs font-medium transition-colors',
+                      'flex items-center justify-start gap-2 h-8 px-2.5 min-w-0 rounded-sm border text-xs font-medium transition-colors',
                       config.onError === value
-                        ? 'border-accent bg-accent/5 text-accent'
+                        ? value === 'error_branch'
+                          ? 'border-red-500/60 bg-red-500/10 text-red-600'
+                          : 'border-accent bg-accent/5 text-accent'
                         : 'border-border text-muted hover:text-fg hover:border-border-hover'
                     )}
                     title={label}
@@ -169,6 +180,11 @@ export function ErrorHandlingSection({ node, updateNodeData }: ErrorHandlingSect
                   El nodo queda marcado en ámbar y su salida será{' '}
                   <code className="text-fg">{'{ error, failed: true }'}</code>. Los nodos siguientes se ejecutan igual; puedes
                   detectarlo con una Bifurcación sobre <code className="text-fg">{`{{${node.id}.failed}}`}</code>.
+                </p>
+              )}
+              {config.onError === 'error_branch' && (
+                <p className="text-[10px] text-muted leading-relaxed">
+                  Habilita una salida roja <span className="text-red-600 font-medium">error</span> en el nodo. Si falla tras agotar reintentos, solo continúa esa rama con las variables <code className="text-fg">{'{{$error.message}}'}</code>, <code className="text-fg">{'{{$error.nodeId}}'}</code>, <code className="text-fg">{'{{$error.nodeLabel}}'}</code> y <code className="text-fg">{'{{$error.timestamp}}'}</code>.
                 </p>
               )}
             </div>

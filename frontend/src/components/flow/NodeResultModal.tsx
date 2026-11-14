@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Copy, Download, Check, Terminal, Code2 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { cn } from '../../lib/utils';
+import { copyToClipboard } from '../../lib/clipboard';
 
 interface NodeResultModalProps {
   inspectNodeData: {
@@ -28,17 +29,8 @@ export function NodeResultModal({ inspectNodeData, jsonStr, logs, hasLogs, onClo
   const [activeTab, setActiveTab] = useState<'data' | 'logs'>('data');
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(jsonStr);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      const textarea = document.createElement('textarea');
-      textarea.value = jsonStr;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
+    const ok = await copyToClipboard(jsonStr);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
@@ -57,7 +49,12 @@ export function NodeResultModal({ inspectNodeData, jsonStr, logs, hasLogs, onClo
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Resultados del nodo: ${inspectNodeData.label}`}
+      className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+    >
       <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-3xl max-h-[85vh] flex flex-col">
         {/* Header */}
         <div className="p-4 border-b border-border flex items-center justify-between shrink-0">

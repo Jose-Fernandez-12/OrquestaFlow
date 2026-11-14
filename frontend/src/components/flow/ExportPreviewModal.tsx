@@ -272,8 +272,8 @@ export function ExportPreviewModal({
 
   const handleDownload = () => {
     if (nodeResult?.filePath) {
-      const fileName = nodeResult.filePath.split(/[/\\]/).pop();
-      triggerBrowserDownload(getFileUrl(`/api/files/${fileName}`), fileName);
+      const fileName = nodeResult.filePath.split(/[/\\]/).pop() || 'export';
+      triggerBrowserDownload(getFileUrl(`/api/files/${encodeURIComponent(fileName)}`), fileName);
     } else if (rows.length > 0) {
       const cols = columns.map(c => ({ header: c, key: c }));
       if (displayFormat.toLowerCase().includes('excel') || displayFormat.toLowerCase().includes('xlsx')) {
@@ -285,7 +285,12 @@ export function ExportPreviewModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Previsualización de Exportación: ${nodeLabel}`}
+      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 animate-in fade-in duration-200"
+    >
       <div className="bg-surface rounded-lg shadow-raised border border-border w-full max-w-5xl max-h-[85vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="p-4 border-b border-border flex items-center justify-between bg-bg/40">

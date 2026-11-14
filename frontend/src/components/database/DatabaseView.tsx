@@ -256,9 +256,13 @@ export function DatabaseView() {
           if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
             val = val.substring(1, val.length - 1);
           }
-          // Convertir a número si es un número válido
-          if (val !== '' && !isNaN(Number(val))) {
-            parsedParams[k] = Number(val);
+          // Convertir a número si es un número válido (sin ceros iniciales ni desbordamiento seguro)
+          const numVal = Number(val);
+          const hasLeadingZeros = /^0\d+/.test(val);
+          const isUnsafeInteger = /^-?\d+$/.test(val) && !Number.isSafeInteger(numVal);
+          const exceedsMaxSafe = Number.isFinite(numVal) && Math.abs(numVal) > Number.MAX_SAFE_INTEGER;
+          if (val !== '' && !hasLeadingZeros && !isNaN(numVal) && Number.isFinite(numVal) && !isUnsafeInteger && !exceedsMaxSafe) {
+            parsedParams[k] = numVal;
           } else {
             parsedParams[k] = val;
           }

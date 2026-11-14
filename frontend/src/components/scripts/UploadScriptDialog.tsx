@@ -96,7 +96,13 @@ export function UploadScriptDialog({ environmentReady, onClose, onUploaded }: Up
   const working = step === 'working';
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onMouseDown={e => { if (e.target === e.currentTarget && !working) onClose(); }}>
+    <div
+      className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Subir script"
+      onMouseDown={e => { if (e.target === e.currentTarget && !working) onClose(); }}
+    >
       <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-lg max-h-[88vh] flex flex-col min-h-0">
         <div className="p-4 border-b border-border flex items-center gap-3 shrink-0">
           <div className="p-2 bg-accent-light rounded-sm text-accent shrink-0"><Upload size={16} /></div>

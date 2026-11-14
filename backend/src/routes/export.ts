@@ -113,27 +113,33 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: { columns: string[]; rows: Record<string, unknown>[]; separator?: string; fileName?: string } }>(
     '/csv',
     async (request, reply) => {
-      const { columns, rows, separator = ',', fileName = 'export' } = request.body;
+      const { columns, rows, separator = ',', fileName } = request.body ?? ({} as any);
+
+      if (!Array.isArray(columns) || !columns.every(col => typeof col === 'string') || !Array.isArray(rows)) {
+        return reply.status(400).send({ error: 'columns debe ser una lista de textos y rows una lista de filas' });
+      }
+
+      const sep = typeof separator === 'string' && separator.length > 0 ? separator : ',';
 
       try {
-        const header = columns.join(separator);
+        const header = columns.join(sep);
         const lines = rows.map(row =>
           columns.map(col => {
-            const val = row[col];
+            const val = row?.[col];
             const str = val === null || val === undefined ? '' : String(val);
             // Escape fields containing separator, quotes, or newlines
-            if (str.includes(separator) || str.includes('"') || str.includes('\n')) {
+            if (str.includes(sep) || str.includes('"') || str.includes('\n') || str.includes('\r')) {
               return `"${str.replace(/"/g, '""')}"`;
             }
             return str;
-          }).join(separator)
+          }).join(sep)
         );
 
         const csv = [header, ...lines].join('\n');
 
         reply
           .header('Content-Type', 'text/csv; charset=utf-8')
-          .header('Content-Disposition', `attachment; filename="${fileName}.csv"`)
+          .header('Content-Disposition', `attachment; filename="${safeFileName(fileName)}.csv"`)
           .send(csv);
       } catch {
         reply.status(500).send({ error: 'Error al generar el archivo CSV' });

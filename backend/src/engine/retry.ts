@@ -4,10 +4,10 @@
 //   retryCount    number of extra attempts after the first failure (0-10)
 //   retryDelayMs  wait before the first retry, in ms (default 1000)
 //   retryBackoff  'fixed' | 'exponential' (default 'exponential')
-//   onError       'stop' (default) fails the flow | 'continue' records the error and lets downstream nodes run
+//   onError       'stop' (default) fails the flow | 'continue' records the error and lets downstream nodes run | 'error_branch' routes execution along error edges
 
 export type RetryBackoff = 'fixed' | 'exponential';
-export type OnErrorPolicy = 'stop' | 'continue';
+export type OnErrorPolicy = 'stop' | 'continue' | 'error_branch';
 
 export interface RetryPolicy {
   maxRetries: number;
@@ -53,8 +53,11 @@ export function getRetryPolicy(node: any, settings?: { http_max_retries?: number
   }
 
   const delay = toInt(data.retryDelayMs);
+  const rawOnError = data.onError;
   const onError: OnErrorPolicy =
-    data.onError === 'continue' && !NO_CONTINUE_NODE_TYPES.includes(type) ? 'continue' : 'stop';
+    (rawOnError === 'continue' || rawOnError === 'error_branch') && !NO_CONTINUE_NODE_TYPES.includes(type)
+      ? rawOnError
+      : 'stop';
 
   return {
     maxRetries,

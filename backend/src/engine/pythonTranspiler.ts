@@ -12,6 +12,16 @@ import { credentialSummary } from './credentials.js';
 import { PYTHON_RUNTIME } from './python/runtime.js';
 import { RUN_SCRIPT_NODE_TYPE, splitArgs } from './scriptNode.js';
 import { envKey, pyCall, pyComment, pyIdentifier, pyLiteral, pyStr, slugify, type PyArg } from './python/pyCode.js';
+import { getDb } from '../db/database.js';
+import { openDefinition } from './nodeSecrets.js';
+
+export const MAX_SUBFLOW_DEPTH = 5;
+
+export interface TranspilerFlowInfo {
+  id: string;
+  name: string;
+  definition: string | { nodes?: any[]; edges?: any[] };
+}
 
 export interface TranspilerConnectionInfo {
   id: string;
@@ -38,6 +48,8 @@ export interface TranspilerContext {
   settings?: { httpMaxRetries?: number; httpTimeoutSeconds?: number };
   /** Scraping scripts found on the server: script name -> { fileName, content } */
   scripts?: Record<string, { fileName: string; content: string }>;
+  /** Optional map of subflows keyed by flow id (falls back to DB when available) */
+  flows?: Record<string, TranspilerFlowInfo>;
 }
 
 export interface TranspilerSqlFile {
@@ -280,13 +292,43 @@ interface StepInfo {
   kind: string;
 }
 
+interface SharedTranspilerState {
+  imports: Set<string>;
+  sqlFiles: TranspilerSqlFile[];
+  jsFiles: TranspilerJsFile[];
+  scriptFiles: TranspilerScriptFile[];
+  env: Map<string, EnvEntry[]>;
+  databases: Map<string, { name: string; host: string; database: string; port: number; driver: string }>;
+  requirements: Set<string>;
+  subflowDefs: Map<string, string>;
+  subflowFnNames: Map<string, string>;
+  usedSubflowFns: Set<string>;
+  subflowStack: string[];
+}
+
+function createSharedState(): SharedTranspilerState {
+  return {
+    imports: new Set<string>(['node', 'run', 'run_main', 'start_flow', 'finish_flow']),
+    sqlFiles: [],
+    jsFiles: [],
+    scriptFiles: [],
+    env: new Map<string, EnvEntry[]>(),
+    databases: new Map(),
+    requirements: new Set<string>(['python-dotenv>=1.0.0']),
+    subflowDefs: new Map<string, string>(),
+    subflowFnNames: new Map<string, string>(),
+    usedSubflowFns: new Set<string>(),
+    subflowStack: [],
+  };
+}
+
 class Generator {
-  readonly imports = new Set<string>(['node', 'run', 'run_main', 'start_flow', 'finish_flow']);
-  readonly sqlFiles: TranspilerSqlFile[] = [];
-  readonly jsFiles: TranspilerJsFile[] = [];
-  readonly scriptFiles: TranspilerScriptFile[] = [];
-  readonly env = new Map<string, EnvEntry[]>(); // section -> entries
-  readonly databases = new Map<string, { name: string; host: string; database: string; port: number; driver: string }>();
+  readonly imports: Set<string>;
+  readonly sqlFiles: TranspilerSqlFile[];
+  readonly jsFiles: TranspilerJsFile[];
+  readonly scriptFiles: TranspilerScriptFile[];
+  readonly env: Map<string, EnvEntry[]>; // section -> entries
+  readonly databases: Map<string, { name: string; host: string; database: string; port: number; driver: string }>;
 
   /** .env key of a connection: its credential key, or its name when it has none */
   connectionKey(c: TranspilerConnectionInfo): string {
@@ -294,9 +336,163 @@ class Generator {
     return (raw && raw.toUpperCase() !== 'NONE' ? raw.toUpperCase().replace(/[^A-Z0-9_]/g, '_') : envKey(c.name)) || 'SQLSERVER';
   }
   readonly steps = new Map<string, StepInfo>();
-  readonly requirements = new Set<string>(['python-dotenv>=1.0.0']);
+  readonly requirements: Set<string>;
 
-  constructor(readonly flowName: string, readonly g: FlowGraph, readonly ctx: TranspilerContext) {}
+  constructor(
+    readonly flowName: string,
+    readonly g: FlowGraph,
+    readonly ctx: TranspilerContext,
+    readonly shared: SharedTranspilerState = createSharedState(),
+    readonly filePrefix = ''
+  ) {
+    this.imports = shared.imports;
+    this.sqlFiles = shared.sqlFiles;
+    this.jsFiles = shared.jsFiles;
+    this.scriptFiles = shared.scriptFiles;
+    this.env = shared.env;
+    this.databases = shared.databases;
+    this.requirements = shared.requirements;
+  }
+
+  resolveQueryInfo(queryId: string): TranspilerQueryInfo | undefined {
+    if (!queryId) return undefined;
+    if (this.ctx.queries?.[queryId]) return this.ctx.queries[queryId];
+    try {
+      const db = getDb();
+      const q = db.prepare('SELECT id, name, sql_text, params, connection_ids FROM queries WHERE id = ?').get(queryId) as any;
+      if (!q?.sql_text) return undefined;
+      let connIds: string[] = [];
+      try {
+        const parsed = JSON.parse(String(q.connection_ids || '[]'));
+        if (Array.isArray(parsed)) connIds = parsed.filter(Boolean).map(String);
+      } catch {}
+      const connections: TranspilerConnectionInfo[] = [];
+      for (const cid of connIds) {
+        const c = db.prepare('SELECT id, name, host, database_name, port, env_credential_key, driver FROM connections WHERE id = ?').get(cid) as any;
+        if (c) connections.push(c);
+      }
+      return {
+        id: String(q.id),
+        name: String(q.name || q.id),
+        sql_text: String(q.sql_text),
+        params: String(q.params || '[]'),
+        connections,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  resolveFlowInfo(flowId: string): { id: string; name: string; definition: { nodes: any[]; edges: any[] } } | null {
+    if (!flowId) return null;
+    const fromCtx = this.ctx.flows?.[flowId];
+    let rawDef: unknown = fromCtx?.definition;
+    let flowName = fromCtx?.name;
+    if (!fromCtx) {
+      try {
+        const row = getDb().prepare('SELECT id, name, definition FROM flows WHERE id = ?').get(flowId) as any;
+        if (!row) return null;
+        flowName = String(row.name || flowId);
+        rawDef = row.definition;
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const parsed = typeof rawDef === 'string' ? JSON.parse(openDefinition(rawDef || '{"nodes":[],"edges":[]}')) : rawDef;
+      return {
+        id: flowId,
+        name: String(flowName || flowId),
+        definition: {
+          nodes: Array.isArray((parsed as any)?.nodes) ? (parsed as any).nodes : [],
+          edges: Array.isArray((parsed as any)?.edges) ? (parsed as any).edges : [],
+        },
+      };
+    } catch {
+      return { id: flowId, name: String(flowName || flowId), definition: { nodes: [], edges: [] } };
+    }
+  }
+
+  ensureSubflowCompiled(subflow: { id: string; name: string; definition: { nodes: any[]; edges: any[] } }): string {
+    const existing = this.shared.subflowFnNames.get(subflow.id);
+    if (existing && this.shared.subflowDefs.has(subflow.id)) return existing;
+
+    const baseFn = `_run_subflow_${pyIdentifier(subflow.id, this.shared.usedSubflowFns)}`;
+    this.shared.subflowFnNames.set(subflow.id, baseFn);
+    const safePrefix = `sub_${subflow.id.replace(/[^A-Za-z0-9_]/g, '_') || 'subflow'}_`;
+
+    this.use('FlowContext');
+    this.shared.subflowStack.push(subflow.id);
+    try {
+      const rawNodes = (subflow.definition.nodes || []).filter((n: any) => n.type !== 'note');
+      const rawEdges = subflow.definition.edges || [];
+      const subG = analyzeGraph(rawNodes, rawEdges);
+      const subGen = new Generator(subflow.name, subG, this.ctx, this.shared, safePrefix);
+      const { steps, functions, mainLines } = compileFlowBody(subG, subGen, '    ');
+
+      const startIds = rawNodes.filter((n: any) => n.type === 'start').map((n: any) => n.id);
+      const startLiteral = pyLiteral(startIds.length ? startIds : ['start'], 4);
+      const nodePairs = rawNodes
+        .filter((n: any) => n.type !== 'start')
+        .map((n: any) => [String(n.id), String(n.data?.label || '')]);
+      const sourcesWithOutgoing = new Set(subG.edges.map((e: any) => e.source));
+      const terminalIds = rawNodes
+        .filter((n: any) => n.type !== 'start' && !sourcesWithOutgoing.has(n.id))
+        .map((n: any) => String(n.id));
+      const nonStartIds = rawNodes.filter((n: any) => n.type !== 'start').map((n: any) => String(n.id));
+      const candidates = [...new Set([...terminalIds.reverse(), ...nonStartIds.reverse()])];
+
+      const indentBlock = (code: string) =>
+        code
+          .split('\n')
+          .map(line => (line ? `    ${line}` : ''))
+          .join('\n');
+
+      const bodyLines: string[] = [
+        `def ${baseFn}(params):`,
+        `    """Subflujo: ${pyComment(subflow.name)}"""`,
+        `    ctx = FlowContext(${pyStr(subflow.name)}, ${steps.length})`,
+        `    ctx["_params"] = params or {}`,
+        `    for _k, _v in (params or {}).items():`,
+        `        if _k not in ctx:`,
+        `            ctx[_k] = _v`,
+        `    for _sid in ${startLiteral}:`,
+        `        ctx[_sid] = {"msg": "Flow started"}`,
+        `        ctx.ran.add(_sid)`,
+      ];
+      for (const fnCode of functions) {
+        bodyLines.push('', indentBlock(fnCode));
+      }
+      if (mainLines.length > 0) {
+        bodyLines.push('', ...mainLines);
+      }
+      bodyLines.push(
+        '',
+        `    _sub_outputs = {}`,
+        `    for _nid, _label in ${pyLiteral(nodePairs, 4)}:`,
+        `        if _nid in ctx:`,
+        `            _sub_outputs[_nid] = ctx[_nid]`,
+        `            if _label:`,
+        `                _sub_outputs[_label] = ctx[_nid]`,
+        `    _main_output = None`,
+        `    for _tid in ${pyLiteral(candidates, 4)}:`,
+        `        if _tid in ctx:`,
+        `            _main_output = ctx[_tid]`,
+        `            break`,
+        `    return {`,
+        `        "data": _main_output,`,
+        `        "outputs": _sub_outputs,`,
+        `        "params": params or {},`,
+        `        "flowId": ${pyStr(subflow.id)},`,
+        `        "flowName": ${pyStr(subflow.name)},`,
+        `    }`,
+      );
+      this.shared.subflowDefs.set(subflow.id, bodyLines.join('\n'));
+    } finally {
+      this.shared.subflowStack.pop();
+    }
+    return baseFn;
+  }
 
   use(...names: string[]) {
     names.forEach(n => this.imports.add(n));
@@ -378,19 +574,58 @@ class Generator {
       case 'scraping': return this.scrapingBody(node);
       case RUN_SCRIPT_NODE_TYPE: return this.runScriptBody(node);
       case 'runFlow': {
-        this.use('log');
+        this.use('log', 'resolve');
         const targetId = String(node.data?.targetFlowId || '').trim();
         const targetName = String(node.data?.targetFlowName || targetId || 'subflujo');
+        const outputNodeId = String(node.data?.outputNodeId || '').trim();
         const rawParams = Array.isArray(node.data?.flowParams) ? node.data.flowParams : [];
         const paramPairs = rawParams
           .filter((p: any) => p && typeof p.key === 'string' && p.key.trim())
-          .map((p: any) => `${pyStr(p.key.trim())}: ctx.resolve(${pyStr(String(p.value ?? ''))})`);
-        return [
+          .map((p: any) => `${pyStr(p.key.trim())}: resolve(ctx, ${pyStr(String(p.value ?? ''))})`);
+        const lines: string[] = [
           `# Subflujo: ${pyComment(targetName)} (${pyComment(targetId || 'sin asignar')})`,
           `params = {${paramPairs.join(', ')}}`,
           `log.info(${pyStr(`Ejecutar subflujo '${targetName}'`)})`,
-          `return {"data": None, "params": params, "flowId": ${pyStr(targetId)}, "flowName": ${pyStr(targetName)}}`,
         ];
+
+        const fallback = `{"data": None, "params": params, "flowId": ${pyStr(targetId)}, "flowName": ${pyStr(targetName)}}`;
+        if (!targetId) {
+          lines.push(`log.warning(${pyStr(`El nodo '${this.label(node)}' no tiene un subflujo asignado`)})`);
+          lines.push(`ctx[${pyStr(node.id)}] = ${fallback}`);
+          lines.push(`return ctx[${pyStr(node.id)}]`);
+          return lines;
+        }
+        if (this.shared.subflowStack.includes(targetId)) {
+          lines.push(`log.warning(${pyStr(`Llamada recursiva circular detectada hacia el subflujo '${targetName}' (${targetId})`)})`);
+          lines.push(`ctx[${pyStr(node.id)}] = ${fallback}`);
+          lines.push(`return ctx[${pyStr(node.id)}]`);
+          return lines;
+        }
+        if (this.shared.subflowStack.length >= MAX_SUBFLOW_DEPTH) {
+          lines.push(`log.warning(${pyStr(`Profundidad máxima de subflujos (${MAX_SUBFLOW_DEPTH}) alcanzada al invocar '${targetName}'`)})`);
+          lines.push(`ctx[${pyStr(node.id)}] = ${fallback}`);
+          lines.push(`return ctx[${pyStr(node.id)}]`);
+          return lines;
+        }
+
+        const subflow = this.resolveFlowInfo(targetId);
+        if (!subflow) {
+          lines.push(`log.warning(${pyStr(`No se encontró el subflujo '${targetName}' (${targetId})`)})`);
+          lines.push(`ctx[${pyStr(node.id)}] = ${fallback}`);
+          lines.push(`return ctx[${pyStr(node.id)}]`);
+          return lines;
+        }
+
+        const subFn = this.ensureSubflowCompiled(subflow);
+        lines.push(`_sub_res = ${subFn}(params)`);
+        if (outputNodeId) {
+          lines.push(`_out_id = ${pyStr(outputNodeId)}`);
+          lines.push('if _out_id in (_sub_res.get("outputs") or {}):');
+          lines.push('    _sub_res = {**_sub_res, "data": _sub_res["outputs"][_out_id]}');
+        }
+        lines.push(`ctx[${pyStr(node.id)}] = _sub_res`);
+        lines.push('return _sub_res');
+        return lines;
       }
       default:
         this.use('log');
@@ -477,14 +712,14 @@ class Generator {
 
   queryBody(node: any, step: StepInfo): string[] {
     const data = node.data || {};
-    const query = this.ctx.queries[data.queryId];
+    const query = this.resolveQueryInfo(data.queryId);
     if (!query?.sql_text) {
       this.use('log');
       return [`log.warning(${pyStr(`La consulta del nodo '${this.label(node)}' no está configurada.`)})`, 'return []'];
     }
     this.use('run_sql');
 
-    const fileName = `${String(step.number).padStart(2, '0')}_${slugify(this.label(node) || query.name) || 'consulta'}.sql`;
+    const fileName = `${this.filePrefix}${String(step.number).padStart(2, '0')}_${slugify(this.label(node) || query.name) || 'consulta'}.sql`;
     const connections = query.connections?.length
       ? query.connections
       : [{ id: 'default', name: 'SQL Server', host: 'localhost', database_name: '', port: 1433, env_credential_key: 'SQLSERVER' }];
@@ -746,7 +981,7 @@ class Generator {
       return lines;
     }
     this.use('run_js');
-    const fileName = `${String(step.number).padStart(2, '0')}_${slugify(this.label(node)) || 'transformacion'}.js`;
+    const fileName = `${this.filePrefix}${String(step.number).padStart(2, '0')}_${slugify(this.label(node)) || 'transformacion'}.js`;
     this.jsFiles.push({
       fileName,
       nodeLabel: this.label(node),
@@ -954,31 +1189,7 @@ class Generator {
 // Entry point
 // ---------------------------------------------------------------------------
 
-export function transpileFlowToPython(
-  flowName: string,
-  definition: { nodes: any[]; edges: any[] },
-  ctx: TranspilerContext
-): TranspilerOutput {
-  const notes = (definition.nodes || []).filter((n: any) => n.type === 'note' && String(n.data?.text || '').trim());
-  const nodes: any[] = (definition.nodes || []).filter((n: any) => n.type !== 'note');
-  const slug = slugify(flowName) || 'flujo';
-
-  if (nodes.length === 0) {
-    return {
-      script: `#!/usr/bin/env python3\n"""${flowName}: el flujo no tiene nodos configurados."""\nprint("El flujo no tiene nodos configurados.")\n`,
-      runtimePy: PYTHON_RUNTIME,
-      scriptFiles: [],
-      requirementsTxt: 'python-dotenv>=1.0.0\n',
-      envExample: '# Sin variables requeridas\n',
-      readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.\n`,
-      sqlFiles: [],
-      jsFiles: [],
-    };
-  }
-
-  const g = analyzeGraph(nodes, definition.edges || []);
-  const gen = new Generator(flowName, g, ctx);
-
+function compileFlowBody(g: FlowGraph, gen: Generator, baseIndent: string) {
   // Number the steps in execution order (loop bodies right after their loop); start nodes are implicit
   const ordered: any[] = g.mainOrder.flatMap(n => (n.type === 'forEach' ? [n, ...(g.loops.get(n.id)?.body || [])] : [n]));
   const usedNames = new Set<string>();
@@ -1039,8 +1250,37 @@ export function transpileFlowToPython(
 
   for (const n of g.mainOrder) {
     if (n.type === 'start') continue;
-    emitNode(n, '    ');
+    emitNode(n, baseIndent);
   }
+
+  return { steps, functions, mainLines };
+}
+
+export function transpileFlowToPython(
+  flowName: string,
+  definition: { nodes: any[]; edges: any[] },
+  ctx: TranspilerContext
+): TranspilerOutput {
+  const notes = (definition.nodes || []).filter((n: any) => n.type === 'note' && String(n.data?.text || '').trim());
+  const nodes: any[] = (definition.nodes || []).filter((n: any) => n.type !== 'note');
+  const slug = slugify(flowName) || 'flujo';
+
+  if (nodes.length === 0) {
+    return {
+      script: `#!/usr/bin/env python3\n"""${flowName}: el flujo no tiene nodos configurados."""\nprint("El flujo no tiene nodos configurados.")\n`,
+      runtimePy: PYTHON_RUNTIME,
+      scriptFiles: [],
+      requirementsTxt: 'python-dotenv>=1.0.0\n',
+      envExample: '# Sin variables requeridas\n',
+      readmeMd: `# ${flowName}\n\nEl flujo no contiene nodos configurados.\n`,
+      sqlFiles: [],
+      jsFiles: [],
+    };
+  }
+
+  const g = analyzeGraph(nodes, definition.edges || []);
+  const gen = new Generator(flowName, g, ctx);
+  const { steps, functions, mainLines } = compileFlowBody(g, gen, '    ');
 
   const startIds = nodes.filter(n => n.type === 'start').map(n => n.id);
   const startArgs: PyArg[] = [pyStr(flowName), ['total_steps', String(steps.length)]];
@@ -1097,7 +1337,8 @@ export function transpileFlowToPython(
     );
   }
 
-  script.push('', ...functions.flatMap(f => [f, '', '']));
+  const subflowFunctions = [...gen.shared.subflowDefs.values()];
+  script.push('', ...[...subflowFunctions, ...functions].flatMap(f => [f, '', '']));
   script.push(
     'def main():',
     `    ctx = ${pyCall('start_flow', startArgs, 4, 'ctx = ')}`,

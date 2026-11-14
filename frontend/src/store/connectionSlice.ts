@@ -1,5 +1,5 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { API_URL } from '../lib/api';
+import { API_URL, readApiResponse } from '../lib/api';
 
 export interface Connection {
   id: string;
@@ -42,13 +42,12 @@ const initialState: ConnectionState = {
 
 export const fetchConnections = createAsyncThunk('connections/fetchAll', async () => {
   const res = await fetch(`${API_URL}/connections`);
-  const data = await res.json();
-  return data as { data: Connection[]; grouped: Record<string, Record<string, Connection[]>> };
+  return readApiResponse<{ data: Connection[]; grouped: Record<string, Record<string, Connection[]>> }>(res, 'Error al cargar conexiones');
 });
 
 export const testConnection = createAsyncThunk('connections/test', async (id: string) => {
   const res = await fetch(`${API_URL}/connections/${id}/test`, { method: 'POST' });
-  return res.json();
+  return readApiResponse<{ data: any }>(res, 'Error al probar conexión');
 });
 
 export const createConnection = createAsyncThunk('connections/create', async (connectionData: any) => {
@@ -107,7 +106,10 @@ const connectionSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchConnections.pending, (state) => { state.loading = true; })
+      .addCase(fetchConnections.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
       .addCase(fetchConnections.fulfilled, (state, action) => {
         state.loading = false;
         state.connections = action.payload.data;
@@ -115,7 +117,7 @@ const connectionSlice = createSlice({
       })
       .addCase(fetchConnections.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message || 'Error';
+        state.error = action.error.message || 'Error al cargar conexiones';
       })
       .addCase(createConnection.fulfilled, (state, action) => {
         state.connections.push(action.payload.data);
@@ -167,9 +169,26 @@ const connectionSlice = createSlice({
           }
         }
         state.connections = state.connections.filter(c => c.id !== action.payload);
+        state.selectedDestinations = state.selectedDestinations.filter(id => id !== action.payload);
         if (state.currentConnection?.id === action.payload) {
           state.currentConnection = null;
         }
+      })
+      .addCase(createConnection.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al crear conexión';
+      })
+      .addCase(updateConnection.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al actualizar conexión';
+      })
+      .addCase(deleteConnection.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al eliminar conexión';
+      })
+      .addCase(testConnection.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al probar conexión';
       });
   },
 });

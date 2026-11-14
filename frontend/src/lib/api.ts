@@ -44,3 +44,12 @@ export function installApiAccess(): void {
 export function createSocket(options: Partial<ManagerOptions & SocketOptions> = {}) {
   return io(SOCKET_URL, { withCredentials: true, ...options });
 }
+
+/** Parses JSON from an API Response and throws a descriptive Error if !res.ok */
+export async function readApiResponse<T = any>(res: Response, fallbackError: string): Promise<T> {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error((data as any)?.message || (data as any)?.error || `${fallbackError} (${res.status})`);
+  }
+  return data as T;
+}

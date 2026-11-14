@@ -54,6 +54,7 @@ export function ScrapingInspector({ node, updateNodeData }: ScrapingInspectorPro
           </Link>
         </div>
         <select
+          aria-label="Script de extracción (.py)"
           className="flex w-full h-9 rounded-sm border border-border bg-surface px-2.5 text-xs focus-visible:outline-none focus-visible:border-accent"
           value={selected?.id ?? value}
           onChange={(e) => updateNodeData('script', e.target.value)}

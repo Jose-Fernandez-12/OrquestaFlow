@@ -109,6 +109,7 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
             <div className="space-y-1.5">
               <label className="text-xs font-medium">Formato de exportación</label>
               <select
+                aria-label="Formato de exportación"
                 className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
                 value={format}
                 onChange={(e) => updateNodeData('format', e.target.value)}
@@ -122,6 +123,7 @@ export function ExportInspector({ node, nodes, edges, updateNodeData }: ExportIn
               <div className="space-y-1.5">
                 <label className="text-xs font-medium">Modo de Exportación</label>
                 <select
+                  aria-label="Modo de exportación Excel"
                   className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
                   value={exportMode}
                   onChange={(e) => updateNodeData('exportMode', e.target.value)}

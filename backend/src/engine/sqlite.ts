@@ -1,17 +1,45 @@
 import initSqlJs from 'sql.js';
 import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import { basename, join, resolve } from 'path';
+
+let sqlJsPromise: ReturnType<typeof initSqlJs> | null = null;
+
+function getSqlJs() {
+  if (!sqlJsPromise) {
+    sqlJsPromise = initSqlJs({
+      locateFile: file => join(process.cwd(), 'node_modules', 'sql.js', 'dist', file)
+    }).catch(err => {
+      sqlJsPromise = null;
+      throw err;
+    });
+  }
+  return sqlJsPromise;
+}
+
+export function validateSqliteFilePath(filePath: string): string {
+  const raw = String(filePath ?? '').trim();
+  if (!raw) {
+    throw new Error('La ruta del archivo SQLite es obligatoria');
+  }
+  if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(raw)) {
+    throw new Error('Ruta SQLite no permitida (path traversal detectado)');
+  }
+  const resolved = resolve(raw);
+  if (basename(resolved).toLowerCase() === 'orquesta.sqlite') {
+    throw new Error('No se permite acceder a la base de datos interna orquesta.sqlite');
+  }
+  return resolved;
+}
 
 export async function executeSqliteQuery(filePath: string, sqlText: string, params: Record<string, any> = {}) {
-  if (!existsSync(filePath)) {
+  const safePath = validateSqliteFilePath(filePath);
+  if (!existsSync(safePath)) {
     throw new Error(`Archivo SQLite no encontrado en la ruta: ${filePath}`);
   }
 
-  const SQL = await initSqlJs({
-    locateFile: file => join(process.cwd(), 'node_modules', 'sql.js', 'dist', file)
-  });
+  const SQL = await getSqlJs();
 
-  const fileBuffer = readFileSync(filePath);
+  const fileBuffer = readFileSync(safePath);
   const db = new SQL.Database(fileBuffer);
 
   try {

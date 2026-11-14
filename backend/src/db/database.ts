@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { join } from 'path';
 import { encryptSecret } from '../engine/secrets.js';
 import { sealDefinition } from '../engine/nodeSecrets.js';
+import { v4 as uuid } from 'uuid';
 
 // ORQUESTA_DB_PATH=':memory:' keeps the database in memory only (used by the automated tests)
 const DB_PATH = process.env.ORQUESTA_DB_PATH || join(process.cwd(), 'data', 'orquesta.sqlite');
@@ -143,6 +144,19 @@ export async function initDb(): Promise<void> {
     // Ignore if exists
   }
 
+  try {
+    wrappedDb.exec('ALTER TABLE flows ADD COLUMN published_version_id TEXT;');
+    console.log('[DB] Migrated: added published_version_id to flows');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+  try {
+    wrappedDb.exec('ALTER TABLE flows ADD COLUMN published_definition TEXT;');
+    console.log('[DB] Migrated: added published_definition to flows');
+  } catch (e: any) {
+    // Ignore if exists
+  }
+
   encryptStoredPasswords(wrappedDb);
   sealStoredDefinitions(wrappedDb);
   compactQueryResults(wrappedDb);
@@ -190,6 +204,57 @@ export async function initDb(): Promise<void> {
     console.error('[DB] Error initializing system_settings:', e);
   }
 
+  try {
+    wrappedDb.exec(`
+      CREATE TABLE IF NOT EXISTS environments (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        is_active INTEGER DEFAULT 0,
+        variables_json TEXT DEFAULT '{}',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS webhook_logs (
+        id TEXT PRIMARY KEY,
+        flow_id TEXT NOT NULL,
+        webhook_id TEXT NOT NULL,
+        method TEXT NOT NULL,
+        headers_json TEXT,
+        query_json TEXT,
+        body_json TEXT,
+        status_code INTEGER,
+        response_json TEXT,
+        idempotency_key TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_webhook_logs_idempotency ON webhook_logs(webhook_id, idempotency_key);
+      CREATE INDEX IF NOT EXISTS idx_execution_logs_started_at ON execution_logs(started_at);
+      CREATE INDEX IF NOT EXISTS idx_execution_logs_schedule_id ON execution_logs(schedule_id);
+    `);
+  } catch (e: any) {
+    console.error('[DB] Error creating environments/webhook_logs/indexes:', e);
+  }
+
+  try {
+    const envCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM environments').get() as { count: number };
+    if (envCount.count === 0) {
+      const defaultEnvs: Array<[string, string, number]> = [
+        ['dev', 'Desarrollo', 1],
+        ['staging', 'Staging', 0],
+        ['prod', 'Producción', 0],
+      ];
+      for (const [slug, name, isActive] of defaultEnvs) {
+        wrappedDb.prepare(
+          `INSERT INTO environments (id, name, slug, is_active, variables_json) VALUES (?, ?, ?, ?, '{}')`
+        ).run(uuid(), name, slug, isActive);
+      }
+      console.log('[DB] Seeded default environments');
+    }
+  } catch (e: any) {
+    console.error('[DB] Error initializing environments:', e);
+  }
+
   // Seed demo data if tables are empty
   const flowCount = wrappedDb.prepare('SELECT COUNT(*) as count FROM flows').get() as { count: number };
   if (flowCount.count === 0) {
@@ -209,7 +274,7 @@ function migrateExecutionLogs(db: SqlJsWrapper) {
   const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'execution_logs'").get() as { sql?: string } | undefined;
   if (table?.sql && !table.sql.includes("'cancelled'")) {
     const cols = (db.prepare('PRAGMA table_info(execution_logs)').all() as Array<{ name: string }>).map(c => c.name);
-    const keep = ['id', 'target_type', 'target_id', 'schedule_id', 'status', 'result', 'error_message', 'duration_ms', 'record_count', 'trigger_type', 'node_trace', 'started_at', 'completed_at']
+    const keep = ['id', 'target_type', 'target_id', 'schedule_id', 'status', 'result', 'error_message', 'duration_ms', 'record_count', 'trigger_type', 'node_trace', 'parent_execution_id', 'started_at', 'completed_at']
       .filter(c => cols.includes(c))
       .join(', ');
     db.exec(`
@@ -226,6 +291,7 @@ function migrateExecutionLogs(db: SqlJsWrapper) {
         record_count INTEGER,
         trigger_type TEXT,
         node_trace TEXT,
+        parent_execution_id TEXT,
         started_at TEXT DEFAULT (datetime('now')),
         completed_at TEXT
       );
@@ -234,6 +300,12 @@ function migrateExecutionLogs(db: SqlJsWrapper) {
       CREATE INDEX IF NOT EXISTS idx_execution_logs_target ON execution_logs(target_type, target_id, started_at);
     `);
     console.log('[DB] Migrated: execution_logs now supports cancelled runs and node traces');
+  }
+
+  try {
+    db.exec('ALTER TABLE execution_logs ADD COLUMN parent_execution_id TEXT;');
+  } catch {
+    // Ignore if exists
   }
 
   // Before 'cancelled' existed, stopped runs were stored as errors
@@ -268,6 +340,15 @@ function sealStoredDefinitions(db: SqlJsWrapper) {
       db.prepare(`UPDATE ${table} SET definition = ? WHERE id = ?`).run(next, row.id);
       sealed++;
     }
+  }
+  const pubRows = db
+    .prepare("SELECT id, published_definition FROM flows WHERE published_definition IS NOT NULL AND published_definition != ''")
+    .all() as Array<{ id: string; published_definition: string }>;
+  for (const row of pubRows) {
+    const next = sealDefinition(row.published_definition);
+    if (next === row.published_definition) continue;
+    db.prepare('UPDATE flows SET published_definition = ? WHERE id = ?').run(next, row.id);
+    sealed++;
   }
   if (sealed > 0) console.log(`[DB] Migrated: encrypted the secrets typed into ${sealed} flow definition(s)`);
 }

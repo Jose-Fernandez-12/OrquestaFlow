@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Input } from '../../../ui/input';
-import { Table, Sparkles, Check, Copy } from 'lucide-react';
+import { Table, Sparkles, Check, Copy, Gauge } from 'lucide-react';
 import { cn } from '../../../../lib/utils';
+import { copyToClipboard } from '../../../../lib/clipboard';
 import { useAppSelector } from '../../../../store/hooks';
 import { getForEachItems } from '../utils';
 import type { InspectorProps } from '../types';
@@ -17,10 +18,12 @@ export function ForEachInspector({ node, nodes, edges, updateNodeData }: ForEach
   const nodeResults = useAppSelector(state => (state as any).flows?.nodeResults) || EMPTY_RESULTS;
   const intermediateContext = useAppSelector(state => state.flows.intermediateContext);
 
-  const copyVariable = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(text);
-    setTimeout(() => setCopiedKey(null), 1800);
+  const copyVariable = async (text: string) => {
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedKey(text);
+      setTimeout(() => setCopiedKey(null), 1800);
+    }
   };
 
   const currentLoopItems = React.useMemo(() => {
@@ -198,6 +201,53 @@ export function ForEachInspector({ node, nodes, edges, updateNodeData }: ForEach
             </p>
           </div>
         )}
+      </div>
+
+      {/* Concurrencia y rate limit */}
+      <div className="p-3 bg-bg/60 border border-border rounded-md space-y-3">
+        <div className="flex items-center gap-1.5 text-xs font-semibold text-fg">
+          <Gauge size={13} className="text-accent" />
+          <span>Concurrencia y ritmo de ejecución</span>
+        </div>
+        <div className="grid grid-cols-2 gap-2.5">
+          <div className="space-y-1">
+            <label htmlFor={`foreach-concurrency-${node.id}`} className="text-[11px] font-medium text-fg block">
+              Concurrencia (1–10)
+            </label>
+            <Input
+              id={`foreach-concurrency-${node.id}`}
+              type="number"
+              min={1}
+              max={10}
+              value={Number(node.data?.concurrency ?? 1)}
+              onChange={(e) => {
+                const parsed = Math.max(1, Math.min(10, Math.trunc(Number(e.target.value) || 1)));
+                updateNodeData('concurrency', parsed);
+              }}
+              className="h-8 text-xs font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={`foreach-ratelimit-${node.id}`} className="text-[11px] font-medium text-fg block">
+              Pausa entre ejecuciones (ms)
+            </label>
+            <Input
+              id={`foreach-ratelimit-${node.id}`}
+              type="number"
+              min={0}
+              step={50}
+              value={Number(node.data?.rateLimitMs ?? 0)}
+              onChange={(e) => {
+                const parsed = Math.max(0, Math.trunc(Number(e.target.value) || 0));
+                updateNodeData('rateLimitMs', parsed);
+              }}
+              className="h-8 text-xs font-mono"
+            />
+          </div>
+        </div>
+        <p className="text-[10px] text-muted leading-relaxed">
+          Usa concurrencia 1 para ejecución secuencial estricta o sube hasta 10 lotes paralelos; <code className="text-fg">rateLimitMs</code> agrega un retraso entre arranques.
+        </p>
       </div>
 
       {/* Guía de mapeo */}
