@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS flows (
   definition TEXT NOT NULL DEFAULT '{"nodes":[],"edges":[]}',
   status TEXT DEFAULT 'draft',
   is_locked INTEGER DEFAULT 0,
+  published_version_id TEXT,
+  published_definition TEXT,
   last_run_at TEXT,
   last_run_duration_ms INTEGER,
   last_run_record_count INTEGER,
@@ -83,11 +85,14 @@ CREATE TABLE IF NOT EXISTS execution_logs (
   record_count INTEGER,
   trigger_type TEXT,
   node_trace TEXT,
+  parent_execution_id TEXT,
   started_at TEXT DEFAULT (datetime('now')),
   completed_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_execution_logs_target ON execution_logs(target_type, target_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_execution_logs_started_at ON execution_logs(started_at);
+CREATE INDEX IF NOT EXISTS idx_execution_logs_schedule_id ON execution_logs(schedule_id);
 
 CREATE TABLE IF NOT EXISTS flow_versions (
   id TEXT PRIMARY KEY,
@@ -122,3 +127,29 @@ CREATE TABLE IF NOT EXISTS credentials (
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS environments (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  is_active INTEGER DEFAULT 0,
+  variables_json TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS webhook_logs (
+  id TEXT PRIMARY KEY,
+  flow_id TEXT NOT NULL,
+  webhook_id TEXT NOT NULL,
+  method TEXT NOT NULL,
+  headers_json TEXT,
+  query_json TEXT,
+  body_json TEXT,
+  status_code INTEGER,
+  response_json TEXT,
+  idempotency_key TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_logs_idempotency ON webhook_logs(webhook_id, idempotency_key);

@@ -276,6 +276,7 @@ export function JoinMappingEditor({
                     <span>(Se unirá a {mainNodeLabel})</span>
                   </div>
                   <select
+                    aria-label="Nodo secundario a cruzar"
                     className="flex w-full h-7 rounded border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
                     value={join.nodeId}
                     onChange={e => handleSelectJoinedNode(i, e.target.value)}
@@ -329,6 +330,7 @@ export function JoinMappingEditor({
                           </div>
                         ) : (
                           <select
+                            aria-label={`Columna en ${mainNodeLabel}`}
                             className="w-full h-7 rounded border border-border bg-bg px-2 text-xs font-mono focus-visible:outline-none focus-visible:border-accent truncate"
                             value={join.localKey}
                             onChange={e => {
@@ -385,6 +387,7 @@ export function JoinMappingEditor({
                           </div>
                         ) : (
                           <select
+                            aria-label={`Columna en ${joinedNodeLabel}`}
                             className="w-full h-7 rounded border border-border bg-bg px-2 text-xs font-mono focus-visible:outline-none focus-visible:border-accent truncate"
                             value={join.foreignKey}
                             onChange={e => {

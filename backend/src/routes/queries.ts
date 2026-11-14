@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
+import { isUnsafeSqlitePath } from '../security/access.js';
 
 export async function queryRoutes(app: FastifyInstance): Promise<void> {
   // List all queries
@@ -161,6 +162,13 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'Debe seleccionar al menos una conexión de base de datos' });
     }
 
+    for (const connId of connection_ids) {
+      const conn = db.prepare('SELECT id, driver, host FROM connections WHERE id = ?').get(connId) as Record<string, any> | undefined;
+      if (String(conn?.driver || '').trim().toLowerCase() === 'sqlite' && isUnsafeSqlitePath(conn?.host)) {
+        return reply.status(400).send({ error: 'Ruta SQLite no permitida (no se admite ".." ni apuntar a orquesta.sqlite)' });
+      }
+    }
+
     const logId = customLogId || uuid();
     db.prepare(`
       INSERT INTO execution_logs (id, target_type, target_id, status, result)
@@ -240,6 +248,14 @@ export async function queryRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const existing = db.prepare('SELECT * FROM queries WHERE id = ?').get(request.params.id);
     if (!existing) return reply.status(404).send({ error: 'Query not found' });
+
+    const querySchedules = db.prepare("SELECT id FROM schedules WHERE target_type = 'query' AND target_id = ?")
+      .all(request.params.id) as Array<{ id: string }>;
+    db.prepare("DELETE FROM schedules WHERE target_type = 'query' AND target_id = ?").run(request.params.id);
+    if (querySchedules.length > 0) {
+      const { updateJobSchedule } = await import('../engine/scheduler.js');
+      for (const s of querySchedules) updateJobSchedule(s.id);
+    }
 
     db.prepare('DELETE FROM queries WHERE id = ?').run(request.params.id);
     return { data: { deleted: true } };

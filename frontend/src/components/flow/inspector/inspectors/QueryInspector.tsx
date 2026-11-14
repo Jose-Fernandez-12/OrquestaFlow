@@ -11,6 +11,7 @@ import { InspectorTabs } from '../InspectorTabs';
 import { JsonSelectorModal } from '../editors/JsonSelectorModal';
 import { MapSourceButton } from '../editors/MapSourceButton';
 import { getUpstreamNodes } from '../utils';
+import { copyToClipboard } from '../../../../lib/clipboard';
 import type { InspectorProps, TabDefinition } from '../types';
 
 type QueryInspectorProps = Pick<InspectorProps, 'node' | 'nodes' | 'edges' | 'updateNodeData'>;
@@ -77,6 +78,7 @@ export function QueryInspector({ node, nodes, edges, updateNodeData }: QueryInsp
             <div className="space-y-1.5">
               <label className="text-xs font-medium">Seleccionar Consulta</label>
               <select
+                aria-label="Seleccionar consulta SQL"
                 className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
                 value={(node.data?.queryId as string) || ''}
                 onChange={(e) => updateNodeData('queryId', e.target.value)}
@@ -112,6 +114,7 @@ export function QueryInspector({ node, nodes, edges, updateNodeData }: QueryInsp
             <div className="space-y-1.5">
               <label className="text-xs font-medium">Modo de extracción</label>
               <select
+                aria-label="Modo de extracción de filas"
                 className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
                 value={(node.data?.extractMode as string) || 'all'}
                 onChange={(e) => updateNodeData('extractMode', e.target.value)}
@@ -268,14 +271,21 @@ function SqlQueryModal({
 
   if (!isOpen) return null;
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(displaySql);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(displaySql);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    }
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-fg/40 animate-fade-in backdrop-blur-xs">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={queryName}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-fg/40 animate-fade-in backdrop-blur-xs"
+    >
       <div className="bg-surface border border-border rounded-lg shadow-raised w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="p-3.5 border-b border-border flex items-center justify-between shrink-0 bg-bg/40">

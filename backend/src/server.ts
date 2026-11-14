@@ -23,6 +23,8 @@ import { pythonExportRoutes } from './routes/pythonExport.js';
 import { dashboardRoutes } from './routes/dashboard.js';
 import { authRoutes, accessRequestOf } from './routes/auth.js';
 import { credentialRoutes } from './routes/credentials.js';
+import { executionRoutes } from './routes/executions.js';
+import { environmentRoutes } from './routes/environments.js';
 import { accessToken, accessTokenSource, accessTokenFile, checkAccess, isAllowedOrigin } from './security/access.js';
 
 config();
@@ -31,7 +33,8 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 
 const app = Fastify({
-  logger: true
+  logger: true,
+  trustProxy: true
 });
 
 async function start(): Promise<void> {
@@ -80,7 +83,10 @@ async function start(): Promise<void> {
   await app.register(fastifyStatic, {
     root: join(process.cwd(), 'uploads'),
     prefix: '/uploads/',
-    decorateReply: false
+    decorateReply: false,
+    setHeaders: (res) => {
+      res.setHeader('Content-Disposition', 'attachment');
+    }
   });
 
   // Serve exported files for download strictly from data/exports (protecting orquesta.sqlite)
@@ -112,6 +118,8 @@ async function start(): Promise<void> {
   await app.register(dashboardRoutes, { prefix: '/api/dashboard' });
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(credentialRoutes, { prefix: '/api/credentials' });
+  await app.register(executionRoutes, { prefix: '/api/executions' });
+  await app.register(environmentRoutes, { prefix: '/api/environments' });
 
   // Health check
   app.get('/api/health', async () => {

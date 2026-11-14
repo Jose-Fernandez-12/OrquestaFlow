@@ -1,10 +1,11 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import { Button } from '../../ui/button';
-import { Trash2, Braces, Repeat, Check, Copy, ChevronDown, FlaskConical, Loader2, FastForward } from 'lucide-react';
+import { Trash2, Braces, Repeat, Check, Copy, ChevronDown, FlaskConical, Loader2, FastForward, Pin, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useAppSelector, useAppDispatch } from '../../../store/hooks';
 import { selectNode } from '../../../store/flowSlice';
 import { cn } from '../../../lib/utils';
+import { copyToClipboard } from '../../../lib/clipboard';
 import { InspectorHeader } from './InspectorHeader';
 import { VariableDrawer } from './VariableDrawer';
 import { ErrorHandlingSection } from './ErrorHandlingSection';
@@ -28,6 +29,7 @@ import { ForEachEndInspector } from './inspectors/ForEachEndInspector';
 import { ConditionalBranchInspector } from './inspectors/ConditionalBranchInspector';
 import { JsonTransformInspector } from './inspectors/JsonTransformInspector';
 import { WebhookTriggerInspector } from './inspectors/WebhookTriggerInspector';
+import { WebhookRespondInspector } from './inspectors/WebhookRespondInspector';
 import { OAuth2ConnectorInspector } from './inspectors/OAuth2ConnectorInspector';
 import { AiChatCompletionInspector } from './inspectors/AiChatCompletionInspector';
 import { NoteInspector } from './inspectors/NoteInspector';
@@ -190,10 +192,12 @@ export function NodeInspector({
     return [];
   }, [parentLoopItems]);
 
-  const copyVariable = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(text);
-    setTimeout(() => setCopiedKey(null), 1800);
+  const copyVariable = async (text: string) => {
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedKey(text);
+      setTimeout(() => setCopiedKey(null), 1800);
+    }
   };
 
   if (!node) {
@@ -520,6 +524,16 @@ export function NodeInspector({
           />
         )}
 
+        {type === 'webhookRespond' && (
+          <WebhookRespondInspector
+            node={node}
+            nodes={nodes}
+            edges={edges}
+            updateNodeData={updateNodeData}
+            nodeResult={nodeResults[node.id]}
+          />
+        )}
+
         {type === 'oauth2Connector' && (
           <OAuth2ConnectorInspector
             node={node}
@@ -563,6 +577,7 @@ export function NodeInspector({
           'conditionalBranch',
           'jsonTransform',
           'webhookTrigger',
+          'webhookRespond',
           'oauth2Connector',
           'aiChatCompletion',
           'note',
@@ -575,6 +590,16 @@ export function NodeInspector({
           </div>
         )}
 
+        {/* Mock / Pin output for executable nodes */}
+        {!['start', 'forEach', 'forEachEnd', 'conditionalBranch', 'note'].includes(type) && (
+          <MockPinSection
+            key={`mock-${node.id}`}
+            node={node}
+            nodeResult={nodeResults[node.id]}
+            updateNodeData={updateNodeData}
+          />
+        )}
+
         {/* Retries and error policy (hidden for nodes that cannot fail transiently or continue) */}
         <ErrorHandlingSection key={node.id} node={node} updateNodeData={updateNodeData} />
 
@@ -582,6 +607,7 @@ export function NodeInspector({
         {!executing && (
         <div className="mt-8 pt-5 border-t border-border-light">
           <Button
+            type="button"
             variant="default"
             className={cn(
               "w-full flex items-center justify-center gap-2 text-sm font-semibold",
@@ -599,5 +625,113 @@ export function NodeInspector({
       </div>
 
     </aside>
+  );
+}
+
+interface MockPinSectionProps {
+  node: Node;
+  nodeResult: unknown;
+  updateNodeData: (key: string, value: any) => void;
+}
+
+function MockPinSection({ node, nodeResult, updateNodeData }: MockPinSectionProps) {
+  const mockEnabled = Boolean(node.data?.mockEnabled);
+  const rawMock = node.data?.mockOutput;
+  const mockOutputText =
+    typeof rawMock === 'string'
+      ? rawMock
+      : rawMock !== undefined
+        ? JSON.stringify(rawMock, null, 2)
+        : '';
+
+  const [open, setOpen] = useState(mockEnabled);
+
+  const jsonCheck = useMemo(() => {
+    if (!mockOutputText.trim()) return { ok: true, error: undefined };
+    try {
+      JSON.parse(mockOutputText);
+      return { ok: true, error: undefined };
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message || 'JSON inválido') };
+    }
+  }, [mockOutputText]);
+
+  const pinLastResult = () => {
+    if (nodeResult === undefined) return;
+    updateNodeData('mockOutput', JSON.stringify(nodeResult, null, 2));
+    updateNodeData('mockEnabled', true);
+    setOpen(true);
+  };
+
+  return (
+    <div className="shrink-0 border border-border rounded-lg overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2.5 px-3 py-2.5 bg-bg/60 hover:bg-bg text-left transition-colors"
+      >
+        <Pin size={14} className={mockEnabled ? 'text-amber-600' : 'text-muted'} />
+        <span className="flex-1 min-w-0">
+          <span className="block text-xs font-semibold text-fg">Fijar salida de prueba (Mock / Pin)</span>
+          <span className="block text-[10px] text-muted truncate">
+            {mockEnabled ? 'Activo · devuelve el JSON fijado' : 'Desactivado · ejecuta normalmente'}
+          </span>
+        </span>
+        <ChevronDown size={14} className={cn('text-muted transition-transform shrink-0', open && 'rotate-180')} />
+      </button>
+
+      {open && (
+        <div className="p-3 space-y-3 border-t border-border">
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex items-center gap-2 text-xs font-medium cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={mockEnabled}
+                onChange={(e) => updateNodeData('mockEnabled', e.target.checked)}
+                className="accent-amber-600"
+              />
+              <span>Usar salida simulada al ejecutar</span>
+            </label>
+            {nodeResult !== undefined && (
+              <button
+                type="button"
+                onClick={pinLastResult}
+                className="text-[10px] font-medium text-accent hover:underline shrink-0"
+              >
+                Fijar último resultado
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor={`mock-output-${node.id}`} className="text-[11px] font-medium text-fg">
+                Salida JSON simulada
+              </label>
+              {mockOutputText.trim() && (
+                <span className={jsonCheck.ok ? 'text-[10px] text-emerald-600 flex items-center gap-1' : 'text-[10px] text-danger flex items-center gap-1'}>
+                  {jsonCheck.ok ? <CheckCircle2 size={10} /> : <AlertCircle size={10} />}
+                  {jsonCheck.ok ? 'JSON válido' : 'JSON inválido'}
+                </span>
+              )}
+            </div>
+            <textarea
+              id={`mock-output-${node.id}`}
+              rows={5}
+              value={mockOutputText}
+              onChange={(e) => updateNodeData('mockOutput', e.target.value)}
+              placeholder={'{\n  "id": 123,\n  "status": "ok"\n}'}
+              className={cn(
+                'flex w-full rounded-sm border bg-surface px-2.5 py-2 text-xs font-mono text-fg focus-visible:outline-none',
+                jsonCheck.ok ? 'border-border focus-visible:border-accent' : 'border-danger/60 focus-visible:border-danger'
+              )}
+            />
+            <p className="text-[10px] text-muted leading-relaxed">
+              Cuando el mock está activo, el ejecutor omite la acción real y entrega este JSON como salida del nodo.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

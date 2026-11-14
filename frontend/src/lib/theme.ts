@@ -54,11 +54,27 @@ export const PRESET_THEMES: ColorTheme[] = [
 const THEME_ACCENT_KEY = 'orquesta-theme-accent';
 const CUSTOM_COLORS_KEY = 'orquesta-custom-theme-colors';
 
+export function getHexLuminance(hex: string): number | null {
+  const raw = hex.trim().replace(/^#/, '');
+  const full = /^[0-9a-f]{3}$/i.test(raw)
+    ? raw.split('').map(c => c + c).join('')
+    : /^[0-9a-f]{6}$/i.test(raw)
+      ? raw
+      : null;
+  if (!full) return null;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
 export function applyThemeColor(accentHex: string) {
   if (!accentHex || typeof document === 'undefined') return;
   const root = document.documentElement;
+  const luminance = getHexLuminance(accentHex);
   root.style.setProperty('--accent', accentHex);
   root.style.setProperty('--border-focus', accentHex);
+  root.style.setProperty('--accent-on', luminance !== null && luminance > 0.6 ? '#0f172a' : '#ffffff');
 }
 
 export function getSavedTheme(): string {

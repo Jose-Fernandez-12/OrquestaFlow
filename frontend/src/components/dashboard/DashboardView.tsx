@@ -224,9 +224,16 @@ export function DashboardView() {
     } catch { /* storage blocked: the choice lasts for this visit */ }
   };
 
+  const summaryTimestamp = summary?.generatedAt;
   const attention = useMemo(
-    () => buildAttention({ summary, flows, scripts, pythonReady, now: loadedAt }),
-    [summary, flows, scripts, pythonReady, loadedAt],
+    () => buildAttention({
+      summary,
+      flows,
+      scripts,
+      pythonReady,
+      now: summaryTimestamp ? (Date.parse(summaryTimestamp) || undefined) : undefined,
+    }),
+    [summary, flows, scripts, pythonReady, summaryTimestamp],
   );
   const status = headline(attention);
 

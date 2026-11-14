@@ -187,7 +187,12 @@ export function FlowExecutionHistoryModal({ flow, isOpen, onClose }: FlowExecuti
   const successRate = decidedRuns > 0 ? Math.round(((completedStat?.count ?? 0) / decidedRuns) * 100) : null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4 z-[9999] animate-in fade-in duration-fast">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Historial de ejecuciones"
+      className="fixed inset-0 bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4 z-[9999] animate-in fade-in duration-fast"
+    >
       <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-3xl max-h-[88vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-fast">
         {/* Header */}
         <div className="p-4 border-b border-border flex items-center justify-between shrink-0 bg-surface">

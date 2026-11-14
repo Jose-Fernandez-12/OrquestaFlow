@@ -1,5 +1,5 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { API_URL } from '../lib/api';
+import { API_URL, readApiResponse } from '../lib/api';
 
 export type ScriptEnvView = 'sin-dependencias' | 'compartido' | 'propio' | 'pendiente' | 'no-preparado' | 'invalido';
 
@@ -37,6 +37,7 @@ interface ScriptState {
   activeCount: number;
   executedToday: number;
   loading: boolean;
+  error: string | null;
 }
 
 const initialState: ScriptState = {
@@ -44,12 +45,15 @@ const initialState: ScriptState = {
   activeCount: 0,
   executedToday: 0,
   loading: false,
+  error: null,
 };
 
 export const fetchScripts = createAsyncThunk('scripts/fetchAll', async () => {
   const res = await fetch(`${API_URL}/scripts`);
-  const data = await res.json();
-  return data;
+  return readApiResponse<{
+    data: Script[];
+    meta: { activeCount: number; executedToday: number };
+  }>(res, 'Error al cargar scripts');
 });
 
 const scriptSlice = createSlice({
@@ -58,12 +62,19 @@ const scriptSlice = createSlice({
   reducers: {},
   extraReducers: (builder) => {
     builder
-      .addCase(fetchScripts.pending, (state) => { state.loading = true; })
+      .addCase(fetchScripts.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
       .addCase(fetchScripts.fulfilled, (state, action) => {
         state.loading = false;
         state.scripts = action.payload.data;
         state.activeCount = action.payload.meta.activeCount;
         state.executedToday = action.payload.meta.executedToday;
+      })
+      .addCase(fetchScripts.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al cargar scripts';
       });
   },
 });

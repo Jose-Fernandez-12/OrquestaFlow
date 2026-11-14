@@ -7,6 +7,7 @@ import { useAppSelector } from '../../../../store/hooks';
 import { truncateArrays, extractExportableSample } from '../utils';
 import { getApiUrl } from '../../../../lib/api';
 import { cn } from '../../../../lib/utils';
+import { copyToClipboard } from '../../../../lib/clipboard';
 import type { Node } from '@xyflow/react';
 import { toIterationPath } from './iterationPath';
 
@@ -251,7 +252,7 @@ export function JsonSelectorModal({
       onSelectValue(variableFormat);
       setIsOpen(false);
     } else {
-      navigator.clipboard.writeText(variableFormat);
+      void copyToClipboard(variableFormat);
       alert(`Copiado al portapapeles: ${variableFormat}`);
     }
   };
@@ -317,7 +318,12 @@ export function JsonSelectorModal({
 
       {isOpen &&
         createPortal(
-          <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={isMultiSelect ? 'Seleccionar columnas' : 'Selector de variables y campos'}
+            className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-fade-in"
+          >
             <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-lg p-6 relative flex flex-col gap-4">
               <button onClick={() => setIsOpen(false)} className="absolute top-4 right-4 text-muted hover:text-fg">
                 <X size={18} />

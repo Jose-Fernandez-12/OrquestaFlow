@@ -22,6 +22,9 @@ const DatabaseView = lazy(() =>
 const ScheduleView = lazy(() =>
   import('./components/schedule/ScheduleView').then(m => ({ default: m.ScheduleView }))
 );
+const ExecutionsView = lazy(() =>
+  import('./components/executions/ExecutionsView').then(m => ({ default: m.ExecutionsView }))
+);
 
 function RouteFallback() {
   return (
@@ -83,6 +86,14 @@ const router = createBrowserRouter([
         element: (
           <Suspense fallback={<RouteFallback />}>
             <ScheduleView />
+          </Suspense>
+        ),
+      },
+      {
+        path: '/ejecuciones',
+        element: (
+          <Suspense fallback={<RouteFallback />}>
+            <ExecutionsView />
           </Suspense>
         ),
       },

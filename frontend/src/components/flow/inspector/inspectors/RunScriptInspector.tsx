@@ -101,7 +101,7 @@ export function RunScriptInspector({ node, nodes, edges, updateNodeData }: RunSc
             Gestionar scripts <ExternalLink size={10} />
           </Link>
         </div>
-        <select className={selectClass} value={selected?.id ?? value} onChange={e => updateNodeData('script', e.target.value)}>
+        <select aria-label="Seleccionar script" className={selectClass} value={selected?.id ?? value} onChange={e => updateNodeData('script', e.target.value)}>
           <option value="">{loading ? 'Cargando scripts…' : 'Seleccionar script…'}</option>
           {scripts.map(s => (
             <option key={s.id} value={s.id}>
@@ -205,7 +205,7 @@ export function RunScriptInspector({ node, nodes, edges, updateNodeData }: RunSc
             {/* Format */}
             <div className="space-y-1.5">
               <label className="text-[11px] font-medium">Formato</label>
-              <select className={selectClass} value={inputFormat} onChange={e => updateNodeData('inputFormat', e.target.value)}>
+              <select aria-label="Formato de entrada del script" className={selectClass} value={inputFormat} onChange={e => updateNodeData('inputFormat', e.target.value)}>
                 <option value="json">JSON (las filas completas)</option>
                 <option value="lines">Un valor por línea (lista de tickets, ids…)</option>
               </select>

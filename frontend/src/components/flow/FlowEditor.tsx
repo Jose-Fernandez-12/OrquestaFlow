@@ -529,9 +529,12 @@ function FlowCanvas() {
     setEdges(eds => {
       let changed = false;
       const newEds = eds.map(edge => {
-        let expectedStroke = '#3b82f6'; // default blue
+        const isErrorEdge = edge.sourceHandle === 'error';
         const isSkipped = skippedNodeIds.includes(edge.target);
-        if (isSkipped) {
+        let expectedStroke = '#3b82f6'; // default blue
+        if (isErrorEdge) {
+          expectedStroke = isSkipped ? '#fca5a5' : '#ef4444';
+        } else if (isSkipped) {
           expectedStroke = '#94a3b8'; // slate: branch not taken
         } else if (errorNodeIds.includes(edge.source)) {
           // amber when the node failed but its error policy let the flow continue
@@ -539,15 +542,29 @@ function FlowCanvas() {
         } else if (completedNodeIds.includes(edge.source)) {
           expectedStroke = '#22c55e'; // green
         }
-        const expectedDash = isSkipped ? '6 4' : undefined;
+        const expectedDash = isErrorEdge ? '5 4' : isSkipped ? '6 4' : undefined;
+        const expectedLabel = isErrorEdge ? 'error' : edge.label;
 
-        if (!edge.style || edge.style.stroke !== expectedStroke || edge.style.strokeDasharray !== expectedDash || !edge.markerEnd) {
+        if (
+          !edge.style ||
+          edge.style.stroke !== expectedStroke ||
+          edge.style.strokeDasharray !== expectedDash ||
+          !edge.markerEnd ||
+          (isErrorEdge && edge.label !== 'error')
+        ) {
           changed = true;
           return {
             ...edge,
             markerEnd: { type: MarkerType.ArrowClosed, color: expectedStroke },
             style: { ...edge.style, stroke: expectedStroke, strokeWidth: 2, strokeDasharray: expectedDash },
-            interactionWidth: 20
+            interactionWidth: 20,
+            ...(isErrorEdge
+              ? {
+                  label: expectedLabel,
+                  labelStyle: { fill: '#dc2626', fontSize: 10, fontWeight: 600 },
+                  labelBgStyle: { fill: '#fef2f2', fillOpacity: 0.9 },
+                }
+              : {}),
           };
         }
         return edge;
@@ -576,28 +593,40 @@ function FlowCanvas() {
     }));
   }, [isLocked, setEdges]);
 
-  // Load flow definition only when opening a different flow or on initial load
-  const loadedFlowIdRef = useRef<string | null>(null);
+  // Load flow definition only when opening a different flow or explicitly re-hydrating
+  const hydratedFlowIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!currentFlow) {
-      loadedFlowIdRef.current = null;
+      hydratedFlowIdRef.current = null;
       setNodes([]);
       setEdges([]);
       setSavedSignature(canvasSignature([], []));
       return;
     }
 
-    if (loadedFlowIdRef.current !== currentFlow.id || nodes.length === 0) {
-      loadedFlowIdRef.current = currentFlow.id;
+    if (hydratedFlowIdRef.current !== currentFlow.id) {
+      hydratedFlowIdRef.current = currentFlow.id;
       if (currentFlow.definition) {
         try {
           const def = JSON.parse(currentFlow.definition);
           // Older saves stored the canvas selection; a flow always opens with nothing selected
           setNodes((def.nodes || []).map((n: Node) => (n.selected || n.dragging ? { ...n, selected: false, dragging: false } : n)));
-          const loadedEdges = (def.edges || []).map((e: Edge) => ({
-            ...e,
-            markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' }
-          }));
+          const loadedEdges = (def.edges || []).map((e: Edge) => {
+            if (e.sourceHandle === 'error') {
+              return {
+                ...e,
+                label: e.label || 'error',
+                labelStyle: e.labelStyle || { fill: '#dc2626', fontSize: 10, fontWeight: 600 },
+                labelBgStyle: e.labelBgStyle || { fill: '#fef2f2', fillOpacity: 0.9 },
+                style: { ...e.style, stroke: '#ef4444', strokeWidth: 2, strokeDasharray: '5 4' },
+                markerEnd: { type: MarkerType.ArrowClosed, color: '#ef4444' },
+              };
+            }
+            return {
+              ...e,
+              markerEnd: e.markerEnd || { type: MarkerType.ArrowClosed, color: '#3b82f6' },
+            };
+          });
           setEdges(loadedEdges);
           setSavedSignature(canvasSignature(def.nodes || [], loadedEdges));
         } catch (e) {
@@ -609,7 +638,7 @@ function FlowCanvas() {
         setSavedSignature(canvasSignature([], []));
       }
     }
-  }, [currentFlow?.id, currentFlow?.definition, setNodes, setEdges, nodes.length]);
+  }, [currentFlow?.id, currentFlow?.definition, setNodes, setEdges]);
 
   const canvasHistory = useCanvasHistory({
     nodes,
@@ -641,17 +670,30 @@ function FlowCanvas() {
   const onConnect = useCallback(
     (params: Connection | Edge) => {
       if (params.source === params.target) return;
+      const isErrorEdge = params.sourceHandle === 'error';
 
       setEdges((eds) => {
-        // Remover cualquier conexión previa entre estos dos nodos para reemplazarla limpiamente
-        const filtered = eds.filter(e => 
-          !( (e.source === params.source && e.target === params.target) || 
-             (e.source === params.target && e.target === params.source) )
+        // Remover cualquier conexión previa equivalente entre estos dos nodos para reemplazarla limpiamente
+        const filtered = eds.filter(e =>
+          !(
+            ((e.source === params.source && e.target === params.target && (e.sourceHandle || '') === (params.sourceHandle || '')) ||
+              (e.source === params.target && e.target === params.source))
+          )
         );
         return addEdge({
           id: `e_${params.source}_${params.target}_${Date.now()}`,
           ...params,
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6' }
+          ...(isErrorEdge
+            ? {
+                label: 'error',
+                labelStyle: { fill: '#dc2626', fontSize: 10, fontWeight: 600 },
+                labelBgStyle: { fill: '#fef2f2', fillOpacity: 0.9 },
+                style: { stroke: '#ef4444', strokeWidth: 2, strokeDasharray: '5 4' },
+                markerEnd: { type: MarkerType.ArrowClosed, color: '#ef4444' },
+              }
+            : {
+                markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6' },
+              }),
         }, filtered);
       });
     },
@@ -785,18 +827,23 @@ function FlowCanvas() {
     }
   }, [nodeResults, completedNodeIds, errorNodeIds]);
 
-  const handleSave = () => {
-    if (!currentFlow || isLocked) return undefined;
+  const handleSave = async (): Promise<boolean> => {
+    if (!currentFlow || isLocked) return false;
 
     const definition = JSON.stringify({ nodes, edges: pruneEdges(nodes, edges) });
-    const saved = dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName }));
-    setSavedSignature(canvasSignature(nodes, edges));
+    try {
+      await dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName })).unwrap();
+      setSavedSignature(canvasSignature(nodes, edges));
 
-    setShowSaveNotification(true);
-    setTimeout(() => {
-      setShowSaveNotification(false);
-    }, 3000);
-    return saved;
+      setShowSaveNotification(true);
+      setTimeout(() => {
+        setShowSaveNotification(false);
+      }, 3000);
+      return true;
+    } catch {
+      dispatch(showToast('No se pudo guardar el flujo.'));
+      return false;
+    }
   };
 
   // Leaving with unsaved changes (topbar button, browser back, another flow) asks first
@@ -814,12 +861,9 @@ function FlowCanvas() {
   }, [hasUnsavedChanges]);
 
   const handleSaveAndLeave = async () => {
-    const saved = handleSave();
-    const result = saved && await saved;
-    if (result && saveFlow.fulfilled.match(result)) {
-      if (leaveGuard.state === 'blocked') leaveGuard.proceed();
-    } else {
-      dispatch(showToast('No se pudo guardar el flujo. Sigues en el editor.'));
+    const ok = await handleSave();
+    if (ok && leaveGuard.state === 'blocked') {
+      leaveGuard.proceed();
     }
   };
 
@@ -831,18 +875,26 @@ function FlowCanvas() {
   const handleToggleLock = async () => {
     if (!currentFlow) return;
     const newLock = currentFlow.is_locked === 1 ? 0 : 1;
-    await dispatch(saveFlow({
-      id: currentFlow.id,
-      is_locked: newLock
-    }));
-    setShowOptionsMenu(false);
+    try {
+      await dispatch(saveFlow({
+        id: currentFlow.id,
+        is_locked: newLock
+      })).unwrap();
+      setShowOptionsMenu(false);
+    } catch {
+      dispatch(showToast('No se pudo cambiar el estado de bloqueo del flujo.'));
+    }
   };
 
   const handleDuplicateCurrentFlow = async () => {
     if (!currentFlow) return;
-    const res = await dispatch(duplicateFlow(currentFlow)).unwrap();
-    navigate(`/flujos/${res.id}`);
-    setShowOptionsMenu(false);
+    try {
+      const res = await dispatch(duplicateFlow(currentFlow)).unwrap();
+      navigate(`/flujos/${res.id}`);
+      setShowOptionsMenu(false);
+    } catch (err: any) {
+      dispatch(showToast(`No se pudo duplicar el flujo: ${err?.message || 'error desconocido'}`));
+    }
   };
 
   const handleExportJSON = () => {
@@ -894,11 +946,13 @@ function FlowCanvas() {
     if (!currentFlow) return;
     setIsDeleting(true);
     try {
-      await dispatch(deleteFlow(currentFlow.id));
+      await dispatch(deleteFlow(currentFlow.id)).unwrap();
       setIsDeleteModalOpen(false);
       // The flow is gone, so there is nothing left to save
       skipLeaveGuard.current = true;
       navigate('/flujos');
+    } catch (err: any) {
+      dispatch(showToast(`No se pudo eliminar el flujo: ${err?.message || 'error desconocido'}`));
     } finally {
       setIsDeleting(false);
     }
@@ -941,6 +995,18 @@ function FlowCanvas() {
     dispatch(selectNode(pasted.nodes.length === 1 ? pasted.nodes[0].id : null));
   }, [isLocked, reactFlowInstance, nodes, setNodes, setEdges, dispatch]);
 
+  const shortcutsRef = useRef({
+    isLocked,
+    canvasHistory,
+    copyNodes,
+    pasteNodes,
+    nodes,
+    edges,
+  });
+  useEffect(() => {
+    shortcutsRef.current = { isLocked, canvasHistory, copyNodes, pasteNodes, nodes, edges };
+  });
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
@@ -953,37 +1019,48 @@ function FlowCanvas() {
       // Leave shortcuts to text fields and code editors
       if (target?.closest('input, textarea, select, [contenteditable="true"], .cm-editor')) return;
       const key = event.key.toLowerCase();
+      const { isLocked: locked, canvasHistory: history, copyNodes: doCopy, pasteNodes: doPaste, nodes: curNodes, edges: curEdges } = shortcutsRef.current;
 
       if (key === 's') {
         event.preventDefault();
-        if (!isLocked) handleSaveRef.current();
+        if (!locked) void handleSaveRef.current();
       } else if (key === 'z' && !event.shiftKey) {
-        if (isLocked) return;
+        if (locked) return;
         event.preventDefault();
-        if (!canvasHistory.undo()) dispatch(showToast('No hay cambios para deshacer'));
+        if (!history.undo()) dispatch(showToast('No hay cambios para deshacer'));
       } else if ((key === 'z' && event.shiftKey) || key === 'y') {
-        if (isLocked) return;
+        if (locked) return;
         event.preventDefault();
-        canvasHistory.redo();
+        history.redo();
       } else if (key === 'c') {
         if (window.getSelection()?.toString()) return; // copying page text
-        if (copyNodes()) event.preventDefault();
+        if (doCopy()) event.preventDefault();
       } else if (key === 'v') {
         const payload = readClipboard();
-        if (!payload || isLocked) return;
+        if (!payload || locked) return;
         event.preventDefault();
-        pasteNodes(payload, true);
+        doPaste(payload, true);
       } else if (key === 'd') {
-        if (isLocked) return;
-        const payload = copySelection(nodes, edges);
+        if (locked) return;
+        const payload = copySelection(curNodes, curEdges);
         if (!payload) return;
         event.preventDefault();
-        pasteNodes(payload, false);
+        doPaste(payload, false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isLocked, canvasHistory, copyNodes, pasteNodes, nodes, edges, dispatch]);
+  }, [dispatch]);
+
+  const exportPreviewContext = useMemo(
+    () => ({ ...nodeResults, ...(intermediateContext || {}) }),
+    [nodeResults, intermediateContext]
+  );
+
+  const versionsCurrentDefinition = useMemo(
+    () => (showVersionsModal ? JSON.stringify({ nodes, edges }) : ''),
+    [showVersionsModal, nodes, edges]
+  );
 
   // ── Partial runs with the results of the last run ──
   // "Probar nodo" runs one node, "Ejecutar desde aquí" a node and everything after it,
@@ -1433,7 +1510,7 @@ function FlowCanvas() {
             </div>
           )}
           {!isLocked && (
-            <Button variant="default" size="sm" onClick={handleSave} className="gap-2" title="Guardar (Ctrl+S)">
+            <Button variant="default" size="sm" onClick={() => void handleSave()} className="gap-2" title="Guardar (Ctrl+S)">
               <Save size={16} /> Guardar
             </Button>
           )}
@@ -1936,7 +2013,12 @@ function FlowCanvas() {
       </div>
       {/* Missing Params Modal */}
       {missingParamsContext && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Faltan parámetros requeridos"
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+        >
           <div className="bg-surface rounded-md shadow-lg border border-border w-full max-w-lg flex flex-col">
             <div className="p-4 border-b border-border flex items-center justify-between">
               <h2 className="text-lg font-semibold text-danger">Faltan parámetros requeridos</h2>
@@ -1961,9 +2043,18 @@ function FlowCanvas() {
                           placeholder={`Valor para ${param}`}
                           value={item.currentParams[param] || ''}
                           onChange={(e) => {
-                            const newContext = { ...missingParamsContext };
-                            newContext.nodesWithMissing[index].currentParams[param] = e.target.value;
-                            setMissingParamsContext(newContext);
+                            const value = e.target.value;
+                            setMissingParamsContext(prev => {
+                              if (!prev) return prev;
+                              return {
+                                ...prev,
+                                nodesWithMissing: prev.nodesWithMissing.map((entry, idx) =>
+                                  idx === index
+                                    ? { ...entry, currentParams: { ...entry.currentParams, [param]: value } }
+                                    : entry
+                                ),
+                              };
+                            });
                           }}
                         />
                       </div>
@@ -1979,7 +2070,7 @@ function FlowCanvas() {
                   item.missing.some(p => !item.currentParams[p] || item.currentParams[p] === '')
                 );
                 if (stillMissing) {
-                  alert('Aún faltan parámetros por llenar.');
+                  dispatch(showToast('Aún faltan parámetros por llenar.'));
                   return;
                 }
                 const updatedNodes = missingParamsContext.nodesWithMissing.map(n => ({
@@ -2036,7 +2127,12 @@ function FlowCanvas() {
 
       {/* Unsaved Changes Modal */}
       {leaveGuard.state === 'blocked' && (
-        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="¿Salir sin guardar?"
+          className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast"
+        >
           <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-sm p-5 flex flex-col gap-4 animate-in zoom-in-95 duration-fast">
             <div className="flex items-start gap-3">
               <div className="w-9 h-9 rounded-full bg-warn/15 text-warn flex items-center justify-center shrink-0 mt-0.5">
@@ -2069,7 +2165,12 @@ function FlowCanvas() {
 
       {/* Delete Confirmation Modal */}
       {isDeleteModalOpen && currentFlow && (
-        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="¿Eliminar este flujo?"
+          className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast"
+        >
           <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-sm p-5 flex flex-col gap-4 animate-in zoom-in-95 duration-fast">
             <div className="flex items-start gap-3">
               <div className="w-9 h-9 rounded-full bg-danger/10 text-danger flex items-center justify-center shrink-0 mt-0.5">
@@ -2125,7 +2226,7 @@ function FlowCanvas() {
           node={nodes.find(n => n.id === previewExportData.id)}
           nodes={nodes}
           edges={edges}
-          context={{ ...nodeResults, ...intermediateContext }}
+          context={exportPreviewContext}
         />
       )}
 
@@ -2167,7 +2268,7 @@ function FlowCanvas() {
           flow={currentFlow}
           isOpen={showVersionsModal}
           isLocked={isLocked}
-          currentDefinition={showVersionsModal ? JSON.stringify({ nodes, edges }) : ''}
+          currentDefinition={versionsCurrentDefinition}
           onClose={() => setShowVersionsModal(false)}
           saveCurrent={async () => {
             if (isLocked) return;
@@ -2175,9 +2276,15 @@ function FlowCanvas() {
             await dispatch(saveFlow({ id: currentFlow.id, definition, name: editingName })).unwrap();
           }}
           onRestored={(restored) => {
+            hydratedFlowIdRef.current = null;
             dispatch(resetNodeStates());
             dispatch(setCurrentFlow(restored));
             dispatch(showToast('Versión restaurada'));
+          }}
+          onPublished={(updated) => {
+            dispatch(setCurrentFlow(updated));
+            const hasPub = Boolean((updated as any).published_version_id);
+            dispatch(showToast(hasPub ? 'Versión publicada' : 'Flujo despublicado'));
           }}
         />
       )}

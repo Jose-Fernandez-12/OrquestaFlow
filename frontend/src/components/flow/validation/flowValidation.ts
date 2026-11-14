@@ -13,7 +13,7 @@ export interface FlowIssue {
   inline?: boolean;
 }
 
-const LOOP_VARIABLES = new Set(['_item', 'item', '_index', '_total', '_loops','Variables', 'variables', 'context', 'data']);
+const LOOP_VARIABLES = new Set(['_item', 'item', '_index', '_total', '_loops', '$error', 'Variables', 'variables', 'context', 'data']);
 
 function parseJson(raw: unknown): { ok: boolean; value?: any } {
   if (typeof raw !== 'string') return { ok: raw !== undefined, value: raw };
@@ -191,12 +191,22 @@ export function validateFlow(nodes: Node[], edges: Edge[]): FlowIssue[] {
       case 'aiChatCompletion':
         if (!text(data.userPrompt)) add(node.id, 'error', 'El prompt del usuario está vacío.');
         break;
+      case 'webhookTrigger':
+        if (data.responseMode === 'sync' && !nodes.some(n => n.type === 'webhookRespond')) {
+          add(node.id, 'warning', 'El webhook está en modo síncrono, pero no hay ningún nodo "Responder Webhook" en el flujo.');
+        }
+        break;
       case 'export':
         // Each connected node becomes a tab, named after the node unless another name was typed
         if (data.exportMode === 'multi' && incoming(node.id).length === 0 && Object.keys(data.multiSheetConfig || {}).length === 0) {
           add(node.id, 'warning', 'Modo multi-pestaña sin nodos conectados: conecta un nodo por cada pestaña.');
         }
         break;
+    }
+
+    // Warn if try/catch error_branch is selected without a connected error edge
+    if (data.onError === 'error_branch' && !outgoing(node.id).some(e => e.sourceHandle === 'error')) {
+      add(node.id, 'warning', 'Rama de error (try/catch) activa, pero la salida roja "error" no está conectada.');
     }
 
     // Nodes left out of the graph

@@ -800,6 +800,13 @@ def _prepare_sql(sql, values, concat="+"):
     return _PARAM.sub(replace, sql), args
 
 
+def _escape_odbc_value(value):
+    text = "" if value is None else str(value)
+    if any(ch in text for ch in ";{}"):
+        return "{" + text.replace("}", "}}") + "}"
+    return text
+
+
 def _connection_string(key):
     custom = os.getenv(f"DB_CONN_STR_{key}", "").strip()
     if custom and "UID=;" not in custom and "PWD=;" not in custom:
@@ -811,7 +818,12 @@ def _connection_string(key):
     database = os.getenv(f"DB_NAME_{key}", defaults.get("database", ""))
     user = os.getenv(f"DB_USER_{key}") or os.getenv("DB_USER_DEFAULT", "")
     password = os.getenv(f"DB_PASSWORD_{key}") or os.getenv("DB_PASSWORD_DEFAULT", "")
-    return f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE={database};UID={user};PWD={password}"
+    safe_driver = str(driver).replace("}", "}}")
+    safe_server = _escape_odbc_value(f"{host},{port}")
+    safe_database = _escape_odbc_value(database)
+    safe_user = _escape_odbc_value(user)
+    safe_password = _escape_odbc_value(password)
+    return f"DRIVER={{{safe_driver}}};SERVER={safe_server};DATABASE={safe_database};UID={safe_user};PWD={safe_password}"
 
 
 def _query(key, statement, args):

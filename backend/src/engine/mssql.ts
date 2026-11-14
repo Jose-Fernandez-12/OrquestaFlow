@@ -304,9 +304,6 @@ export async function executeMssqlQuery(
       request.input(key, val);
     });
 
-    console.log("EXECUTING SQL:", parsedSql);
-    console.log("PARAMETERS:", request.parameters);
-
     const running = request.query(parsedSql);
     // Once stopped, the late "Canceled" error of the query is expected and not reported
     running.catch(() => {});

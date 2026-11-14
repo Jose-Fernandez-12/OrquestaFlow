@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
+  Activity,
   GitMerge,
   LayoutDashboard,
   Code2,
@@ -10,18 +11,29 @@ import {
   ChevronRight,
   Settings,
   HelpCircle,
-  LogOut
+  Layers
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { toggleSidebar, openSettingsModal, openHelpModal } from '../../store/uiSlice';
+import { toggleSidebar, openSettingsModal, openHelpModal, showToast } from '../../store/uiSlice';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { ThemeSwitcher } from './ThemeSwitcher';
+import { activateEnvironment, shortEnvironmentCode, useEnvironments } from '../settings/environmentsApi';
+
+function envPillTone(slug: string | null | undefined): string {
+  const code = shortEnvironmentCode(slug);
+  if (code === 'PROD') return 'bg-danger/10 text-danger border-danger/30';
+  if (code === 'STG') return 'bg-warn/15 text-amber-700 border-warn/35';
+  if (code === 'DEV') return 'bg-success/10 text-success border-success/30';
+  return 'bg-accent-light text-accent border-accent/30';
+}
 
 export function Sidebar() {
   const dispatch = useAppDispatch();
   const location = useLocation();
   const collapsed = useAppSelector((state) => state.ui.sidebarCollapsed);
+  const { environments, reload: reloadEnvs } = useEnvironments();
+  const [switchingEnv, setSwitchingEnv] = useState(false);
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: '/' },
@@ -29,7 +41,25 @@ export function Sidebar() {
     { id: 'scripts', label: 'Scripts', icon: Code2, path: '/scripts' },
     { id: 'bases', label: 'Bases de datos', icon: Database, path: '/bases' },
     { id: 'programacion', label: 'Programación', icon: Calendar, path: '/programacion' },
+    { id: 'ejecuciones', label: 'Ejecuciones', icon: Activity, path: '/ejecuciones' },
   ];
+
+  const activeEnv = environments?.find(e => Number(e.is_active) === 1) ?? environments?.[0] ?? null;
+  const activeCode = shortEnvironmentCode(activeEnv?.slug);
+
+  const handleSelectEnv = async (envId: string) => {
+    if (!envId || envId === activeEnv?.id || switchingEnv) return;
+    setSwitchingEnv(true);
+    try {
+      const updated = await activateEnvironment(envId);
+      await reloadEnvs();
+      dispatch(showToast(`Entorno activo: ${updated.name} (${shortEnvironmentCode(updated.slug)})`));
+    } catch (err: unknown) {
+      dispatch(showToast(`Error al cambiar entorno: ${err instanceof Error ? err.message : 'desconocido'}`));
+    } finally {
+      setSwitchingEnv(false);
+    }
+  };
 
   const isItemActive = (item: typeof navItems[0]) => {
     // '/' is a prefix of every route, so the dashboard only matches exactly
@@ -73,8 +103,50 @@ export function Sidebar() {
         </Button>
       </div>
 
+      {/* Active Environment Selector / Indicator */}
+      <div className={cn("px-3 pt-3 pb-1", collapsed && "flex justify-center")}>
+        {collapsed ? (
+          <button
+            type="button"
+            onClick={() => dispatch(openSettingsModal())}
+            title={activeEnv ? `Entorno activo: ${activeEnv.name} (${activeCode})` : 'Entornos'}
+            aria-label={activeEnv ? `Entorno activo: ${activeEnv.name}` : 'Entornos'}
+            className={cn(
+              "px-1.5 py-1 rounded border text-[10px] font-mono font-bold tracking-wider transition-colors",
+              envPillTone(activeEnv?.slug)
+            )}
+          >
+            {activeCode}
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-sm border border-border bg-bg/70">
+            <Layers size={13} className="text-muted shrink-0" />
+            <span className={cn("px-1.5 py-0.5 rounded border text-[10px] font-mono font-bold tracking-wider shrink-0", envPillTone(activeEnv?.slug))}>
+              {activeCode}
+            </span>
+            <select
+              aria-label="Entorno activo"
+              disabled={switchingEnv || !environments || environments.length === 0}
+              value={activeEnv?.id || ''}
+              onChange={(e) => void handleSelectEnv(e.target.value)}
+              className="flex-1 min-w-0 bg-transparent text-xs font-medium text-fg focus:outline-none cursor-pointer truncate"
+            >
+              {!environments || environments.length === 0 ? (
+                <option value="">Entorno local</option>
+              ) : (
+                environments.map(env => (
+                  <option key={env.id} value={env.id}>
+                    {env.name}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+        )}
+      </div>
+
       {/* Navigation */}
-      <nav className="flex-1 py-4 flex flex-col gap-1 px-3">
+      <nav className="flex-1 py-3 flex flex-col gap-1 px-3">
         {navItems.map((item) => (
           <NavLink
             key={item.id}

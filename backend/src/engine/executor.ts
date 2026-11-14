@@ -13,7 +13,7 @@ import { parseExcelOrCsvFile } from '../routes/files.js';
 import { getSystemSettingsFromDb } from '../routes/settings.js';
 import { normalizeEdges, isBranchHandle, findForEachEndNode, getForEachSubgraphNodes, getWaitDependencies, findWaitDeadlocks, WAIT_NODE_TYPE } from './graph.js';
 import { getRetryPolicy, runWithRetry, isAbortError, isRetryableStatus, HTTP_NODE_TYPES, RETRYABLE_NODE_TYPES, type RetryPolicy } from './retry.js';
-import type { ExecutionTracer } from './executionLog.js';
+import { ExecutionTracer, startExecutionLog, finishExecutionLog, summarizeContext, isCancellationError } from './executionLog.js';
 import { instrumentTransformCode, type BreakpointResolution } from './transformDebug.js';
 import { resolveReferences, buildSqlPreview, describeQueryParams } from './debugPreview.js';
 import { resolveInterpreter } from './python/environment.js';
@@ -26,7 +26,252 @@ import {
 } from './scriptNode.js';
 
 export const RUN_FLOW_NODE_TYPE = 'runFlow';
+export const WEBHOOK_RESPOND_NODE_TYPE = 'webhookRespond';
 export const MAX_SUBFLOW_DEPTH = 5;
+
+const BLOCKED_METADATA_HOSTS = new Set(['169.254.169.254', 'metadata.google.internal', 'metadata.goog']);
+
+/** Rejects non-HTTP(S) schemes and cloud metadata endpoints to prevent SSRF. */
+export function validateHttpUrl(urlStr: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(urlStr || '').trim());
+  } catch {
+    throw new Error(`URL inválida: ${urlStr}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Esquema de URL no permitido (${parsed.protocol}). Solo se admite http:// o https://`);
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (BLOCKED_METADATA_HOSTS.has(host) || host.startsWith('169.254.')) {
+    throw new Error(`Acceso bloqueado a host de metadatos/enlace local: ${parsed.hostname}`);
+  }
+  return parsed;
+}
+
+const isErrorEdge = (edge: any): boolean => edge?.sourceHandle === 'error';
+
+function resolveMockOutput(node: any): { mocked: true; value: any } | null {
+  if (node?.type === 'start' || !node?.data?.mockEnabled || node.data.mockOutput === undefined) {
+    return null;
+  }
+  const raw = node.data.mockOutput;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed === '') return { mocked: true, value: '' };
+    try {
+      return { mocked: true, value: JSON.parse(trimmed) };
+    } catch {
+      return { mocked: true, value: raw };
+    }
+  }
+  return { mocked: true, value: raw };
+}
+
+function buildTraceCompletedPayload(output: any, wasMocked: boolean): any {
+  if (!wasMocked) return output;
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    return { ...output, mocked: true };
+  }
+  return { data: output, mocked: true };
+}
+
+function buildNodeTraceErrorPayload(
+  nodeType: string,
+  failure: string,
+  errorBranchTriggered: boolean,
+  output: any
+): Record<string, any> {
+  const failedItems = nodeType !== 'forEachEnd' ? output?.failed_items : undefined;
+  return {
+    error: failure,
+    failed: true,
+    continued: true,
+    ...(errorBranchTriggered ? { errorBranch: true } : {}),
+    ...(Array.isArray(failedItems) ? { failed_items: failedItems } : {}),
+  };
+}
+
+function buildNodeTraceCompletedPayload(nodeType: string, output: any, wasMocked: boolean): any {
+  const completedPayload = buildTraceCompletedPayload(output, wasMocked);
+  if (nodeType === 'forEachEnd') {
+    if (Array.isArray(completedPayload)) {
+      return [...completedPayload];
+    }
+    if (completedPayload && typeof completedPayload === 'object' && 'failed_items' in completedPayload) {
+      const copy = { ...completedPayload };
+      delete copy.failed_items;
+      return copy;
+    }
+    return completedPayload;
+  }
+
+  const failedItems = (output as any)?.failed_items;
+  if (Array.isArray(failedItems)) {
+    if (completedPayload === output) {
+      return { data: output, failed_items: failedItems };
+    }
+    if (completedPayload && typeof completedPayload === 'object') {
+      completedPayload.failed_items = failedItems;
+    }
+  }
+  return completedPayload;
+}
+
+function loadActiveEnvVars(): Record<string, string> {
+  try {
+    const row = getDb()
+      .prepare('SELECT variables_json FROM environments WHERE is_active = 1 LIMIT 1')
+      .get() as { variables_json?: string } | undefined;
+    if (!row?.variables_json) return {};
+    const parsed = JSON.parse(row.variables_json);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const vars: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v !== undefined && v !== null) vars[k] = String(v);
+    }
+    return vars;
+  } catch {
+    return {};
+  }
+}
+
+function resolveEnvVariable(context: Record<string, any> | undefined, key: string): string | undefined {
+  const activeVars = context && context.$env && typeof context.$env === 'object'
+    ? (context.$env as Record<string, unknown>)
+    : loadActiveEnvVars();
+  if (Object.prototype.hasOwnProperty.call(activeVars, key)) {
+    const v = activeVars[key];
+    if (v !== undefined && v !== null) return String(v);
+  }
+  return process.env[key];
+}
+
+function cloneRuntimeContext(base: Record<string, any>, extra: Record<string, any> = {}): Record<string, any> {
+  const copy: Record<string, any> = { ...base, ...extra };
+  if (base?.$env !== undefined) {
+    Object.defineProperty(copy, '$env', {
+      value: base.$env,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return copy;
+}
+
+function parseBatchSettings(data: Record<string, any> | undefined): { concurrency: number; rateLimitMs: number } {
+  const rawConcurrency = Number(data?.concurrency);
+  const concurrency = Number.isFinite(rawConcurrency) && rawConcurrency >= 1
+    ? Math.min(10, Math.floor(rawConcurrency))
+    : 1;
+  const rawRateLimit = Number(data?.rateLimitMs);
+  const rateLimitMs = Number.isFinite(rawRateLimit) && rawRateLimit > 0
+    ? Math.min(60_000, Math.floor(rawRateLimit))
+    : 0;
+  return { concurrency, rateLimitMs };
+}
+
+function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Ejecución detenida por el usuario'));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('Ejecución detenida por el usuario'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Runs indexed tasks with bounded concurrency (`1..10`) and optional start-rate pacing. */
+async function runIndexedBatch(
+  count: number,
+  concurrency: number,
+  rateLimitMs: number,
+  signal: AbortSignal | undefined,
+  worker: (index: number) => Promise<void>
+): Promise<void> {
+  if (count <= 0) return;
+  const effectiveConcurrency = Math.min(count, Math.max(1, Math.min(10, concurrency)));
+  let nextIndex = 0;
+  let fatalError: any = null;
+  let nextStartAt = 0;
+  let rateLock: Promise<void> = Promise.resolve();
+
+  const waitRateSlot = async () => {
+    if (rateLimitMs <= 0) return;
+    const prev = rateLock;
+    let release!: () => void;
+    rateLock = new Promise<void>(res => {
+      release = res;
+    });
+    await prev;
+    try {
+      const waitMs = nextStartAt - Date.now();
+      if (waitMs > 0) {
+        await sleepWithSignal(waitMs, signal);
+      }
+      nextStartAt = Date.now() + rateLimitMs;
+    } finally {
+      release();
+    }
+  };
+
+  const runWorker = async () => {
+    while (true) {
+      if (fatalError || signal?.aborted) return;
+      const idx = nextIndex++;
+      if (idx >= count) return;
+      try {
+        await waitRateSlot();
+        if (fatalError) return;
+        if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
+        await worker(idx);
+      } catch (err) {
+        if (!fatalError) fatalError = err;
+        return;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: effectiveConcurrency }, () => runWorker()));
+  if (fatalError) throw fatalError;
+}
+
+function maskPreviewHeaders(
+  headers: Record<string, string>,
+  maskedAuthHeaders: Record<string, string> = {}
+): Record<string, string> {
+  const merged = { ...headers, ...maskedAuthHeaders };
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(merged)) {
+    if (k.toLowerCase() === 'authorization' && !(k in maskedAuthHeaders)) {
+      const str = String(v ?? '').trim();
+      if (/^bearer\s+/i.test(str)) result[k] = 'Bearer ***';
+      else if (/^basic\s+/i.test(str)) result[k] = 'Basic ***';
+      else if (str) result[k] = '***';
+      else result[k] = str;
+    } else {
+      result[k] = v;
+    }
+  }
+  return result;
+}
+
+function attachNonEnumerable(target: any, key: string, value: any): void {
+  if (!target || (typeof target !== 'object' && typeof target !== 'function')) return;
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+}
 
 export interface ActiveExecutionState {
   flowId: string;
@@ -68,6 +313,8 @@ export function stopFlowEngine(flowId: string, reason = 'Ejecución detenida por
   scheduleExecutionCleanup(flowId, activeFlowExecutions.get(flowId));
   return true;
 }
+
+export const cancelFlowExecution = stopFlowEngine;
 
 // Pause execution for debug mode
 export function pauseDebugExecution(flowId: string): boolean {
@@ -135,6 +382,10 @@ export async function executeFlowEngine(
     callStack?: string[];
     parentSignal?: AbortSignal;
     isSubflow?: boolean;
+    definition?: string;
+    definitionOverride?: string;
+    usePublished?: boolean;
+    executionId?: string;
   }
 ): Promise<Record<string, any>> {
   const db = getDb();
@@ -155,6 +406,7 @@ export async function executeFlowEngine(
   }
   const mode = options?.mode || 'normal';
   const callStack = options?.callStack && options.callStack.length > 0 ? options.callStack : [flowId];
+  const currentExecutionId = options?.executionId;
 
   // Track active execution in memory. Everything below works on this run's own state: a node of a
   // previous run that is still finishing (e.g. a query) must never touch the state of a newer run
@@ -184,7 +436,13 @@ export async function executeFlowEngine(
   };
 
   // Secrets typed into nodes are stored encrypted
-  const definition = JSON.parse(openDefinition(flow.definition || '{"nodes":[],"edges":[]}'));
+  const rawDefinition =
+    options?.definition ??
+    options?.definitionOverride ??
+    (options?.usePublished && flow.published_definition && String(flow.published_definition).trim()
+      ? flow.published_definition
+      : flow.definition);
+  const definition = JSON.parse(openDefinition(rawDefinition || '{"nodes":[],"edges":[]}'));
   // Notes only document the canvas: they never run
   const nodes: any[] = (definition.nodes || []).filter((n: any) => n.type !== 'note');
   const edges: any[] = definition.edges || [];
@@ -290,6 +548,7 @@ export async function executeFlowEngine(
     ...(options?.initialContext || {}),
     ...(Object.keys(runtimeParams).length > 0 ? { _params: runtimeParams } : {}),
   };
+  attachNonEnumerable(context, '$env', loadActiveEnvVars());
   const runningPromises = new Map<string, Promise<void>>();
   const completedNodes = new Set<string>();
   const errorNodes = new Set<string>();
@@ -424,7 +683,13 @@ export async function executeFlowEngine(
               }
 
               try {
+                let wasMocked = false;
                 const runOnce = async (): Promise<any> => {
+                  const mockResult = resolveMockOutput(node);
+                  if (mockResult) {
+                    wasMocked = true;
+                    return mockResult.value;
+                  }
                   let output: any = {};
                   switch (node.type) {
                     case 'start':
@@ -444,7 +709,7 @@ export async function executeFlowEngine(
                         scriptRun => notifyProgress(node.id, 'progress', { scriptRun }));
                       break;
                     case RUN_FLOW_NODE_TYPE:
-                      output = await executeRunFlowNode(node, context, abortController.signal, callStack);
+                      output = await executeRunFlowNode(node, context, abortController.signal, callStack, currentExecutionId);
                       break;
                     case 'export':
                       output = await executeExportNode(node, context, edges, nodes);
@@ -478,7 +743,7 @@ export async function executeFlowEngine(
                     case 'forEach':
                       output = await executeForEachNode(
                         node, context, normalizedEdges, nodes, adjList, notifyProgress,
-                        abortController.signal, flowId, callStack
+                        abortController.signal, flowId, callStack, currentExecutionId
                       );
                       break;
                     case 'forEachEnd':
@@ -501,7 +766,9 @@ export async function executeFlowEngine(
                           }
                         }
                         if (Array.isArray(output)) {
+                          const prevFailed = (output as any).failed_items;
                           output = flattenRows(output);
+                          if (prevFailed) attachNonEnumerable(output, 'failed_items', prevFailed);
                         }
                       }
                       break;
@@ -561,6 +828,9 @@ export async function executeFlowEngine(
                     case 'webhookTrigger':
                       output = executeWebhookTriggerNode(node, context);
                       break;
+                    case WEBHOOK_RESPOND_NODE_TYPE:
+                      output = executeWebhookRespondNode(node, context);
+                      break;
                     case 'oauth2Connector':
                       output = await executeOAuth2ConnectorNode(node, context, abortController.signal);
                       break;
@@ -572,46 +842,103 @@ export async function executeFlowEngine(
                   }
                   return output;
                 };
-                const { output, failure } = await runNodeWithPolicy(node, runOnce, getRetryPolicy(node, systemSettings), abortController.signal, notifyProgress);
+                const { output: rawOutput, failure, onError } = await runNodeWithPolicy(
+                  node,
+                  runOnce,
+                  getRetryPolicy(node, systemSettings),
+                  abortController.signal,
+                  notifyProgress
+                );
 
                 if (abortController.signal.aborted) {
                   throw new Error('Ejecución detenida por el usuario');
                 }
 
-                context[node.id] = output;
+                const errorBranchTriggered = Boolean(failure && onError === 'error_branch');
+                let nodeOutput = rawOutput;
+                if (errorBranchTriggered && failure) {
+                  const errorInfo = {
+                    message: failure,
+                    nodeId: node.id,
+                    nodeLabel: String(node.data?.label || node.id),
+                    timestamp: new Date().toISOString(),
+                  };
+                  context.$error = errorInfo;
+                  nodeOutput = { error: failure, failed: true, $error: errorInfo };
+                }
+
+                context[node.id] = nodeOutput;
                 if (node.data?.label && typeof node.data.label === 'string') {
-                  context[node.data.label] = output;
+                  context[node.data.label] = nodeOutput;
                 }
                 completedNodes.add(node.id);
                 if (node.type === 'forEach') {
                   const endId = findForEachEndNode(node.id, adjList, nodes);
                   if (endId) {
+                    if (wasMocked && context[endId] === undefined) {
+                      context[endId] = nodeOutput;
+                    }
                     const subIds = getForEachSubgraphNodes(node.id, endId, adjList, nodes);
                     subIds.forEach(sid => completedNodes.add(sid));
                   }
                 }
                 if (failure) {
-                  notifyProgress(node.id, 'error', { error: failure, failed: true, continued: true });
+                  notifyProgress(
+                    node.id,
+                    'error',
+                    buildNodeTraceErrorPayload(node.type, failure, errorBranchTriggered, nodeOutput)
+                  );
                 } else {
-                  notifyProgress(node.id, 'completed', output);
+                  notifyProgress(
+                    node.id,
+                    'completed',
+                    buildNodeTraceCompletedPayload(node.type, nodeOutput, wasMocked)
+                  );
                 }
 
-                if (node.type === 'conditionalBranch') {
-                  const branchState: BranchSkipState = {
-                    inDegree, initialInDegree, skippedIncoming, skippedNodes, completedNodes,
-                    adjList, notify: notifyProgress
-                  };
-                  normalizedEdges
-                    .filter(e => e.source === node.id)
-                    .forEach(edge => {
-                      if (edgeFollowsBranch(edge, output.selectedHandle)) {
-                        inDegree[edge.target]--;
-                      } else {
-                        skipIncomingEdge(edge.target, branchState);
-                      }
-                    });
-                } else if (adjList[node.id]) {
-                  adjList[node.id].forEach(depId => {
+                const branchState: BranchSkipState = {
+                  inDegree, initialInDegree, skippedIncoming, skippedNodes, completedNodes,
+                  adjList, notify: notifyProgress
+                };
+                const outgoing = normalizedEdges.filter(e => e.source === node.id);
+                const extraTargets = [...(adjList[node.id] || [])];
+                for (const edge of outgoing) {
+                  const pos = extraTargets.indexOf(edge.target);
+                  if (pos !== -1) extraTargets.splice(pos, 1);
+                }
+
+                if (errorBranchTriggered) {
+                  outgoing.forEach(edge => {
+                    if (isErrorEdge(edge)) {
+                      inDegree[edge.target]--;
+                    } else {
+                      skipIncomingEdge(edge.target, branchState);
+                    }
+                  });
+                  extraTargets.forEach(depId => {
+                    if (node.type === 'forEach') skipIncomingEdge(depId, branchState);
+                    else inDegree[depId]--;
+                  });
+                } else if (node.type === 'conditionalBranch') {
+                  outgoing.forEach(edge => {
+                    if (!isErrorEdge(edge) && edgeFollowsBranch(edge, nodeOutput?.selectedHandle)) {
+                      inDegree[edge.target]--;
+                    } else {
+                      skipIncomingEdge(edge.target, branchState);
+                    }
+                  });
+                  extraTargets.forEach(depId => {
+                    inDegree[depId]--;
+                  });
+                } else {
+                  outgoing.forEach(edge => {
+                    if (isErrorEdge(edge)) {
+                      skipIncomingEdge(edge.target, branchState);
+                    } else {
+                      inDegree[edge.target]--;
+                    }
+                  });
+                  extraTargets.forEach(depId => {
                     inDegree[depId]--;
                   });
                 }
@@ -642,6 +969,9 @@ export async function executeFlowEngine(
 
       if (allDone && runningPromises.size === 0) {
         // Not cancelled: checkAndRun returned at the top otherwise, and nothing can stop it in between
+        if (context.__webhookResponse !== undefined) {
+          attachNonEnumerable(context, 'webhookResponse', context.__webhookResponse);
+        }
         execution.status = 'completed';
         scheduleExecutionCleanup(flowId, execution);
         resolve(context);
@@ -666,7 +996,7 @@ async function runNodeWithPolicy(
   policy: RetryPolicy,
   signal: AbortSignal,
   notify: ProgressFn
-): Promise<{ output: any; failure?: string }> {
+): Promise<{ output: any; failure?: string; onError?: RetryPolicy['onError'] }> {
   const retryHere = RETRYABLE_NODE_TYPES.includes(node.type) && !HTTP_NODE_TYPES.includes(node.type);
   try {
     const output = retryHere
@@ -674,9 +1004,11 @@ async function runNodeWithPolicy(
       : await run();
     return { output };
   } catch (err: any) {
-    if (policy.onError === 'continue' && !isAbortError(err, signal)) {
+    if ((policy.onError === 'continue' || policy.onError === 'error_branch') && !isAbortError(err, signal)) {
       const message = err?.message || String(err);
-      return { output: { error: message, failed: true }, failure: message };
+      const output: Record<string, any> = { error: message, failed: true };
+      if (Array.isArray(err?.failed_items)) output.failed_items = err.failed_items;
+      return { output, failure: message, onError: policy.onError };
     }
     throw err;
   }
@@ -729,32 +1061,25 @@ async function executeHttpNode(
     }
   }
 
-  const results = [];
   const retryPolicy = getRetryPolicy(node, getSystemSettingsFromDb());
+  const { concurrency, rateLimitMs } = parseBatchSettings(node.data);
+  const slotResults: any[] = new Array(itemsToIterate.length);
+  const slotSucceeded: boolean[] = new Array(itemsToIterate.length).fill(false);
+  const failedItems: Array<{ index: number; item: any; error: string }> = [];
+  let completedCount = 0;
 
-  for (let i = 0; i < itemsToIterate.length; i++) {
-    if (signal?.aborted) {
-      throw new Error('Ejecución detenida por el usuario');
-    }
+  const execMode = flowId ? activeFlowExecutions.get(flowId)?.mode : undefined;
+  const effectiveConcurrency = iteratesList && execMode !== 'debug' ? concurrency : 1;
+
+  await runIndexedBatch(itemsToIterate.length, effectiveConcurrency, iteratesList ? rateLimitMs : 0, signal, async (i) => {
     const item = itemsToIterate[i];
 
     // Create a localized context for this iteration
-    const localContext = { ...context };
-    if (item !== null) {
-      localContext['_item'] = item;
-    }
+    const localContext = cloneRuntimeContext(context, item !== null ? { _item: item } : {});
 
-    let endpoint = node.data?.endpoint || '';
-    if (endpoint.includes('storefront.com') || !endpoint.startsWith('http')) {
-      results.push({
-        status: "success",
-        code: 200,
-        data: { items: [{ id: "prod_01", name: "Laptop Pro", price: 1299.99, stock: 45 }] }
-      });
-      continue;
-    }
-
-    endpoint = resolveTemplate(localContext, endpoint) as string;
+    let endpoint = String(node.data?.endpoint || '').trim();
+    endpoint = String(resolveTemplate(localContext, endpoint) ?? '').trim();
+    validateHttpUrl(endpoint);
 
     if (node.data?.params && node.data.params.trim() !== '') {
       try {
@@ -773,6 +1098,7 @@ async function executeHttpNode(
         console.error('Failed to parse query params', e);
       }
     }
+    validateHttpUrl(endpoint);
 
     let method = node.data?.method || 'GET';
     if (node.type === 'httpPost') method = 'POST';
@@ -863,7 +1189,7 @@ async function executeHttpNode(
       const requestPreview = {
         method,
         endpoint,
-        headers: { ...headers, ...maskedAuthHeaders },
+        headers: maskPreviewHeaders(headers, maskedAuthHeaders),
         body: requestBody || null,
         // The values sent, not the {{templates}} they come from (those are listed in references)
         params: resolvedParams,
@@ -962,69 +1288,93 @@ async function executeHttpNode(
       }
     };
 
-    // Network errors, timeouts, 408/429 and 5xx are retried; other 4xx fail right away
-    const { response, durationMs, responseHeaders, parsedBody } = await runWithRetry(sendRequest, retryPolicy, {
-      signal,
-      retryResult: r => (!r.response.ok && isRetryableStatus(r.response.status) ? `HTTP ${r.response.status} ${r.response.statusText}`.trim() : null),
-      onRetry: retry => onNodeProgress?.(node.id, 'progress', {
-        retry,
-        ...(itemsToIterate.length > 1 ? { current: i + 1, total: itemsToIterate.length } : {})
-      })
-    });
-
-    // Extract path if specified
-    const extractPath = node.data?.extractPath;
-    const finalResult = extractPath ? resolvePath(parsedBody, extractPath) : parsedBody;
-    results.push(finalResult);
-
-    // DEBUG MODE: Pause after receiving response if in debug step mode so user can inspect the response
-    const shouldPauseAfterResponse = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id];
-    if (shouldPause || shouldPauseAfterResponse) {
-      const currentIterationInfo = itemsToIterate.length > 1
-        ? { current: i + 1, total: itemsToIterate.length, outer: outerLoops(context, true) }
-        : (context._index !== undefined ? { current: context._index + 1, total: context._total, outer: outerLoops(context, false) } : undefined);
-
-      const responsePreview = {
-        status: response.status,
-        statusText: response.statusText,
-        ok: response.ok,
-        durationMs,
-        headers: responseHeaders,
-        data: parsedBody,
-        iteration: currentIterationInfo
-      };
-      if (onNodeProgress) {
-        onNodeProgress(node.id, 'paused', {
-          debugType: 'http_response',
-          responsePreview,
-          current: context._index !== undefined ? context._index + 1 : (i + 1),
-          total: context._total !== undefined ? context._total : itemsToIterate.length,
-          context: { ...context, _item: item ?? context._item }
-        });
-      }
-      const resumeActionAfter = await new Promise<string>((resolve) => {
-        if (currentExec?.resumeResolvers) {
-          currentExec.resumeResolvers[node.id] = (act?: string) => resolve(act || 'step');
-        }
+    try {
+      // Network errors, timeouts, 408/429 and 5xx are retried; other 4xx fail right away
+      const { response, durationMs, responseHeaders, parsedBody } = await runWithRetry(sendRequest, retryPolicy, {
+        signal,
+        retryResult: r => (!r.response.ok && isRetryableStatus(r.response.status) ? `HTTP ${r.response.status} ${r.response.statusText}`.trim() : null),
+        onRetry: retry => onNodeProgress?.(node.id, 'progress', {
+          retry,
+          ...(itemsToIterate.length > 1 ? { current: i + 1, total: itemsToIterate.length } : {})
+        })
       });
-      if (resumeActionAfter === 'continue_node') {
-        if (!currentExec.skipHttpPauseForNode) currentExec.skipHttpPauseForNode = {};
-        currentExec.skipHttpPauseForNode[node.id] = true;
+
+      // Extract path if specified
+      const extractPath = node.data?.extractPath;
+      const finalResult = extractPath ? resolvePath(parsedBody, extractPath) : parsedBody;
+
+      // DEBUG MODE: Pause after receiving response if in debug step mode so user can inspect the response
+      const shouldPauseAfterResponse = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[node.id];
+      if (shouldPause || shouldPauseAfterResponse) {
+        const currentIterationInfo = itemsToIterate.length > 1
+          ? { current: i + 1, total: itemsToIterate.length, outer: outerLoops(context, true) }
+          : (context._index !== undefined ? { current: context._index + 1, total: context._total, outer: outerLoops(context, false) } : undefined);
+
+        const responsePreview = {
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok,
+          durationMs,
+          headers: responseHeaders,
+          data: parsedBody,
+          iteration: currentIterationInfo
+        };
+        if (onNodeProgress) {
+          onNodeProgress(node.id, 'paused', {
+            debugType: 'http_response',
+            responsePreview,
+            current: context._index !== undefined ? context._index + 1 : (i + 1),
+            total: context._total !== undefined ? context._total : itemsToIterate.length,
+            context: { ...context, _item: item ?? context._item }
+          });
+        }
+        const resumeActionAfter = await new Promise<string>((resolve) => {
+          if (currentExec?.resumeResolvers) {
+            currentExec.resumeResolvers[node.id] = (act?: string) => resolve(act || 'step');
+          }
+        });
+        if (resumeActionAfter === 'continue_node') {
+          if (!currentExec.skipHttpPauseForNode) currentExec.skipHttpPauseForNode = {};
+          currentExec.skipHttpPauseForNode[node.id] = true;
+        }
+      }
+
+      if (!response.ok) {
+        const errDetail = typeof parsedBody === 'string' ? parsedBody.slice(0, 300) : JSON.stringify(parsedBody).slice(0, 300);
+        throw new Error(`HTTP Request falló con estado ${response.status} en ${endpoint}. ${errDetail ? 'Detalle: ' + errDetail : ''}`);
+      }
+
+      slotResults[i] = finalResult;
+      slotSucceeded[i] = true;
+    } catch (itemErr: any) {
+      if (iteratesList && (retryPolicy.onError === 'continue' || retryPolicy.onError === 'error_branch') && !isAbortError(itemErr, signal)) {
+        failedItems.push({ index: i, item, error: itemErr?.message || String(itemErr) });
+      } else {
+        throw itemErr;
+      }
+    } finally {
+      completedCount++;
+      if (itemsToIterate.length > 1 && onNodeProgress) {
+        onNodeProgress(node.id, 'progress', { current: completedCount, total: itemsToIterate.length });
       }
     }
+  });
 
-    if (!response.ok) {
-      const errDetail = typeof parsedBody === 'string' ? parsedBody.slice(0, 300) : JSON.stringify(parsedBody).slice(0, 300);
-      throw new Error(`HTTP Request falló con estado ${response.status} en ${endpoint}. ${errDetail ? 'Detalle: ' + errDetail : ''}`);
+  if (iteratesList) {
+    const orderedResults = slotResults.filter((_, idx) => slotSucceeded[idx]);
+    failedItems.sort((a, b) => a.index - b.index);
+    if (failedItems.length > 0) {
+      if (orderedResults.length === 0 && retryPolicy.onError === 'error_branch') {
+        const batchErr = new Error(failedItems[0].error) as Error & { failed_items?: typeof failedItems };
+        batchErr.failed_items = failedItems;
+        throw batchErr;
+      }
+      attachNonEnumerable(orderedResults, 'failed_items', failedItems);
     }
-
-    // Report progress
-    if (itemsToIterate.length > 1 && onNodeProgress) {
-      onNodeProgress(node.id, 'progress', { current: i + 1, total: itemsToIterate.length });
-    }
+    return orderedResults;
   }
 
-  return iteratesList ? results : results[0];
+  return slotResults[0];
 }
 
 // Scraping script: a script registered in the Scripts section (by id or name) or, for older flows,
@@ -1271,6 +1621,10 @@ function evaluatePathOnObject(obj: any, pathStr: string): any {
 function resolvePath(context: Record<string, any>, pathStr: string): any {
   if (!pathStr || !pathStr.trim() || !context) return undefined;
   const trimmed = pathStr.trim();
+
+  if (trimmed.startsWith('$env.')) {
+    return resolveEnvVariable(context, trimmed.slice(5));
+  }
 
   // 1. Direct path resolution with tokens on context
   const direct = evaluatePathOnObject(context, trimmed);
@@ -1720,7 +2074,7 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
     fs.mkdirSync(dataDir, { recursive: true });
   }
 
-  const isExcel = format === 'Excel';
+  const isExcel = /^(excel|xlsx)$/i.test(String(format || '').trim());
   const ext = isExcel ? '.xlsx' : '.csv';
   const cleanedFileName = String(fileName).replace(/[<>:"/\\|?*\r\n\t]/g, '_').trim();
   const safeFileName = cleanedFileName.endsWith(ext) ? cleanedFileName : (cleanedFileName.replace(/\.(csv|xlsx|json)$/i, '') + ext);
@@ -2076,13 +2430,47 @@ async function executeDataSourceNode(
     return merged;
   }
 
+function isWithinDirectory(candidate: string, allowedDir: string): boolean {
+  return candidate === allowedDir || candidate.startsWith(allowedDir + path.sep);
+}
+
+function resolveAllowedDataFilePath(rawFilePath: string): string {
+  const raw = String(rawFilePath || '').trim();
+  if (!raw || /(?:^|[\\/])\.\.(?:[\\/]|$)/.test(raw)) {
+    throw new Error(`Ruta de archivo no permitida: ${rawFilePath}`);
+  }
+  const fullPath = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(process.cwd(), raw);
+  if (path.basename(fullPath).toLowerCase() === 'orquesta.sqlite') {
+    throw new Error('No se permite acceder a la base de datos interna orquesta.sqlite');
+  }
+  const allowedRoots = [
+    path.resolve(process.cwd(), 'uploads'),
+    path.resolve(process.cwd(), 'data', 'exports'),
+    path.resolve(os.tmpdir()),
+  ];
+  if (!allowedRoots.some(root => isWithinDirectory(fullPath, root))) {
+    throw new Error(`Ruta de archivo fuera de los directorios permitidos: ${rawFilePath}`);
+  }
+  if (fs.existsSync(fullPath)) {
+    const realTarget = fs.realpathSync(fullPath);
+    if (path.basename(realTarget).toLowerCase() === 'orquesta.sqlite') {
+      throw new Error('No se permite acceder a la base de datos interna orquesta.sqlite');
+    }
+    const realRoots = allowedRoots.map(r => (fs.existsSync(r) ? fs.realpathSync(r) : r));
+    if (!realRoots.some(root => isWithinDirectory(realTarget, root))) {
+      throw new Error(`Ruta de archivo fuera de los directorios permitidos: ${rawFilePath}`);
+    }
+  }
+  return fullPath;
+}
+
   // Modo archivo tradicional
   const rawFilePath = node.data?.filePath;
   if (!rawFilePath) {
     throw new Error('El nodo de origen de datos no tiene ningún archivo seleccionado.');
   }
 
-  const fullPath = path.isAbsolute(rawFilePath) ? rawFilePath : path.join(process.cwd(), rawFilePath);
+  const fullPath = resolveAllowedDataFilePath(rawFilePath);
   if (!fs.existsSync(fullPath)) {
     throw new Error(`Archivo no encontrado en el servidor: ${rawFilePath}`);
   }
@@ -2131,30 +2519,43 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
   const { sqlText, connectionIds, params } = prepareQueryNode(node, context);
   const db = getDb();
 
-  const connectionId = connectionIds[0];
-  const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(connectionId) as any;
-  let result: { rows: any[] };
-  if (connection?.driver === 'sqlite') {
-    const { executeSqliteQuery } = await import('./sqlite.js');
-    result = await executeSqliteQuery(connection.host, sqlText, params);
-  } else {
-    const { executeMssqlQuery } = await import('./mssql.js');
-    // The signal cancels the query on the server when the flow is stopped
-    result = await executeMssqlQuery(connectionId, sqlText, params, { signal });
-  }
+  const perConnectionRows = await Promise.all(
+    connectionIds.map(async (connId) => {
+      const connection = db.prepare('SELECT * FROM connections WHERE id = ?').get(connId) as any;
+      if (!connection) {
+        throw new Error(`Conexión no encontrada: ${connId}`);
+      }
+      let result: { rows: any[] };
+      if (connection.driver === 'sqlite') {
+        const { executeSqliteQuery } = await import('./sqlite.js');
+        result = await executeSqliteQuery(connection.host, sqlText, params);
+      } else {
+        const { executeMssqlQuery } = await import('./mssql.js');
+        // The signal cancels the query on the server when the flow is stopped
+        result = await executeMssqlQuery(connId, sqlText, params, { signal });
+      }
+      const rows = Array.isArray(result?.rows) ? result.rows : [];
+      if (connectionIds.length > 1) {
+        const connLabel = String(connection.name || connId);
+        return rows.map(row => (row && typeof row === 'object' && !Array.isArray(row) ? { ...row, _connection: connLabel } : row));
+      }
+      return rows;
+    })
+  );
   if (signal?.aborted) throw new Error('Ejecución detenida por el usuario');
 
+  const combinedRows = perConnectionRows.flat();
   const extractMode = node.data?.extractMode || 'all';
 
   if (extractMode === 'selected_columns') {
     const colsStr = node.data?.extractColumns || '';
     const cols = colsStr.split(',').map((c: string) => c.trim()).filter(Boolean);
 
-    if (cols.length > 0 && result.rows && result.rows.length > 0) {
+    if (cols.length > 0 && combinedRows.length > 0) {
       if (cols.length === 1) {
-        return result.rows.map((r: any) => r[cols[0]]);
+        return combinedRows.map((r: any) => r[cols[0]]);
       } else {
-        return result.rows.map((r: any) => {
+        return combinedRows.map((r: any) => {
           const obj: any = {};
           for (const col of cols) {
             obj[col] = r[col];
@@ -2166,7 +2567,7 @@ async function executeQueryNode(node: any, context: Record<string, any>, signal?
     return [];
   }
 
-  return result.rows;
+  return combinedRows;
 }
 
 // DataList Node Handler: parses a static JSON array defined by the user in the node inspector
@@ -2307,7 +2708,8 @@ async function executeForEachNode(
   onNodeProgress: (nodeId: string, status: 'running' | 'completed' | 'error' | 'progress' | 'paused', result?: any) => void,
   signal: AbortSignal,
   flowId: string,
-  callStack: string[] = [flowId]
+  callStack: string[] = [flowId],
+  executionId?: string
 ): Promise<any[]> {
   // Resolve the array to iterate over
   const iterateOverExpr = node.data?.iterateOver;
@@ -2425,22 +2827,21 @@ async function executeForEachNode(
     });
   }
 
-  const iterationResults: any[] = [];
+  const { concurrency, rateLimitMs } = parseBatchSettings(node.data);
+  const forEachExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+  const effectiveConcurrency = forEachExec?.mode === 'debug' ? 1 : concurrency;
+  const allowIterationFailure = node.data?.onError === 'continue' || node.data?.onError === 'error_branch';
 
-  // Sequential iteration over each item
-  for (let i = 0; i < items.length; i++) {
-    if (signal.aborted) {
-      throw new Error('Ejecucion detenida por el usuario');
-    }
+  const slotMergedRows: Array<any[] | null> = new Array(items.length).fill(null);
+  const failedItems: Array<{ index: number; item: any; error: string }> = [];
+  let completedIterations = 0;
 
+  await runIndexedBatch(items.length, effectiveConcurrency, rateLimitMs, signal, async (i) => {
     const item = items[i];
-
-    // Emit progress for the forEach node itself
     onNodeProgress(node.id, 'progress', { current: i + 1, total: items.length, item });
 
     // Create a local context for this iteration
-    const localContext: Record<string, any> = {
-      ...context,
+    const localContext = cloneRuntimeContext(context, {
       _item: item,
       item: item,
       _index: i,
@@ -2450,13 +2851,12 @@ async function executeForEachNode(
         ...(Array.isArray(context._loops) ? context._loops : []),
         { id: node.id, label: String(node.data?.label || 'Bucle'), current: i + 1, total: items.length }
       ],
-      [node.id]: item
-    };
+      [node.id]: item,
+    });
     // Optional alias for the current element, e.g. {{sucursal.id}}
     const itemAlias = String(node.data?.itemAlias || '').trim();
     if (itemAlias) localContext[itemAlias] = item;
 
-    // Reset sub-graph state for this iteration
     const localInDegree = { ...baseInDegree };
     const localCompleted = new Set<string>();
     const localSkipped = new Set<string>();
@@ -2465,174 +2865,211 @@ async function executeForEachNode(
     let iterationError = false;
     let lastOutput: any = null;
 
-    // Mini-Kahn execution for the sub-graph
-    await new Promise<void>((resolve, reject) => {
-      const checkAndRunLocal = () => {
-        if (iterationError || signal.aborted) return;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const checkAndRunLocal = () => {
+          if (iterationError || signal.aborted) return;
 
-        let allDone = true;
+          let allDone = true;
 
-        levelNodes.forEach(subNode => {
-          if (!localCompleted.has(subNode.id) && !iterationError) {
-            allDone = false;
+          levelNodes.forEach(subNode => {
+            if (!localCompleted.has(subNode.id) && !iterationError) {
+              allDone = false;
 
-            if (localInDegree[subNode.id] === 0 && !localRunning.has(subNode.id)) {
-              const p = (async () => {
-                if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
+              if (localInDegree[subNode.id] === 0 && !localRunning.has(subNode.id)) {
+                const p = (async () => {
+                  if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
 
-                const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(subNode.type);
-                const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
-                if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
-                  onNodeProgress(subNode.id, 'paused', {
-                    context: { ...localContext },
-                    iteration: { current: i + 1, total: items.length, item, outer: outerLoops(localContext, false) },
-                    ...buildDebugPreview(subNode, localContext, edges, nodes, { current: i + 1, total: items.length })
-                  });
-                  await new Promise<void>((resolve) => {
-                    if (currentExec.resumeResolvers) {
-                      currentExec.resumeResolvers[subNode.id] = () => resolve();
-                    }
-                  });
-                }
-
-                onNodeProgress(subNode.id, 'running');
-
-                // Animation delay only in debug mode
-                const isSubDebug = currentExec?.mode === 'debug';
-                const delayMs = isSubDebug ? 250 : 0;
-                if (delayMs > 0) {
-                  await new Promise<void>((res, rej) => {
-                    if (signal.aborted) return rej(new Error('Ejecucion detenida por el usuario'));
-                    const t = setTimeout(res, delayMs);
-                    const onAbort = () => { clearTimeout(t); signal.removeEventListener('abort', onAbort); rej(new Error('Ejecucion detenida por el usuario')); };
-                    signal.addEventListener('abort', onAbort, { once: true });
-                  });
-                }
-
-                if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
-
-                try {
-                  const runOnce = async (): Promise<any> => {
-                    let output: any = {};
-                    switch (subNode.type) {
-                      case 'start':
-                        output = { msg: 'Flow started' };
-                        break;
-                      case 'httpGet':
-                      case 'httpPost':
-                      case 'httpRequest':
-                        output = await executeHttpNode(subNode, localContext, onNodeProgress, signal, flowId);
-                        break;
-                      case 'scraping':
-                        output = await executeScrapingNode(subNode, localContext, signal);
-                        break;
-                      case RUN_SCRIPT_NODE_TYPE:
-                        output = await executeRunScriptNode(subNode, localContext, edges, nodes, signal,
-                          scriptRun => onNodeProgress(subNode.id, 'progress', { scriptRun }));
-                        break;
-                      case RUN_FLOW_NODE_TYPE:
-                        output = await executeRunFlowNode(subNode, localContext, signal, callStack);
-                        break;
-                      case 'export':
-                        output = await executeExportNode(subNode, localContext, edges, nodes);
-                        break;
-                      case 'query':
-                        output = await executeQueryNode(subNode, localContext, signal);
-                        break;
-                      case 'timer':
-                      case 'delay':
-                        output = await executeTimerNode(subNode, (status, res) => onNodeProgress(subNode.id, status, res), signal);
-                        {
-                          const timerUpstreamIds = getEffectiveDataSources(subNode.id, edges, nodes);
-                          if (timerUpstreamIds.length > 0 && localContext[timerUpstreamIds[0]]) {
-                            output = localContext[timerUpstreamIds[0]];
-                          }
-                        }
-                        break;
-                      case WAIT_NODE_TYPE:
-                        // Inside a loop body the order is already set by the iteration itself
-                        output = executeWaitNode(subNode, localContext, edges, nodes);
-                        break;
-                      case 'dataSource':
-                      case 'fileSource':
-                        output = await executeDataSourceNode(subNode, localContext, signal, edges, nodes);
-                        break;
-                      case 'dataList':
-                        output = executeDataListNode(subNode);
-                        break;
-                      case 'variables':
-                        output = executeVariablesNode(subNode, localContext);
-                        break;
-                      case 'forEach':
-                        // Nested loop: iterates with this iteration's context ({{_item}} is still the outer element here)
-                        output = await executeForEachNode(subNode, localContext, edges, nodes, adjList, onNodeProgress, signal, flowId, callStack);
-                        break;
-                      case 'forEachEnd': {
-                        // End of a nested loop: the results its forEach accumulated for this outer element
-                        const pair = nestedPairs.find(p => p.endId === subNode.id);
-                        output = pair ? localContext[pair.feId] : localContext[subNode.id];
-                        if (Array.isArray(output)) output = flattenRows(output);
-                        break;
+                  const isHttpNode = ['httpGet', 'httpPost', 'httpRequest'].includes(subNode.type);
+                  const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+                  if (!isHttpNode && currentExec?.mode === 'debug' && currentExec?.debugState === 'paused') {
+                    onNodeProgress(subNode.id, 'paused', {
+                      context: { ...localContext },
+                      iteration: { current: i + 1, total: items.length, item, outer: outerLoops(localContext, false) },
+                      ...buildDebugPreview(subNode, localContext, edges, nodes, { current: i + 1, total: items.length })
+                    });
+                    await new Promise<void>((resResume) => {
+                      if (currentExec.resumeResolvers) {
+                        currentExec.resumeResolvers[subNode.id] = () => resResume();
                       }
-                      case 'conditionalBranch':
-                        output = executeConditionalBranchNode(subNode, localContext);
-                        break;
-                      case 'jsonTransform': {
-                        const currentExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
-                        const stepping = currentExec?.mode === 'debug' && currentExec?.debugState === 'paused' && !currentExec?.skipHttpPauseForNode?.[subNode.id];
-                        let trace: TransformDebugTrace | undefined;
-                        ({ output, trace } = await executeJsonTransformNode(subNode, localContext, edges, nodes, { debug: stepping }));
-                        if (stepping && currentExec) {
-                          const unwrapData = output && typeof output === 'object' && output._data !== undefined ? output._data : output;
-                          const logs = output && typeof output === 'object' && Array.isArray(output._logs) ? output._logs : [];
-                          onNodeProgress(subNode.id, 'paused', {
-                            debugType: 'transform_result',
-                            context: { ...localContext, [subNode.id]: output },
-                            nodePreview: {
-                              kind: 'transform_result',
-                              output: unwrapData,
-                              logs,
-                              trace
-                            }
-                          });
-                          const resumeAction = await new Promise<string>((resolve) => {
-                            if (currentExec.resumeResolvers) {
-                              currentExec.resumeResolvers[subNode.id] = (act?: string) => resolve(act || 'step');
-                            }
-                          });
-                          if (resumeAction === 'continue_node') {
-                            if (!currentExec.skipHttpPauseForNode) currentExec.skipHttpPauseForNode = {};
-                            currentExec.skipHttpPauseForNode[subNode.id] = true;
-                          }
-                        }
-                        break;
-                      }
-                      case 'oauth2Connector':
-                        output = await executeOAuth2ConnectorNode(subNode, localContext, signal);
-                        break;
-                      case 'aiChatCompletion':
-                        output = await executeAiChatCompletionNode(subNode, localContext, signal);
-                        break;
-                      default:
-                        output = { warning: 'Unknown node type' };
-                    }
-                    return output;
-                  };
-                  const { output, failure } = await runNodeWithPolicy(subNode, runOnce, getRetryPolicy(subNode, systemSettings), signal, onNodeProgress);
-
-                  localContext[subNode.id] = output;
-                  if (subNode.data?.label && typeof subNode.data.label === 'string') {
-                    localContext[subNode.data.label] = output;
-                  }
-                  if (subNode.type !== 'conditionalBranch') lastOutput = output;
-                  localCompleted.add(subNode.id);
-                  if (failure) {
-                    onNodeProgress(subNode.id, 'error', { error: failure, failed: true, continued: true });
-                  } else {
-                    onNodeProgress(subNode.id, 'completed', output);
+                    });
                   }
 
-                  if (subNode.type === 'conditionalBranch') {
+                  onNodeProgress(subNode.id, 'running');
+
+                  // Animation delay only in debug mode
+                  const isSubDebug = currentExec?.mode === 'debug';
+                  const delayMs = isSubDebug ? 250 : 0;
+                  if (delayMs > 0) {
+                    await sleepWithSignal(delayMs, signal);
+                  }
+
+                  if (signal.aborted) throw new Error('Ejecucion detenida por el usuario');
+
+                  try {
+                    let wasMocked = false;
+                    const runOnce = async (): Promise<any> => {
+                      const mockResult = resolveMockOutput(subNode);
+                      if (mockResult) {
+                        wasMocked = true;
+                        return mockResult.value;
+                      }
+                      let output: any = {};
+                      switch (subNode.type) {
+                        case 'start':
+                          output = { msg: 'Flow started' };
+                          break;
+                        case 'httpGet':
+                        case 'httpPost':
+                        case 'httpRequest':
+                          output = await executeHttpNode(subNode, localContext, onNodeProgress, signal, flowId);
+                          break;
+                        case 'scraping':
+                          output = await executeScrapingNode(subNode, localContext, signal);
+                          break;
+                        case RUN_SCRIPT_NODE_TYPE:
+                          output = await executeRunScriptNode(subNode, localContext, edges, nodes, signal,
+                            scriptRun => onNodeProgress(subNode.id, 'progress', { scriptRun }));
+                          break;
+                        case RUN_FLOW_NODE_TYPE:
+                          output = await executeRunFlowNode(subNode, localContext, signal, callStack, executionId);
+                          break;
+                        case 'export':
+                          output = await executeExportNode(subNode, localContext, edges, nodes);
+                          break;
+                        case 'query':
+                          output = await executeQueryNode(subNode, localContext, signal);
+                          break;
+                        case 'timer':
+                        case 'delay':
+                          output = await executeTimerNode(subNode, (status, res) => onNodeProgress(subNode.id, status, res), signal);
+                          {
+                            const timerUpstreamIds = getEffectiveDataSources(subNode.id, edges, nodes);
+                            if (timerUpstreamIds.length > 0 && localContext[timerUpstreamIds[0]]) {
+                              output = localContext[timerUpstreamIds[0]];
+                            }
+                          }
+                          break;
+                        case WAIT_NODE_TYPE:
+                          output = executeWaitNode(subNode, localContext, edges, nodes);
+                          break;
+                        case 'dataSource':
+                        case 'fileSource':
+                          output = await executeDataSourceNode(subNode, localContext, signal, edges, nodes);
+                          break;
+                        case 'dataList':
+                          output = executeDataListNode(subNode);
+                          break;
+                        case 'variables':
+                          output = executeVariablesNode(subNode, localContext);
+                          break;
+                        case 'forEach':
+                          output = await executeForEachNode(subNode, localContext, edges, nodes, adjList, onNodeProgress, signal, flowId, callStack, executionId);
+                          break;
+                        case 'forEachEnd': {
+                          const pair = nestedPairs.find(np => np.endId === subNode.id);
+                          output = pair ? localContext[pair.feId] : localContext[subNode.id];
+                          if (Array.isArray(output)) {
+                            const prevFailed = (output as any).failed_items;
+                            output = flattenRows(output);
+                            if (prevFailed) attachNonEnumerable(output, 'failed_items', prevFailed);
+                          }
+                          break;
+                        }
+                        case 'conditionalBranch':
+                          output = executeConditionalBranchNode(subNode, localContext);
+                          break;
+                        case 'jsonTransform': {
+                          const curExec = flowId ? activeFlowExecutions.get(flowId) : undefined;
+                          const stepping = curExec?.mode === 'debug' && curExec?.debugState === 'paused' && !curExec?.skipHttpPauseForNode?.[subNode.id];
+                          let trace: TransformDebugTrace | undefined;
+                          ({ output, trace } = await executeJsonTransformNode(subNode, localContext, edges, nodes, { debug: stepping }));
+                          if (stepping && curExec) {
+                            const unwrapData = output && typeof output === 'object' && output._data !== undefined ? output._data : output;
+                            const logs = output && typeof output === 'object' && Array.isArray(output._logs) ? output._logs : [];
+                            onNodeProgress(subNode.id, 'paused', {
+                              debugType: 'transform_result',
+                              context: { ...localContext, [subNode.id]: output },
+                              nodePreview: {
+                                kind: 'transform_result',
+                                output: unwrapData,
+                                logs,
+                                trace
+                              }
+                            });
+                            const resumeAction = await new Promise<string>((resResume) => {
+                              if (curExec.resumeResolvers) {
+                                curExec.resumeResolvers[subNode.id] = (act?: string) => resResume(act || 'step');
+                              }
+                            });
+                            if (resumeAction === 'continue_node') {
+                              if (!curExec.skipHttpPauseForNode) curExec.skipHttpPauseForNode = {};
+                              curExec.skipHttpPauseForNode[subNode.id] = true;
+                            }
+                          }
+                          break;
+                        }
+                        case WEBHOOK_RESPOND_NODE_TYPE:
+                          output = executeWebhookRespondNode(subNode, localContext);
+                          if (localContext.__webhookResponse !== undefined) {
+                            attachNonEnumerable(context, '__webhookResponse', localContext.__webhookResponse);
+                            attachNonEnumerable(context, 'webhookResponse', localContext.__webhookResponse);
+                          }
+                          break;
+                        case 'oauth2Connector':
+                          output = await executeOAuth2ConnectorNode(subNode, localContext, signal);
+                          break;
+                        case 'aiChatCompletion':
+                          output = await executeAiChatCompletionNode(subNode, localContext, signal);
+                          break;
+                        default:
+                          output = { warning: 'Unknown node type' };
+                      }
+                      return output;
+                    };
+                    const { output: rawOutput, failure, onError } = await runNodeWithPolicy(
+                      subNode,
+                      runOnce,
+                      getRetryPolicy(subNode, systemSettings),
+                      signal,
+                      onNodeProgress
+                    );
+
+                    const errorBranchTriggered = Boolean(failure && onError === 'error_branch');
+                    let subOutput = rawOutput;
+                    if (errorBranchTriggered && failure) {
+                      const errorInfo = {
+                        message: failure,
+                        nodeId: subNode.id,
+                        nodeLabel: String(subNode.data?.label || subNode.id),
+                        timestamp: new Date().toISOString(),
+                      };
+                      localContext.$error = errorInfo;
+                      subOutput = { error: failure, failed: true, $error: errorInfo };
+                    }
+
+                    localContext[subNode.id] = subOutput;
+                    if (subNode.data?.label && typeof subNode.data.label === 'string') {
+                      localContext[subNode.data.label] = subOutput;
+                    }
+                    if (subNode.type !== 'conditionalBranch') lastOutput = subOutput;
+                    localCompleted.add(subNode.id);
+
+                    if (failure) {
+                      failedItems.push({ index: i, item, error: failure });
+                      onNodeProgress(
+                        subNode.id,
+                        'error',
+                        buildNodeTraceErrorPayload(subNode.type, failure, errorBranchTriggered, subOutput)
+                      );
+                    } else {
+                      onNodeProgress(
+                        subNode.id,
+                        'completed',
+                        buildNodeTraceCompletedPayload(subNode.type, subOutput, wasMocked)
+                      );
+                    }
+
                     const branchState: BranchSkipState = {
                       inDegree: localInDegree,
                       initialInDegree: baseInDegree,
@@ -2642,92 +3079,118 @@ async function executeForEachNode(
                       adjList: subAdjList,
                       notify: onNodeProgress
                     };
-                    subEdges
-                      .filter(e => e.source === subNode.id)
-                      .forEach(edge => {
-                        if (edgeFollowsBranch(edge, output.selectedHandle)) {
+                    const subOutgoing = subEdges.filter(e => e.source === subNode.id);
+                    if (errorBranchTriggered) {
+                      subOutgoing.forEach(edge => {
+                        if (isErrorEdge(edge)) localInDegree[edge.target]--;
+                        else skipIncomingEdge(edge.target, branchState);
+                      });
+                    } else if (subNode.type === 'conditionalBranch') {
+                      subOutgoing.forEach(edge => {
+                        if (!isErrorEdge(edge) && edgeFollowsBranch(edge, subOutput?.selectedHandle)) {
                           localInDegree[edge.target]--;
                         } else {
                           skipIncomingEdge(edge.target, branchState);
                         }
                       });
-                  } else if (subAdjList[subNode.id]) {
-                    subAdjList[subNode.id].forEach(depId => {
-                      localInDegree[depId]--;
-                    });
+                    } else {
+                      subOutgoing.forEach(edge => {
+                        if (isErrorEdge(edge)) skipIncomingEdge(edge.target, branchState);
+                        else localInDegree[edge.target]--;
+                      });
+                    }
+                  } catch (err: any) {
+                    iterationError = true;
+                    onNodeProgress(subNode.id, 'error', { error: err.message });
+                    throw err;
                   }
-                } catch (err: any) {
-                  iterationError = true;
-                  onNodeProgress(subNode.id, 'error', { error: err.message });
-                  throw err;
-                }
-              })();
+                })();
 
-              localRunning.set(subNode.id, p);
+                localRunning.set(subNode.id, p);
 
-              p.then(() => {
-                localRunning.delete(subNode.id);
-                checkAndRunLocal();
-              }).catch(err => {
-                localRunning.delete(subNode.id);
-                reject(err);
-              });
+                p.then(() => {
+                  localRunning.delete(subNode.id);
+                  checkAndRunLocal();
+                }).catch(err => {
+                  localRunning.delete(subNode.id);
+                  reject(err);
+                });
+              }
             }
+          });
+
+          if (allDone && localRunning.size === 0) {
+            resolve();
           }
+        };
+
+        checkAndRunLocal();
+      });
+
+      let subResult: any = lastOutput;
+      if (terminalEdges.length > 0) {
+        const activeTerminal = terminalEdges.find(e => {
+          if (localSkipped.has(e.source)) return false;
+          const out = localContext[e.source];
+          if (nodes.find(n => n.id === e.source)?.type === 'conditionalBranch') {
+            return !isErrorEdge(e) && edgeFollowsBranch(e, out?.selectedHandle);
+          }
+          if (isErrorEdge(e)) {
+            return Boolean(out?.failed);
+          }
+          return out !== undefined && !out?.failed;
+        }) ?? terminalEdges.find(e => !localSkipped.has(e.source) && localContext[e.source] !== undefined);
+        if (!activeTerminal) {
+          return;
+        }
+        const terminalIsConditional = nodes.find(n => n.id === activeTerminal.source)?.type === 'conditionalBranch';
+        subResult = terminalIsConditional ? item : localContext[activeTerminal.source];
+      }
+
+      // Flatten rows from subResult and enrich with parent item metadata
+      const itemOut: any[] = [];
+      const flatSub = flattenRows(subResult);
+      if (flatSub.length > 0) {
+        const mergedRows = flatSub.map(row => {
+          if (typeof row === 'object' && row !== null && typeof item === 'object' && item !== null && !Array.isArray(item)) {
+            return { ...item, ...row };
+          }
+          return row;
         });
-
-        if (allDone && localRunning.size === 0) {
-          resolve();
+        itemOut.push(...mergedRows);
+      } else if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+        if (typeof subResult === 'object' && subResult !== null) {
+          itemOut.push({ ...item, ...subResult });
+        } else if (subResult !== undefined && subResult !== null) {
+          itemOut.push({ ...item, resultado: subResult });
+        } else {
+          itemOut.push({ ...item });
         }
-      };
-
-      checkAndRunLocal();
-    });
-
-    let subResult: any = lastOutput;
-    if (terminalEdges.length > 0) {
-      const activeTerminal = terminalEdges.find(e => {
-        if (localSkipped.has(e.source)) return false;
-        const out = localContext[e.source];
-        if (nodes.find(n => n.id === e.source)?.type === 'conditionalBranch') {
-          return edgeFollowsBranch(e, out?.selectedHandle);
-        }
-        return out !== undefined;
-      });
-      if (!activeTerminal) {
-        continue;
-      }
-      const terminalIsConditional = nodes.find(n => n.id === activeTerminal.source)?.type === 'conditionalBranch';
-      subResult = terminalIsConditional ? item : localContext[activeTerminal.source];
-    }
-
-    // Flatten rows from subResult and enrich with parent item metadata
-    const flatSub = flattenRows(subResult);
-    if (flatSub.length > 0) {
-      const mergedRows = flatSub.map(row => {
-        if (typeof row === 'object' && row !== null && typeof item === 'object' && item !== null && !Array.isArray(item)) {
-          return { ...item, ...row };
-        }
-        return row;
-      });
-      iterationResults.push(...mergedRows);
-    } else if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
-      if (typeof subResult === 'object' && subResult !== null) {
-        iterationResults.push({ ...item, ...subResult });
-      } else if (subResult !== undefined && subResult !== null) {
-        iterationResults.push({ ...item, resultado: subResult });
       } else {
-        iterationResults.push({ ...item });
+        itemOut.push(subResult);
       }
-    } else {
-      iterationResults.push(subResult);
+      slotMergedRows[i] = itemOut;
+    } catch (iterErr: any) {
+      if (allowIterationFailure && !isAbortError(iterErr, signal)) {
+        failedItems.push({ index: i, item, error: iterErr?.message || String(iterErr) });
+      } else {
+        throw iterErr;
+      }
+    } finally {
+      completedIterations++;
+      if (effectiveConcurrency > 1) {
+        onNodeProgress(node.id, 'progress', { current: completedIterations, total: items.length });
+      }
     }
+  });
 
-    // Propagate accumulated results back to main context for both forEach and forEachEnd
-    context[node.id] = iterationResults;
-    if (forEachEndId) {
-      context[forEachEndId] = iterationResults;
-    }
+  const iterationResults: any[] = [];
+  for (const rows of slotMergedRows) {
+    if (rows) iterationResults.push(...rows);
+  }
+  failedItems.sort((a, b) => a.index - b.index);
+  if (failedItems.length > 0) {
+    attachNonEnumerable(iterationResults, 'failed_items', failedItems);
   }
 
   context[node.id] = iterationResults;
@@ -2743,7 +3206,7 @@ async function executeForEachNode(
 // Branching, transformation and experimental nodes
 // -------------------------------------------------------------
 
-export const EXPERIMENTAL_NODE_TYPES = ['webhookTrigger', 'oauth2Connector', 'aiChatCompletion'];
+export const EXPERIMENTAL_NODE_TYPES = ['oauth2Connector', 'aiChatCompletion'];
 
 function edgeFollowsBranch(edge: any, selectedHandle?: string): boolean {
   if (!isBranchHandle(edge.sourceHandle)) return true;
@@ -3275,16 +3738,83 @@ function executeWebhookTriggerNode(node: any, context: Record<string, any>): any
   };
 }
 
+function executeWebhookRespondNode(node: any, context: Record<string, any>): { statusCode: number; headers: Record<string, string>; body: any } {
+  const data = node.data || {};
+  const rawStatus = resolveTemplate(context, data.statusCode ?? 200);
+  const parsedStatus = Number(rawStatus);
+  const statusCode = Number.isInteger(parsedStatus) && parsedStatus >= 100 && parsedStatus <= 599 ? parsedStatus : 200;
+
+  let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const rawHeaders = data.headers;
+  if (Array.isArray(rawHeaders)) {
+    for (const pair of rawHeaders) {
+      if (pair && typeof pair.key === 'string' && pair.key.trim()) {
+        headers[pair.key.trim()] = String(resolveTemplate(context, pair.value ?? '') ?? '');
+      }
+    }
+  } else if (typeof rawHeaders === 'string' && rawHeaders.trim()) {
+    try {
+      const parsed = resolveTemplate(context, JSON.parse(rawHeaders));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [k, v] of Object.entries(parsed)) {
+          if (v !== undefined && v !== null) headers[k] = String(v);
+        }
+      }
+    } catch {
+      // Ignore invalid JSON headers string and keep defaults
+    }
+  } else if (rawHeaders && typeof rawHeaders === 'object' && !Array.isArray(rawHeaders)) {
+    const resolved = resolveTemplate(context, rawHeaders);
+    for (const [k, v] of Object.entries(resolved)) {
+      if (v !== undefined && v !== null) headers[k] = String(v);
+    }
+  }
+
+  const rawBody =
+    data.body !== undefined && data.body !== null && (typeof data.body !== 'string' || data.body.trim() !== '')
+      ? data.body
+      : data.bodyTemplate;
+  let body: any = null;
+  if (rawBody !== undefined && rawBody !== null && (typeof rawBody !== 'string' || rawBody.trim() !== '')) {
+    if (typeof rawBody === 'string') {
+      const jsonResolved = resolveJsonBody(context, rawBody);
+      if (jsonResolved !== undefined) {
+        body = jsonResolved;
+      } else {
+        const textResolved = resolveTemplate(context, rawBody);
+        if (typeof textResolved === 'string') {
+          try {
+            body = JSON.parse(textResolved);
+          } catch {
+            body = textResolved;
+          }
+        } else {
+          body = textResolved;
+        }
+      }
+    } else {
+      body = resolveTemplate(context, rawBody);
+    }
+  } else if (data.payload !== undefined) {
+    body = resolveTemplate(context, data.payload);
+  }
+
+  const webhookResponse = { statusCode, headers, body };
+  attachNonEnumerable(context, '__webhookResponse', webhookResponse);
+  attachNonEnumerable(context, 'webhookResponse', webhookResponse);
+  return webhookResponse;
+}
+
 // ── Shared helpers for outbound calls ──
 
-function resolveSecret(context: Record<string, any>, raw: unknown): string {
+export function resolveSecret(context: Record<string, any>, raw: unknown): string {
   const value = String(resolveTemplate(context, String(raw ?? '')) ?? '').trim();
   // cred:nombre → the secret saved in Configuración → Credenciales
   const credMatch = value.match(/^cred:([A-Za-z0-9_.-]+)$/);
   if (credMatch) return credentialSecret(credMatch[1]);
   const envMatch = value.match(/^env:([A-Za-z_][A-Za-z0-9_]*)$/);
   if (!envMatch) return value;
-  const envValue = process.env[envMatch[1]];
+  const envValue = resolveEnvVariable(context, envMatch[1]);
   if (!envValue) throw new Error(`La variable de entorno ${envMatch[1]} no está definida en el servidor`);
   return envValue;
 }
@@ -3323,7 +3853,19 @@ async function readErrorBody(res: Response): Promise<string> {
 
 // ── OAuth2 connector ──
 
+const MAX_OAUTH_TOKEN_CACHE_SIZE = 200;
 const oauthTokenCache = new Map<string, { token: any; expiresAt: number }>();
+
+function pruneOAuthTokenCache(now = Date.now()) {
+  for (const [k, entry] of oauthTokenCache) {
+    if (entry.expiresAt <= now) oauthTokenCache.delete(k);
+  }
+  while (oauthTokenCache.size >= MAX_OAUTH_TOKEN_CACHE_SIZE) {
+    const oldestKey = oauthTokenCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    oauthTokenCache.delete(oldestKey);
+  }
+}
 
 function buildOAuth2Request(node: any, context: Record<string, any>, revealSecrets: boolean) {
   const data = node.data || {};
@@ -3359,20 +3901,35 @@ function buildOAuth2Request(node: any, context: Record<string, any>, revealSecre
       : 'Basic ••••••••';
   }
 
-  return { grantType, tokenUrl, clientId, scope, params, headers };
+  return { grantType, tokenUrl, clientId, clientSecret, authMethod, scope, params, headers };
 }
 
 async function executeOAuth2ConnectorNode(node: any, context: Record<string, any>, signal?: AbortSignal): Promise<any> {
   const req = buildOAuth2Request(node, context, true);
   if (!req.tokenUrl) throw new Error('OAuth2: debe indicar la URL del endpoint de token');
+  validateHttpUrl(req.tokenUrl);
   if (req.grantType === 'refresh_token' && !req.params.refresh_token) throw new Error('OAuth2: falta el refresh token');
   if (req.grantType === 'password' && !req.params.username) throw new Error('OAuth2: falta el usuario');
 
+  const now = Date.now();
   const useCache = node.data?.cacheToken !== false;
-  const cacheKey = JSON.stringify([req.tokenUrl, req.clientId, req.grantType, req.scope, req.params.username || '']);
+  const cacheKey = JSON.stringify([
+    req.tokenUrl,
+    req.clientId,
+    req.clientSecret,
+    req.grantType,
+    req.scope,
+    req.params.username || '',
+    req.params.password || '',
+    req.params.refresh_token || '',
+    req.authMethod,
+  ]);
   const cached = useCache ? oauthTokenCache.get(cacheKey) : undefined;
-  if (cached && cached.expiresAt > Date.now()) {
-    return { ...cached.token, from_cache: true };
+  if (cached) {
+    if (cached.expiresAt > now) {
+      return { ...cached.token, from_cache: true };
+    }
+    oauthTokenCache.delete(cacheKey);
   }
 
   const timeoutMs = getSystemSettingsFromDb().http_timeout_seconds * 1000;
@@ -3404,6 +3961,7 @@ async function executeOAuth2ConnectorNode(node: any, context: Record<string, any
   };
 
   if (useCache) {
+    pruneOAuthTokenCache();
     oauthTokenCache.set(cacheKey, { token, expiresAt: Date.now() + Math.max(0, expiresIn - 60) * 1000 });
   }
   return { ...token, from_cache: false };
@@ -3445,6 +4003,7 @@ function parseJsonContent(content: string): any {
 async function executeAiChatCompletionNode(node: any, context: Record<string, any>, signal?: AbortSignal): Promise<any> {
   const req = buildAiRequest(node, context);
   if (!req.endpoint) throw new Error('IA: debe indicar la URL del endpoint');
+  validateHttpUrl(req.endpoint);
   if (!req.model) throw new Error('IA: debe indicar el modelo');
   if (!req.userPrompt.trim()) throw new Error('IA: el prompt del usuario está vacío (revisa las variables usadas)');
 
@@ -3502,7 +4061,8 @@ async function executeRunFlowNode(
   node: any,
   context: Record<string, any>,
   signal: AbortSignal,
-  callStack: string[] = []
+  callStack: string[] = [],
+  parentExecutionId?: string
 ): Promise<any> {
   const targetFlowId = String(node.data?.targetFlowId || '').trim();
   if (!targetFlowId) {
@@ -3529,20 +4089,41 @@ async function executeRunFlowNode(
 
   const resolvedParams = resolveRunFlowParams(node, context);
   const startedAt = Date.now();
+  const childLogId = parentExecutionId
+    ? startExecutionLog(targetFlowId, 'manual', null, parentExecutionId)
+    : undefined;
+  const subTracer = childLogId ? new ExecutionTracer() : undefined;
 
-  const subContext = await executeFlowEngine(targetFlowId, undefined, {
-    mode: 'normal',
-    params: resolvedParams,
-    callStack: [...callStack, targetFlowId],
-    parentSignal: signal,
-    isSubflow: true,
-  });
+  let subContext: Record<string, any>;
+  try {
+    subContext = await executeFlowEngine(targetFlowId, undefined, {
+      mode: 'normal',
+      params: resolvedParams,
+      callStack: [...callStack, targetFlowId],
+      parentSignal: signal,
+      isSubflow: true,
+      ...(subTracer ? { tracer: subTracer } : {}),
+      ...(childLogId ? { executionId: childLogId } : {}),
+    });
+  } catch (err: any) {
+    if (childLogId && subTracer) {
+      const durationMs = Date.now() - startedAt;
+      const status = isCancellationError(err) ? 'cancelled' : 'error';
+      finishExecutionLog(childLogId, {
+        status,
+        durationMs,
+        errorMessage: err?.message || 'Error al ejecutar subflujo',
+        trace: subTracer.toJSON(status),
+      });
+    }
+    throw err;
+  }
 
   const durationMs = Date.now() - startedAt;
 
   let def: { nodes?: any[]; edges?: any[] } = { nodes: [], edges: [] };
   try {
-    def = JSON.parse(targetFlow.definition || '{"nodes":[],"edges":[]}');
+    def = JSON.parse(openDefinition(targetFlow.definition || '{"nodes":[],"edges":[]}'));
   } catch {
     def = { nodes: [], edges: [] };
   }
@@ -3577,6 +4158,24 @@ async function executeRunFlowNode(
         mainOutput = subContext[completedSubNodes[completedSubNodes.length - 1].id];
       }
     }
+  }
+
+  if (childLogId && subTracer) {
+    const subTrace = subTracer.toJSON('completed');
+    const subSummary = summarizeContext(subContext);
+    finishExecutionLog(childLogId, {
+      status: 'completed',
+      durationMs,
+      recordCount: subSummary.recordCount,
+      result: {
+        exportedFiles: subSummary.exportedFiles,
+        recordCount: subSummary.recordCount,
+        duration: durationMs,
+        nodeCount: Object.keys(subContext).length,
+        warnings: subTrace.filter(t => t.status === 'continued').length,
+      },
+      trace: subTrace,
+    });
   }
 
   return {

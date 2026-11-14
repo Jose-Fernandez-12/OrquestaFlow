@@ -132,6 +132,7 @@ export function RunFlowInspector({ node, nodes, edges, updateNodeData }: Inspect
           <span>Flujo a ejecutar (subflujo)</span>
         </label>
         <select
+          aria-label="Flujo a ejecutar (subflujo)"
           value={targetFlowId}
           onChange={e => handleSelectFlow(e.target.value)}
           className="w-full h-8 px-2.5 text-xs rounded-sm border border-border bg-bg text-fg focus-visible:outline-none focus-visible:border-indigo-500"
@@ -158,6 +159,7 @@ export function RunFlowInspector({ node, nodes, edges, updateNodeData }: Inspect
             <span>Resultado principal (`data`)</span>
           </label>
           <select
+            aria-label="Nodo de resultado principal"
             value={outputNodeId}
             onChange={e => updateNodeData('outputNodeId', e.target.value)}
             className="w-full h-8 px-2.5 text-xs rounded-sm border border-border bg-bg text-fg focus-visible:outline-none focus-visible:border-indigo-500"

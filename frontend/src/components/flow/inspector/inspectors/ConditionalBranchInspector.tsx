@@ -83,6 +83,7 @@ export function ConditionalBranchInspector({ node, nodes, edges, updateNodeData,
             <div className="flex items-center gap-2 text-xs">
               <span className="text-muted">Tomar la rama <b className="text-emerald-600">Sí</b> cuando se cumpla</span>
               <select
+                aria-label="Combinador de condiciones"
                 value={combinator}
                 onChange={e => updateNodeData('combinator', e.target.value)}
                 className="h-7 rounded-sm border border-border bg-surface px-1.5 text-xs font-medium focus-visible:outline-none focus-visible:border-accent"
@@ -132,6 +133,7 @@ export function ConditionalBranchInspector({ node, nodes, edges, updateNodeData,
                   </div>
 
                   <select
+                    aria-label={`Operador de condición ${idx + 1}`}
                     value={op.value}
                     onChange={e => updateRule(rule.id, { operator: e.target.value })}
                     className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"

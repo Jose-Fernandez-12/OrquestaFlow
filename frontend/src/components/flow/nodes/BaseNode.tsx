@@ -28,7 +28,8 @@ import {
   RotateCw,
   AlertTriangle,
   ShieldCheck,
-  Workflow
+  Workflow,
+  Reply
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useAppSelector } from '../../../store/hooks';
@@ -84,8 +85,72 @@ const typeIcons: Record<string, React.ElementType> = {
   conditionalBranch: GitFork,
   jsonTransform: Braces,
   webhookTrigger: Radio,
+  webhookRespond: Reply,
   oauth2Connector: KeyRound,
   aiChatCompletion: Bot,
+};
+
+const typeColors: Record<string, string> = {
+  start: 'text-green-600',
+  httpGet: 'text-blue-600',
+  httpPost: 'text-indigo-600',
+  httpRequest: 'text-blue-600',
+  scraping: 'text-purple-600',
+  export: 'text-orange-600',
+  query: 'text-cyan-600',
+  timer: 'text-amber-600',
+  delay: 'text-amber-600',
+  waitFor: 'text-orange-600',
+  runScript: 'text-slate-600',
+  runFlow: 'text-indigo-600',
+  dataSource: 'text-emerald-600',
+  fileSource: 'text-emerald-600',
+  dataList: 'text-violet-600',
+  variables: 'text-violet-600',
+  forEach: 'text-sky-600',
+  forEachEnd: 'text-sky-600',
+  conditionalBranch: 'text-amber-500',
+  jsonTransform: 'text-teal-600',
+  webhookTrigger: 'text-pink-600',
+  webhookRespond: 'text-pink-600',
+  oauth2Connector: 'text-indigo-600',
+  aiChatCompletion: 'text-fuchsia-600',
+};
+
+const typeLabels: Record<string, string> = {
+  start: 'Inicio',
+  httpGet: 'HTTP Request',
+  httpPost: 'HTTP Request',
+  httpRequest: 'HTTP Request',
+  scraping: 'Web Scraping',
+  export: 'Exportar archivo',
+  query: 'Consulta DB',
+  timer: 'Pausa programada',
+  delay: 'Pausa programada',
+  waitFor: 'Esperar nodo',
+  runScript: 'Ejecutar script',
+  runFlow: 'Ejecutar flujo',
+  dataSource: 'Obtener datos (Excel/CSV)',
+  fileSource: 'Obtener datos (Excel/CSV)',
+  dataList: 'Lista de datos',
+  variables: 'Variables',
+  forEach: 'Inicio de bucle',
+  forEachEnd: 'Fin de bucle',
+  conditionalBranch: 'Bifurcación',
+  jsonTransform: 'Transformar JSON',
+  webhookTrigger: 'Disparador Webhook',
+  webhookRespond: 'Responder Webhook',
+  oauth2Connector: 'Conector OAuth2',
+  aiChatCompletion: 'Inteligencia Artificial',
+};
+
+const formatTimerDuration = (seconds: number) => {
+  if (seconds >= 60) {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m ${secs > 0 ? `${secs}s` : ''}`.trim();
+  }
+  return `${seconds}s`;
 };
 
 function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
@@ -106,69 +171,15 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
   const retryConfig = getNodeRetryConfig(data);
   const configuredRetries = supportsRetries(type) ? retryConfig.retryCount ?? 0 : 0;
   const continuesOnError = supportsContinueOnError(type) && retryConfig.onError === 'continue';
+  const hasErrorBranch = supportsContinueOnError(type) && retryConfig.onError === 'error_branch';
+  const isMocked = Boolean(data?.mockEnabled);
+  const updateNodeInternals = useUpdateNodeInternals();
+
+  React.useEffect(() => {
+    updateNodeInternals(id);
+  }, [hasErrorBranch, id, updateNodeInternals]);
 
   const Icon = data?.icon || typeIcons[type] || FileSpreadsheet;
-
-  const typeColors: Record<string, string> = {
-    start: 'text-green-600',
-    httpGet: 'text-blue-600',
-    httpPost: 'text-indigo-600',
-    httpRequest: 'text-blue-600',
-    scraping: 'text-purple-600',
-    export: 'text-orange-600',
-    query: 'text-cyan-600',
-    timer: 'text-amber-600',
-    delay: 'text-amber-600',
-    waitFor: 'text-orange-600',
-    runScript: 'text-slate-600',
-    runFlow: 'text-indigo-600',
-    dataSource: 'text-emerald-600',
-    fileSource: 'text-emerald-600',
-    dataList: 'text-violet-600',
-    variables: 'text-violet-600',
-    forEach: 'text-sky-600',
-    forEachEnd: 'text-sky-600',
-    conditionalBranch: 'text-amber-500',
-    jsonTransform: 'text-teal-600',
-    webhookTrigger: 'text-pink-600',
-    oauth2Connector: 'text-indigo-600',
-    aiChatCompletion: 'text-fuchsia-600',
-  };
-
-  const typeLabels: Record<string, string> = {
-    start: 'Inicio',
-    httpGet: 'HTTP Request',
-    httpPost: 'HTTP Request',
-    httpRequest: 'HTTP Request',
-    scraping: 'Web Scraping',
-    export: 'Exportar archivo',
-    query: 'Consulta DB',
-    timer: 'Pausa programada',
-    delay: 'Pausa programada',
-    waitFor: 'Esperar nodo',
-    runScript: 'Ejecutar script',
-    runFlow: 'Ejecutar flujo',
-    dataSource: 'Obtener datos (Excel/CSV)',
-    fileSource: 'Obtener datos (Excel/CSV)',
-    dataList: 'Lista de datos',
-    variables: 'Variables',
-    forEach: 'Inicio de bucle',
-    forEachEnd: 'Fin de bucle',
-    conditionalBranch: 'Bifurcación',
-    jsonTransform: 'Transformar JSON',
-    webhookTrigger: 'Disparador Webhook',
-    oauth2Connector: 'Conector OAuth2',
-    aiChatCompletion: 'Inteligencia Artificial',
-  };
-
-  const formatTimerDuration = (seconds: number) => {
-    if (seconds >= 60) {
-      const mins = Math.floor(seconds / 60);
-      const secs = seconds % 60;
-      return `${mins}m ${secs > 0 ? `${secs}s` : ''}`.trim();
-    }
-    return `${seconds}s`;
-  };
 
   const onNodeDoubleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -427,6 +438,14 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
                   BETA
                 </span>
               )}
+              {isMocked && (
+                <span
+                  className="shrink-0 text-[8px] font-bold tracking-wide px-1 py-px rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30"
+                  title="Mock activo: este nodo devuelve datos fijos sin ejecutar su acción real"
+                >
+                  MOCK
+                </span>
+              )}
             </div>
           )}
 
@@ -625,9 +644,22 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
           )}
 
           {type === 'webhookTrigger' && (
-            <div className="mt-1 text-[10px] text-muted truncate">
+            <div className="mt-1 flex items-center gap-1 text-[10px] text-muted truncate">
+              <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border truncate">
+                {String(data.httpMethod || 'POST')} /{String(data.webhookId || id)}
+              </span>
+              {data.responseMode === 'sync' && (
+                <span className="shrink-0 text-[8px] font-bold px-1 py-px rounded bg-pink-500/10 text-pink-600 border border-pink-500/25">
+                  SYNC
+                </span>
+              )}
+            </div>
+          )}
+
+          {type === 'webhookRespond' && (
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
               <span className="font-mono bg-bg px-1 py-0.5 rounded border border-border">
-                POST /{String(data.webhookId || id)}
+                HTTP {String(data.statusCode || 200)}
               </span>
             </div>
           )}
@@ -658,6 +690,21 @@ function BaseNodeComponent({ id, data, selected, type }: BaseNodeProps) {
 
       {type === 'conditionalBranch' && (
         <ConditionalOutputs nodeId={id} data={data} nodeResult={nodeResult} evaluated={completed && !skipped && !hasError} />
+      )}
+
+      {hasErrorBranch && (
+        <div className="relative border-t border-red-500/20 bg-red-500/5 px-3 py-1 flex items-center justify-end gap-1.5 text-[10px] font-medium text-red-600 rounded-b-md">
+          <span>Rama de error ($error)</span>
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="error"
+            isConnectable={true}
+            isConnectableStart={true}
+            className="!w-3 !h-3 !rounded-full !border-2 !border-surface !bg-red-500 z-20 cursor-crosshair hover:!bg-red-600 hover:ring-2 hover:ring-red-400/40"
+            title="Rama de error ($error)"
+          />
+        </div>
       )}
 
       {/* Sleek bottom progress bar for timer node while executing */}
