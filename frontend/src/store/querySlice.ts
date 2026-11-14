@@ -1,5 +1,5 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { API_URL } from '../lib/api';
+import { API_URL, readApiResponse } from '../lib/api';
 
 export interface Query {
   id: string;
@@ -45,8 +45,8 @@ const initialState: QueryState = {
 
 export const fetchQueries = createAsyncThunk('queries/fetchAll', async () => {
   const res = await fetch(`${API_URL}/queries`);
-  const data = await res.json();
-  return data.data as Query[];
+  const data = await readApiResponse<{ data: Query[] }>(res, 'Error al cargar consultas');
+  return data.data;
 });
 
 export const createQuery = createAsyncThunk(
@@ -57,9 +57,8 @@ export const createQuery = createAsyncThunk(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || data.error || 'Failed to create query');
-    return data.data as Query;
+    const data = await readApiResponse<{ data: Query }>(res, 'Failed to create query');
+    return data.data;
   }
 );
 
@@ -71,15 +70,14 @@ export const updateQuery = createAsyncThunk(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || data.error || 'Failed to update query');
-    return data.data as Query;
+    const data = await readApiResponse<{ data: Query }>(res, 'Failed to update query');
+    return data.data;
   }
 );
 
 export const deleteQuery = createAsyncThunk('queries/delete', async (id: string) => {
   const res = await fetch(`${API_URL}/queries/${id}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error('Error deleting query');
+  await readApiResponse(res, 'Error deleting query');
   return id;
 });
 
@@ -91,11 +89,8 @@ export const executeQuery = createAsyncThunk(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ connection_ids, params, logId }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.message || data.error || 'Error executing query');
-    }
-    return data.data as QueryResult;
+    const data = await readApiResponse<{ data: QueryResult }>(res, 'Error executing query');
+    return data.data;
   }
 );
 
@@ -107,7 +102,7 @@ export const cancelQuery = createAsyncThunk(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ logId }),
     });
-    const data = await res.json();
+    const data = await readApiResponse<{ data: any }>(res, 'Error cancelling query');
     return data.data;
   }
 );
@@ -129,32 +124,54 @@ const querySlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchQueries.pending, (state) => { state.loading = true; })
+      .addCase(fetchQueries.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
       .addCase(fetchQueries.fulfilled, (state, action) => {
         state.loading = false;
         state.queries = action.payload;
       })
       .addCase(fetchQueries.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message || 'Error';
+        state.error = action.error.message || 'Error al cargar consultas';
       })
       .addCase(createQuery.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         state.queries.unshift(action.payload);
         state.currentQuery = action.payload;
       })
+      .addCase(createQuery.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al crear consulta';
+      })
       .addCase(updateQuery.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         const idx = state.queries.findIndex(q => q.id === action.payload.id);
         if (idx >= 0) state.queries[idx] = action.payload;
         if (state.currentQuery?.id === action.payload.id) state.currentQuery = action.payload;
       })
+      .addCase(updateQuery.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al actualizar consulta';
+      })
       .addCase(deleteQuery.fulfilled, (state, action) => {
+        state.loading = false;
+        state.error = null;
         state.queries = state.queries.filter(q => q.id !== action.payload);
         if (state.currentQuery?.id === action.payload) {
           state.currentQuery = null;
         }
       })
+      .addCase(deleteQuery.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message || 'Error al eliminar consulta';
+      })
       .addCase(executeQuery.pending, (state, action) => {
         state.executing = true;
+        state.error = null;
         state.activeExecutionLogId = action.meta.arg.logId || null;
       })
       .addCase(executeQuery.fulfilled, (state, action) => {
@@ -162,13 +179,21 @@ const querySlice = createSlice({
         state.activeExecutionLogId = null;
         state.results = action.payload;
       })
-      .addCase(executeQuery.rejected, (state) => {
+      .addCase(executeQuery.rejected, (state, action) => {
         state.executing = false;
+        state.loading = false;
         state.activeExecutionLogId = null;
+        state.error = action.error.message || 'Error al ejecutar consulta';
       })
       .addCase(cancelQuery.fulfilled, (state) => {
         state.executing = false;
         state.activeExecutionLogId = null;
+      })
+      .addCase(cancelQuery.rejected, (state, action) => {
+        state.executing = false;
+        state.loading = false;
+        state.activeExecutionLogId = null;
+        state.error = action.error.message || 'Error al cancelar consulta';
       });
   },
 });

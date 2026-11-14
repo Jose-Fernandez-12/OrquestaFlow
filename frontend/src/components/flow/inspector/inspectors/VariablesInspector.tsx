@@ -17,6 +17,7 @@ import {
 import { Button } from '../../../ui/button';
 import { JsonCodeField } from '../editors/JsonCodeField';
 import { cn } from '../../../../lib/utils';
+import { copyToClipboard } from '../../../../lib/clipboard';
 import { variablesFromJson, variablesToJson, type FlowVariable } from './variablesSync';
 
 export type { FlowVariable };
@@ -174,10 +175,12 @@ export function VariablesInspector({
     setVariables(next);
   };
 
-  const handleCopyTag = (expr: string, keyName: string) => {
-    navigator.clipboard.writeText(expr);
-    setCopiedKey(keyName);
-    setTimeout(() => setCopiedKey(null), 1500);
+  const handleCopyTag = async (expr: string, keyName: string) => {
+    const ok = await copyToClipboard(expr);
+    if (ok) {
+      setCopiedKey(keyName);
+      setTimeout(() => setCopiedKey(null), 1500);
+    }
   };
 
   // Preview object of all variables resolved
@@ -197,10 +200,12 @@ export function VariablesInspector({
     return res;
   }, [variables, rawJson, viewMode]);
 
-  const handleCopyResolvedJson = () => {
-    navigator.clipboard.writeText(JSON.stringify(resolvedPreview, null, 2));
-    setCopiedAll(true);
-    setTimeout(() => setCopiedAll(false), 1500);
+  const handleCopyResolvedJson = async () => {
+    const ok = await copyToClipboard(JSON.stringify(resolvedPreview, null, 2));
+    if (ok) {
+      setCopiedAll(true);
+      setTimeout(() => setCopiedAll(false), 1500);
+    }
   };
 
   const handleSwitchToJson = () => {
@@ -332,6 +337,7 @@ export function VariablesInspector({
 
                       <div className="w-28 shrink-0">
                         <select
+                          aria-label={`Tipo de variable ${variable.key || idx + 1}`}
                           value={variable.type}
                           onChange={e => updateVariable(idx, { type: e.target.value as any })}
                           className="w-full h-7 px-1.5 text-xs rounded-sm border border-border bg-bg text-fg focus-visible:outline-none focus-visible:border-violet-500"

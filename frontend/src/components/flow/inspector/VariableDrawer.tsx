@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import { ChevronDown, ChevronRight, Copy, Check, X, Braces, Repeat, Search } from 'lucide-react';
 import { cn } from '../../../lib/utils';
+import { copyToClipboard } from '../../../lib/clipboard';
 import { useAvailableVariables } from './useAvailableVariables';
 
 interface VariableDrawerProps {
@@ -36,10 +37,12 @@ export function VariableDrawer({ node, nodes, edges, isOpen = true, onClose }: V
       .filter(g => g.variables.length > 0);
   }, [groups, searchTerm]);
 
-  const copyVariable = (expression: string) => {
-    navigator.clipboard.writeText(expression);
-    setCopiedKey(expression);
-    setTimeout(() => setCopiedKey(null), 1800);
+  const copyVariable = async (expression: string) => {
+    const ok = await copyToClipboard(expression);
+    if (ok) {
+      setCopiedKey(expression);
+      setTimeout(() => setCopiedKey(null), 1800);
+    }
   };
 
   const toggleGroup = (id: string) => {

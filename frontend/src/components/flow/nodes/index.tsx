@@ -19,6 +19,7 @@ export const ForEachEndNode = React.memo((props: any) => <BaseNode {...props} ty
 export const ConditionalBranchNode = React.memo((props: any) => <BaseNode {...props} type="conditionalBranch" />);
 export const JsonTransformNode = React.memo((props: any) => <BaseNode {...props} type="jsonTransform" />);
 export const WebhookTriggerNode = React.memo((props: any) => <BaseNode {...props} type="webhookTrigger" />);
+export const WebhookRespondNode = React.memo((props: any) => <BaseNode {...props} type="webhookRespond" />);
 export const OAuth2ConnectorNode = React.memo((props: any) => <BaseNode {...props} type="oauth2Connector" />);
 export const AiChatCompletionNode = React.memo((props: any) => <BaseNode {...props} type="aiChatCompletion" />);
 
@@ -44,6 +45,7 @@ export const nodeTypes = {
   conditionalBranch: ConditionalBranchNode,
   jsonTransform: JsonTransformNode,
   webhookTrigger: WebhookTriggerNode,
+  webhookRespond: WebhookRespondNode,
   oauth2Connector: OAuth2ConnectorNode,
   aiChatCompletion: AiChatCompletionNode,
   note: NoteNode,

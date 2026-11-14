@@ -23,6 +23,7 @@ export function TimerInspector({ node, updateNodeData }: TimerInspectorProps) {
             onChange={e => updateNodeData('duration', Math.max(1, parseFloat(e.target.value) || 1))}
           />
           <select
+            aria-label="Unidad de tiempo de pausa"
             className="flex flex-1 min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
             value={node.data?.unit as string || 'seconds'}
             onChange={e => updateNodeData('unit', e.target.value)}

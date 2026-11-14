@@ -167,6 +167,7 @@ export function AiChatCompletionInspector({
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Formato de respuesta</label>
           <select
+            aria-label="Formato de respuesta de IA"
             value={responseFormat}
             onChange={(e) => updateNodeData('responseFormat', e.target.value)}
             className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"

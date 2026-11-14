@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
 import { encryptSecret } from '../engine/secrets.js';
+import { isUnsafeSqlitePath } from '../security/access.js';
 
 /** A connection as the API returns it: never the password, only whether one is saved */
 export function publicConnection(row: Record<string, unknown>): Record<string, unknown> {
@@ -54,7 +55,7 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
       env_credential_key?: string;
       credential_id?: string | null;
     }
-  }>('/', async (request) => {
+  }>('/', async (request, reply) => {
     const db = getDb();
     const id = uuid();
     const {
@@ -67,7 +68,11 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
       credential_id
     } = request.body;
 
-    const isSqlite = driver === 'sqlite';
+    const isSqlite = String(driver || '').trim().toLowerCase() === 'sqlite';
+    if (isSqlite && isUnsafeSqlitePath(host)) {
+      return reply.status(400).send({ error: 'Ruta SQLite no permitida (no se admite ".." ni apuntar a orquesta.sqlite)' });
+    }
+    const finalDriver = isSqlite ? 'sqlite' : driver;
     const finalPort = isSqlite ? 0 : (port || 1433);
     const finalDbName = isSqlite ? 'sqlite' : (database_name || '');
     const finalCredKey = isSqlite ? 'NONE' : (env_credential_key || 'SQLSERVER');
@@ -75,7 +80,7 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
     db.prepare(`
       INSERT INTO connections (id, name, group_name, region, city, host, database_name, port, driver, username, password, env_credential_key, credential_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, name, group_name || null, region, city || name, host, finalDbName, finalPort, driver, username || null, isSqlite ? null : encryptSecret(password), finalCredKey, isSqlite ? null : credential_id || null);
+    `).run(id, name, group_name || null, region, city || name, host, finalDbName, finalPort, finalDriver, username || null, isSqlite ? null : encryptSecret(password), finalCredKey, isSqlite ? null : credential_id || null);
 
     const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(id) as Record<string, unknown>;
     return { data: publicConnection(conn) };
@@ -90,10 +95,15 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
     }
   }>('/:id', async (request, reply) => {
     const db = getDb();
-    const existing = db.prepare('SELECT * FROM connections WHERE id = ?').get(request.params.id);
+    const existing = db.prepare('SELECT * FROM connections WHERE id = ?').get(request.params.id) as Record<string, any> | undefined;
     if (!existing) return reply.status(404).send({ error: 'Connection not found' });
 
     const { name, group_name, region, city, host, database_name, port, is_active, driver, username, password, env_credential_key, credential_id } = request.body;
+    const effectiveDriver = driver !== undefined ? driver : existing.driver;
+    const effectiveHost = host !== undefined ? host : existing.host;
+    if (String(effectiveDriver || '').trim().toLowerCase() === 'sqlite' && (host !== undefined || driver !== undefined) && isUnsafeSqlitePath(effectiveHost)) {
+      return reply.status(400).send({ error: 'Ruta SQLite no permitida (no se admite ".." ni apuntar a orquesta.sqlite)' });
+    }
     const updates: string[] = [];
     const values: unknown[] = [];
 
@@ -130,7 +140,10 @@ export async function connectionRoutes(app: FastifyInstance): Promise<void> {
 
     const startTime = Date.now();
     try {
-      if (conn.driver === 'sqlite') {
+      if (String(conn.driver || '').trim().toLowerCase() === 'sqlite') {
+        if (isUnsafeSqlitePath(conn.host)) {
+          return reply.status(400).send({ error: 'Ruta SQLite no permitida (no se admite ".." ni apuntar a orquesta.sqlite)' });
+        }
         const { executeSqliteQuery } = await import('../engine/sqlite.js');
         await executeSqliteQuery(conn.host, 'SELECT 1 as connection_test');
       } else {

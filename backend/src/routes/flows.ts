@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { encryptSecret } from '../engine/secrets.js';
 import { openDefinition, sealDefinition, stripNodeSecrets, withOpenDefinition } from '../engine/nodeSecrets.js';
+import { isUnsafeSqlitePath } from '../security/access.js';
 import crypto from 'crypto';
 import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
@@ -43,6 +44,49 @@ function withLabels(outputs: Record<string, any>, flow: any): Record<string, any
   return context;
 }
 
+function maskAuthHeaderValue(val: unknown): string {
+  const s = String(val ?? '');
+  if (/^Bearer\s+/i.test(s)) return 'Bearer ***';
+  if (/^Basic\s+/i.test(s)) return 'Basic ***';
+  return s ? '***' : '';
+}
+
+function sanitizeProgressResult(result: any): any {
+  const preview = result?.requestPreview;
+  if (!preview || typeof preview !== 'object' || !preview.headers || typeof preview.headers !== 'object') {
+    return result;
+  }
+  let changed = false;
+  const headers: Record<string, unknown> = { ...preview.headers };
+  for (const key of Object.keys(headers)) {
+    const lower = key.toLowerCase();
+    if (lower === 'authorization' || lower === 'x-api-key') {
+      headers[key] = maskAuthHeaderValue(headers[key]);
+      changed = true;
+    }
+  }
+  return changed ? { ...result, requestPreview: { ...preview, headers } } : result;
+}
+
+function withOpenFlow<T extends { definition?: unknown; published_definition?: unknown; published_version_id?: unknown }>(row: T): T {
+  const opened = withOpenDefinition(row);
+  if (!opened || typeof opened !== 'object') return opened;
+  const next: any = { ...opened, published_version_id: opened.published_version_id ?? null };
+  if (typeof opened.published_definition === 'string') {
+    next.published_definition = openDefinition(opened.published_definition);
+  }
+  return next;
+}
+
+async function safeIo() {
+  try {
+    const { getIo } = await import('../engine/socket.js');
+    return getIo();
+  } catch {
+    return { emit: () => false };
+  }
+}
+
 // Relays engine progress to the editor and announces exported files as soon as each one is ready
 function createProgressEmitter(io: any, flowId: string) {
   const exportedFiles: any[] = [];
@@ -50,16 +94,17 @@ function createProgressEmitter(io: any, flowId: string) {
   // Outputs of the nodes that finished, kept so a failed run still leaves its results for a partial rerun
   const outputs: Record<string, any> = {};
   const emit = (nodeId: string, status: ProgressStatus, result?: any) => {
+    const safeResult = sanitizeProgressResult(result);
     io.emit('flow-progress', {
       flowId,
       nodeId,
       status,
-      result,
-      current: result?.current,
-      total: result?.total,
-      remainingSeconds: result?.remainingSeconds,
-      totalSeconds: result?.totalSeconds,
-      context: result?.context
+      result: safeResult,
+      current: safeResult?.current,
+      total: safeResult?.total,
+      remainingSeconds: safeResult?.remainingSeconds,
+      totalSeconds: safeResult?.totalSeconds,
+      context: safeResult?.context
     });
 
     if (status === 'completed' && result?.skipped) skippedNodeIds.push(nodeId);
@@ -90,7 +135,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   app.get('/', async () => {
     const db = getDb();
     const flows = db.prepare('SELECT * FROM flows ORDER BY updated_at DESC').all() as any[];
-    return { data: flows.map(withOpenDefinition) };
+    return { data: flows.map(withOpenFlow) };
   });
 
   // Get single flow
@@ -98,7 +143,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
     if (!flow) return reply.status(404).send({ error: 'Flow not found' });
-    return { data: withOpenDefinition(flow) };
+    return { data: withOpenFlow(flow) };
   });
 
   // Create flow
@@ -113,7 +158,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     `).run(id, name, description, sealDefinition(typeof definition === 'object' ? JSON.stringify(definition) : definition), is_locked);
 
     const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(id) as any;
-    return { data: withOpenDefinition(flow) };
+    return { data: withOpenFlow(flow) };
   });
 
   // Import flow from JSON bundle or legacy format
@@ -150,7 +195,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       nodes?: any[];
       edges?: any[];
     };
-  }>('/import', async (request) => {
+  }>('/import', async (request, reply) => {
     const db = getDb();
     const body = request.body || {};
 
@@ -188,6 +233,9 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
     for (const conn of rawConnections) {
       if (!conn.host) continue;
+      if (String(conn.driver || '').trim().toLowerCase() === 'sqlite' && isUnsafeSqlitePath(conn.host)) {
+        return reply.status(400).send({ error: 'Ruta SQLite no permitida en la conexión importada (no se admite ".." ni apuntar a orquesta.sqlite)' });
+      }
 
       // Check if connection already exists by ID or host + database_name
       let existing = db.prepare('SELECT * FROM connections WHERE id = ?').get(conn.id) as any;
@@ -317,7 +365,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       VALUES (?, ?, ?, ?, 0)
     `).run(newFlowId, flowName, flowDesc, sealDefinition(finalDefinitionStr));
 
-    const createdFlow = withOpenDefinition(db.prepare('SELECT * FROM flows WHERE id = ?').get(newFlowId) as any);
+    const createdFlow = withOpenFlow(db.prepare('SELECT * FROM flows WHERE id = ?').get(newFlowId) as any);
 
     return {
       data: createdFlow,
@@ -461,7 +509,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       db.prepare(`UPDATE flows SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
       const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
-      return { data: withOpenDefinition(flow) };
+      return { data: withOpenFlow(flow) };
     }
   );
 
@@ -471,9 +519,20 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     const existing = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id);
     if (!existing) return reply.status(404).send({ error: 'Flow not found' });
 
+    const { cancelFlowExecution } = await import('../engine/executor.js');
+    cancelFlowExecution(request.params.id);
+
     // Delete schedules associated with this flow
+    const flowSchedules = db.prepare("SELECT id FROM schedules WHERE target_type = 'flow' AND target_id = ?")
+      .all(request.params.id) as Array<{ id: string }>;
     db.prepare("DELETE FROM schedules WHERE target_type = 'flow' AND target_id = ?").run(request.params.id);
+    if (flowSchedules.length > 0) {
+      const { updateJobSchedule } = await import('../engine/scheduler.js');
+      for (const s of flowSchedules) updateJobSchedule(s.id);
+    }
+
     db.prepare('DELETE FROM flow_versions WHERE flow_id = ?').run(request.params.id);
+    db.prepare('DELETE FROM webhook_logs WHERE flow_id = ?').run(request.params.id);
     // Delete flow
     db.prepare('DELETE FROM flows WHERE id = ?').run(request.params.id);
     deleteRunCache(request.params.id);
@@ -539,8 +598,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     if (!stopped) {
       return reply.status(400).send({ error: 'No active execution found to stop' });
     }
-    const { getIo } = await import('../engine/socket.js');
-    getIo().emit('flow-stopped', { flowId: request.params.id });
+    const io = await safeIo();
+    io.emit('flow-stopped', { flowId: request.params.id });
     return { data: { stopped: true } };
   });
 
@@ -579,14 +638,13 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     const tracer = new ExecutionTracer();
     const startTime = Date.now();
     const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
-    const { getIo } = await import('../engine/socket.js');
-    const io = getIo();
+    const io = await safeIo();
     const progress = createProgressEmitter(io, flowId);
 
     try {
 
       // Execute the DAG with real-time socket callbacks
-      const context = await executeFlowEngine(flowId, progress.emit, { mode, tracer, params });
+      const context = await executeFlowEngine(flowId, progress.emit, { mode, tracer, params, executionId: logId });
       saveRunCache(flowId, context, progress.skippedNodeIds, { merge: false });
       const duration = Date.now() - startTime;
 
@@ -684,8 +742,8 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const { getIo } = await import('../engine/socket.js');
-    const progress = createProgressEmitter(getIo(), flowId);
+    const io = await safeIo();
+    const progress = createProgressEmitter(io, flowId);
     const startTime = Date.now();
     try {
       const context = await executeFlowEngine(flowId, progress.emit, {
@@ -780,10 +838,90 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     recordFlowVersion(flow.id, flow.name, version.definition, 'restore', `Restaurada desde v${version.version_number}`);
 
     const updated = db.prepare('SELECT * FROM flows WHERE id = ?').get(flow.id) as any;
-    return { data: withOpenDefinition(updated) };
+    return { data: withOpenFlow(updated) };
   });
 
-  // ── Webhook trigger ──
+  // Publish a specific flow version (Feature 4.7: Draft vs Published)
+  app.post<{ Params: { id: string; versionId: string } }>('/:id/versions/:versionId/publish', async (request, reply) => {
+    const db = getDb();
+    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
+    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+
+    const version = db.prepare('SELECT * FROM flow_versions WHERE id = ? AND flow_id = ?')
+      .get(request.params.versionId, request.params.id) as any;
+    if (!version) return reply.status(404).send({ error: 'Versión no encontrada' });
+
+    db.prepare(`
+      UPDATE flows
+      SET published_version_id = ?, published_definition = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(version.id, version.definition, flow.id);
+
+    const updated = db.prepare('SELECT * FROM flows WHERE id = ?').get(flow.id) as any;
+    return { data: withOpenFlow(updated) };
+  });
+
+  // Unpublish a flow (clears published_version_id and published_definition)
+  app.post<{ Params: { id: string } }>('/:id/unpublish', async (request, reply) => {
+    const db = getDb();
+    const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(request.params.id) as any;
+    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+
+    db.prepare(`
+      UPDATE flows
+      SET published_version_id = NULL, published_definition = NULL, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(flow.id);
+
+    const updated = db.prepare('SELECT * FROM flows WHERE id = ?').get(flow.id) as any;
+    return { data: withOpenFlow(updated) };
+  });
+
+  // Recent webhook call logs for a flow (last 50)
+  app.get<{ Params: { id: string } }>('/:id/webhook-logs', async (request, reply) => {
+    const db = getDb();
+    const flow = db.prepare('SELECT id FROM flows WHERE id = ?').get(request.params.id);
+    if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+
+    const rows = db.prepare(`
+      SELECT id, flow_id, webhook_id, method, headers_json, query_json, body_json, status_code, response_json, idempotency_key, created_at
+      FROM webhook_logs
+      WHERE flow_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT 50
+    `).all(request.params.id) as Array<Record<string, any>>;
+
+    const parseJson = (raw: unknown) => {
+      if (typeof raw !== 'string' || !raw.trim()) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return raw;
+      }
+    };
+
+    return {
+      data: rows.map(row => ({
+        id: row.id,
+        flow_id: row.flow_id,
+        webhook_id: row.webhook_id,
+        method: row.method,
+        headers: parseJson(row.headers_json),
+        query: parseJson(row.query_json),
+        body: parseJson(row.body_json),
+        status_code: row.status_code,
+        response: parseJson(row.response_json),
+        headers_json: row.headers_json,
+        query_json: row.query_json,
+        body_json: row.body_json,
+        response_json: row.response_json,
+        idempotency_key: row.idempotency_key,
+        created_at: row.created_at,
+      })),
+    };
+  });
+
+  // ── Webhook trigger (v2: multi-method, secret resolution, idempotency, sync webhookRespond, logs) ──
   // Registered in its own scope so the raw body is available for HMAC validation
   // without changing how JSON is parsed on the other flow routes.
   await app.register(async (scope) => {
@@ -800,93 +938,236 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       }
     });
 
-    scope.post<{ Params: { webhookId: string } }>('/webhook/:webhookId', async (request, reply) => {
-      const { getSystemSettingsFromDb } = await import('./settings.js');
-      if (!getSystemSettingsFromDb().experimental_nodes_enabled) {
-        return reply.status(403).send({ error: 'Los webhooks están deshabilitados (nodos experimentales desactivados en Configuración)' });
-      }
+    scope.route<{ Params: { webhookId: string } }>({
+      method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+      url: '/webhook/:webhookId',
+      handler: async (request, reply) => {
+        const { webhookId } = request.params;
+        const db = getDb();
+        const flows = db.prepare('SELECT * FROM flows').all() as any[];
 
-      const { webhookId } = request.params;
-      const db = getDb();
-      const flows = db.prepare('SELECT * FROM flows').all() as any[];
+        let targetFlow: any = null;
+        let targetNode: any = null;
+        let targetDef: any = null;
+        for (const f of flows) {
+          try {
+            // Published flows run their published snapshot; unpublished flows fall back to draft
+            const rawDef = f.published_definition || f.definition || '{}';
+            const def = JSON.parse(openDefinition(rawDef));
+            const node = (def.nodes || []).find(
+              (n: any) => n.type === 'webhookTrigger' && (n.data?.webhookId === webhookId || n.id === webhookId)
+            );
+            if (node) {
+              targetFlow = f;
+              targetNode = node;
+              targetDef = def;
+              break;
+            }
+          } catch {}
+        }
 
-      let targetFlow: any = null;
-      let targetNode: any = null;
-      for (const f of flows) {
-        try {
-          // The webhook secret is stored encrypted
-          const def = JSON.parse(openDefinition(f.definition || '{}'));
-          const node = (def.nodes || []).find(
-            (n: any) => n.type === 'webhookTrigger' && (n.data?.webhookId === webhookId || n.id === webhookId)
-          );
-          if (node) {
-            targetFlow = f;
-            targetNode = node;
-            break;
+        if (!targetFlow || !targetNode) {
+          return reply.status(404).send({ error: `Webhook ${webhookId} no encontrado` });
+        }
+
+        const expectedMethod = String(targetNode.data?.httpMethod ?? targetNode.data?.method ?? '').trim().toUpperCase();
+        if (expectedMethod && expectedMethod !== 'ANY' && expectedMethod !== request.method.toUpperCase()) {
+          return reply.status(405).send({
+            error: `Método ${request.method} no permitido para este webhook (esperado: ${expectedMethod})`,
+          });
+        }
+
+        const rawSecret = String(targetNode.data?.secret || '').trim();
+        if (rawSecret) {
+          const { resolveSecret } = await import('../engine/executor.js');
+          let resolvedSecret: string;
+          try {
+            resolvedSecret = resolveSecret({}, rawSecret);
+          } catch (err: any) {
+            return reply.status(500).send({ error: err?.message || 'No se pudo resolver el secreto del webhook' });
           }
-        } catch {}
-      }
+          if (resolvedSecret) {
+            const authError = verifyWebhookAuth(request, resolvedSecret);
+            if (authError) return reply.status(401).send({ error: authError });
+          }
+        }
 
-      if (!targetFlow || !targetNode) {
-        return reply.status(404).send({ error: `Webhook ${webhookId} no encontrado` });
-      }
+        const rawIdempotencyKey = request.headers['idempotency-key'];
+        const idempotencyKey = typeof rawIdempotencyKey === 'string' ? rawIdempotencyKey.trim() : '';
+        const idempotencyEnabled = targetNode.data?.idempotencyEnabled !== false;
 
-      const secret = String(targetNode.data?.secret || '');
-      if (secret) {
-        const authError = verifyWebhookAuth(request, secret);
-        if (authError) return reply.status(401).send({ error: authError });
-      }
+        if (idempotencyKey && idempotencyEnabled) {
+          const cached = db.prepare(`
+            SELECT status_code, response_json
+            FROM webhook_logs
+            WHERE webhook_id = ? AND idempotency_key = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+          `).get(webhookId, idempotencyKey) as { status_code?: number; response_json?: string | null } | undefined;
 
-      const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
-      if (activeFlowExecutions.get(targetFlow.id)?.status === 'running') {
-        return reply.status(409).send({ error: 'El flujo ya se está ejecutando; reintenta cuando termine' });
-      }
+          if (cached && cached.status_code != null) {
+            let cachedBody: unknown = {};
+            if (cached.response_json) {
+              try {
+                cachedBody = JSON.parse(cached.response_json);
+              } catch {
+                cachedBody = cached.response_json;
+              }
+            }
+            return reply
+              .header('X-Idempotent-Replay', 'true')
+              .status(cached.status_code)
+              .send(cachedBody);
+          }
+        }
 
-      const { getIo } = await import('../engine/socket.js');
-      const io = getIo();
+        const { executeFlowEngine, activeFlowExecutions } = await import('../engine/executor.js');
+        if (activeFlowExecutions.get(targetFlow.id)?.status === 'running') {
+          return reply.status(409).send({ error: 'El flujo ya se está ejecutando; reintenta cuando termine' });
+        }
 
-      const payload = {
-        body: request.body ?? {},
-        headers: sanitizeWebhookHeaders(request.headers as Record<string, any>),
-        query: request.query ?? {},
-        timestamp: new Date().toISOString()
-      };
+        const io = await safeIo();
+        const cleanHeaders = sanitizeWebhookHeaders(request.headers as Record<string, any>);
+        const queryObj = (request.query ?? {}) as Record<string, any>;
+        const bodyObj = request.body ?? {};
 
-      const logId = startExecutionLog(targetFlow.id, 'webhook');
-      const tracer = new ExecutionTracer();
-      const startTime = Date.now();
+        const payload = {
+          method: request.method,
+          body: bodyObj,
+          headers: cleanHeaders,
+          query: queryObj,
+          timestamp: new Date().toISOString(),
+        };
 
-      executeFlowEngine(
-        targetFlow.id,
-        (nodeId, status, result) => {
-          io.emit('flow-progress', { flowId: targetFlow.id, nodeId, status, result, current: result?.current, total: result?.total });
-        },
-        { mode: 'normal', initialContext: { _webhookPayload: payload }, tracer }
-      ).then(context => {
-        const duration = Date.now() - startTime;
-        const { exportedFiles, recordCount } = summarizeContext(context);
-        finishExecutionLog(logId, {
-          status: 'completed',
-          durationMs: duration,
-          recordCount,
-          result: { trigger: 'webhook', webhookId, exportedFiles, recordCount },
-          trace: tracer.toJSON('completed')
-        });
-        db.prepare("UPDATE flows SET last_run_at = datetime('now'), last_run_duration_ms = ? WHERE id = ?").run(duration, targetFlow.id);
-        io.emit('flow-completed', { flowId: targetFlow.id, duration, source: 'webhook' });
-      }).catch(err => {
-        const duration = Date.now() - startTime;
-        const status: ExecutionStatus = isCancellationError(err, activeFlowExecutions.get(targetFlow.id)?.status) ? 'cancelled' : 'error';
-        finishExecutionLog(logId, { status, durationMs: duration, errorMessage: err.message, trace: tracer.toJSON(status) });
-        io.emit('flow-failed', { flowId: targetFlow.id, error: err.message, duration });
-        app.log.error(err, 'Error executing flow via webhook');
-      });
+        const recordWebhookLog = (statusCode: number, responseBody: unknown) => {
+          try {
+            const responseJson = responseBody === undefined
+              ? null
+              : typeof responseBody === 'string'
+                ? responseBody
+                : JSON.stringify(responseBody);
+            db.prepare(`
+              INSERT INTO webhook_logs (id, flow_id, webhook_id, method, headers_json, query_json, body_json, status_code, response_json, idempotency_key)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              uuid(),
+              targetFlow.id,
+              webhookId,
+              request.method,
+              JSON.stringify(cleanHeaders),
+              JSON.stringify(queryObj),
+              JSON.stringify(bodyObj),
+              statusCode,
+              responseJson,
+              idempotencyKey && idempotencyEnabled ? idempotencyKey : null
+            );
+          } catch (logErr) {
+            app.log.error(logErr, 'Error recording webhook log');
+          }
+        };
 
-      return reply.status(202).send({
-        message: 'Webhook recibido; flujo en ejecución',
-        flowId: targetFlow.id,
-        executionId: logId
-      });
+        const logId = startExecutionLog(targetFlow.id, 'webhook');
+        const tracer = new ExecutionTracer();
+        const startTime = Date.now();
+
+        const emitWebhookProgress = (nodeId: string, status: ProgressStatus, result?: any) => {
+          const safeResult = sanitizeProgressResult(result);
+          io.emit('flow-progress', {
+            flowId: targetFlow.id,
+            nodeId,
+            status,
+            result: safeResult,
+            current: safeResult?.current,
+            total: safeResult?.total,
+          });
+        };
+
+        const hasRespondNode = (targetDef?.nodes || []).some((n: any) => n.type === 'webhookRespond');
+        const waitFlag = String(queryObj.wait ?? '').toLowerCase() === 'true';
+        const isSync = targetNode.data?.responseMode === 'sync' || waitFlag || hasRespondNode;
+
+        const engineOptions = {
+          mode: 'normal' as const,
+          initialContext: { _webhookPayload: payload },
+          tracer,
+          usePublished: true,
+          executionId: logId,
+        };
+
+        const completeWebhookRun = (context: Record<string, any>) => {
+          const duration = Date.now() - startTime;
+          const { exportedFiles, recordCount } = summarizeContext(context);
+          finishExecutionLog(logId, {
+            status: 'completed',
+            durationMs: duration,
+            recordCount,
+            result: { trigger: 'webhook', webhookId, exportedFiles, recordCount },
+            trace: tracer.toJSON('completed'),
+          });
+          db.prepare("UPDATE flows SET last_run_at = datetime('now'), last_run_duration_ms = ? WHERE id = ?").run(duration, targetFlow.id);
+          io.emit('flow-completed', { flowId: targetFlow.id, duration, source: 'webhook' });
+          return { duration, exportedFiles, recordCount };
+        };
+
+        const failWebhookRun = (err: any) => {
+          const duration = Date.now() - startTime;
+          const status: ExecutionStatus = isCancellationError(err, activeFlowExecutions.get(targetFlow.id)?.status) ? 'cancelled' : 'error';
+          finishExecutionLog(logId, { status, durationMs: duration, errorMessage: err.message, trace: tracer.toJSON(status) });
+          io.emit('flow-failed', { flowId: targetFlow.id, error: err.message, duration });
+          app.log.error(err, 'Error executing flow via webhook');
+        };
+
+        if (isSync) {
+          try {
+            const context = await executeFlowEngine(targetFlow.id, emitWebhookProgress, engineOptions);
+            const { duration, exportedFiles, recordCount } = completeWebhookRun(context);
+
+            const whRes = (context as any)?.webhookResponse ?? (context as any)?.__webhookResponse;
+            if (whRes && typeof whRes === 'object') {
+              const statusCode = Number(whRes.statusCode) || 200;
+              if (whRes.headers && typeof whRes.headers === 'object') {
+                for (const [hk, hv] of Object.entries(whRes.headers)) {
+                  const lower = hk.toLowerCase();
+                  if (lower === 'content-length' || lower === 'transfer-encoding') continue;
+                  if (hv !== undefined && hv !== null) reply.header(hk, String(hv));
+                }
+              }
+              const respBody = whRes.body !== undefined ? whRes.body : { ok: true, executionId: logId };
+              recordWebhookLog(statusCode, respBody);
+              return reply.status(statusCode).send(respBody);
+            }
+
+            const syncBody = {
+              message: 'Webhook procesado',
+              flowId: targetFlow.id,
+              executionId: logId,
+              status: 'completed',
+              duration,
+              recordCount,
+              exportedFiles,
+            };
+            recordWebhookLog(200, syncBody);
+            return reply.status(200).send(syncBody);
+          } catch (err: any) {
+            failWebhookRun(err);
+            const errBody = { error: 'Error ejecutando flujo vía webhook', message: err.message, executionId: logId };
+            recordWebhookLog(500, errBody);
+            return reply.status(500).send(errBody);
+          }
+        }
+
+        executeFlowEngine(targetFlow.id, emitWebhookProgress, engineOptions)
+          .then(completeWebhookRun)
+          .catch(failWebhookRun);
+
+        const asyncBody = {
+          message: 'Webhook recibido; flujo en ejecución',
+          flowId: targetFlow.id,
+          executionId: logId,
+        };
+        recordWebhookLog(202, asyncBody);
+        return reply.status(202).send(asyncBody);
+      },
     });
   });
 }
@@ -911,7 +1192,9 @@ function safeEqual(a: string, b: string): boolean {
 function verifyWebhookAuth(request: any, secret: string): string | null {
   const signature = (request.headers['x-webhook-signature'] || request.headers['x-hub-signature-256']) as string | undefined;
   if (signature) {
-    const raw = typeof request.rawBody === 'string' ? request.rawBody : JSON.stringify(request.body ?? {});
+    const raw = typeof request.rawBody === 'string'
+      ? request.rawBody
+      : (request.body !== undefined ? JSON.stringify(request.body) : '');
     const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
     return safeEqual(signature.trim(), expected) ? null : 'Firma HMAC inválida';
   }

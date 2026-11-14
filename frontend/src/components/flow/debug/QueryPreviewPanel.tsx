@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Copy, Check, Database, AlertTriangle } from 'lucide-react';
 import { cn } from '../../../lib/utils';
+import { copyToClipboard } from '../../../lib/clipboard';
 import type { ResolvedReference } from './ResolvedReferences';
 
 export interface QueryPreview {
@@ -21,10 +22,12 @@ function formatValue(value: any): string {
 
 function SqlBlock({ title, sql, hint }: { title: string; sql: string; hint?: string }) {
   const [copied, setCopied] = useState(false);
-  const copy = () => {
-    navigator.clipboard.writeText(sql);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  const copy = async () => {
+    const ok = await copyToClipboard(sql);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
   };
   return (
     <div className="p-3 bg-surface rounded-md border border-border space-y-2">

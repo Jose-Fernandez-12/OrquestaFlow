@@ -176,6 +176,24 @@ export function useAvailableVariables(node: Node, nodes: Node[], edges: Edge[]):
       });
     });
 
+    const hasErrorBranch =
+      edges.some(e => e.sourceHandle === 'error') ||
+      nodes.some(n => n.data?.onError === 'error_branch');
+
+    if (hasErrorBranch) {
+      groups.push({
+        id: 'error-branch',
+        label: 'Rama de error ($error)',
+        color: 'text-red-600',
+        variables: [
+          { label: 'Mensaje de error', expression: '{{$error.message}}', type: 'texto' },
+          { label: 'ID del nodo fallido', expression: '{{$error.nodeId}}', type: 'texto' },
+          { label: 'Nombre del nodo fallido', expression: '{{$error.nodeLabel}}', type: 'texto' },
+          { label: 'Marca de tiempo del error', expression: '{{$error.timestamp}}', type: 'texto' },
+        ],
+      });
+    }
+
     return groups;
-  }, [parentForEachNode, parentLoopItems, upstreamNodes, nodeResults, intermediateContext]);
+  }, [parentForEachNode, parentLoopItems, upstreamNodes, nodeResults, intermediateContext, edges, nodes]);
 }

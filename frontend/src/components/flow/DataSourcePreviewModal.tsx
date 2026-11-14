@@ -31,6 +31,8 @@ interface DataSourcePreviewModalProps {
   onSelectSheet?: (sheet: string) => void;
 }
 
+const EMPTY_SHEETS: string[] = [];
+
 export function DataSourcePreviewModal({
   isOpen,
   onClose,
@@ -40,7 +42,7 @@ export function DataSourcePreviewModal({
   filePath,
   format,
   sheetName: initialSheetName,
-  sheets = [],
+  sheets = EMPTY_SHEETS,
   sampleRows,
   totalRows,
   nodeResult,
@@ -166,7 +168,7 @@ export function DataSourcePreviewModal({
   const handleDownloadFile = () => {
     if (filePath) {
       const cleanName = fileName || filePath.split(/[/\\]/).pop() || 'datos';
-      triggerBrowserDownload(getFileUrl(`/api/files/${cleanName}`), cleanName);
+      triggerBrowserDownload(getFileUrl(`/api/files/${encodeURIComponent(cleanName)}`), cleanName);
     }
   };
 
@@ -179,7 +181,12 @@ export function DataSourcePreviewModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 animate-in fade-in duration-150">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Previsualización de datos: ${nodeLabel}`}
+      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 animate-in fade-in duration-150"
+    >
       <div className="bg-surface rounded-lg shadow-raised border border-border w-full max-w-5xl max-h-[85vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="p-4 border-b border-border flex items-center justify-between bg-bg/40">

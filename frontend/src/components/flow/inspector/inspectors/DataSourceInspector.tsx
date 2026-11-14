@@ -118,6 +118,7 @@ export function DataSourceInspector({ node, updateNodeData, nodes, edges }: Data
       <div className="space-y-1.5">
         <label className="text-xs font-medium">Origen de Datos</label>
         <select
+          aria-label="Origen de datos"
           className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
           value={mode}
           onChange={e => updateNodeData('mode', e.target.value)}
@@ -184,6 +185,7 @@ export function DataSourceInspector({ node, updateNodeData, nodes, edges }: Data
                   <div className="space-y-1 pt-1">
                     <label className="text-[10px] font-medium text-muted">Hoja de calculo</label>
                     <select
+                      aria-label="Hoja de cálculo"
                       className="w-full text-xs h-8 border border-border bg-surface rounded px-2"
                       value={(node.data?.sheetName as string) || sheets[0]}
                       onChange={e => updateNodeData('sheetName', e.target.value)}

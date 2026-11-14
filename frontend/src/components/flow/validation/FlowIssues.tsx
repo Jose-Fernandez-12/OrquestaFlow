@@ -100,7 +100,12 @@ interface PreRunDialogProps {
 export function PreRunIssuesDialog({ issues, nodes, onReview, onRunAnyway }: PreRunDialogProps) {
   const errors = issues.filter(i => i.level === 'error');
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-[2px] flex items-center justify-center p-4 z-[9999]">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Errores de configuración del flujo"
+      className="fixed inset-0 bg-black/50 backdrop-blur-[2px] flex items-center justify-center p-4 z-[9999]"
+    >
       <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-md overflow-hidden">
         <div className="p-4 border-b border-border flex items-start gap-3">
           <div className="w-8 h-8 rounded bg-danger/10 text-danger flex items-center justify-center shrink-0">

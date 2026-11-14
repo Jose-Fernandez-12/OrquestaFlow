@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
+import type { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { CredentialPicker } from '../editors/CredentialPicker';
 import { Input } from '../../../ui/input';
 import { Button } from '../../../ui/button';
@@ -18,6 +19,56 @@ type HttpInspectorProps = Pick<
   'node' | 'nodes' | 'edges' | 'updateNodeData' | 'setNodes' | 'selectedNodeId'
 >;
 
+function deriveVariableKey(expr: string): string {
+  const inner = expr.replace(/^\{\{|\}\}$/g, '').trim();
+  const lastPart = inner.split('.').pop()?.replace(/[^a-zA-Z0-9_-]/g, '') || 'campo';
+  return lastPart || 'campo';
+}
+
+function insertVariableIntoJson(
+  current: string,
+  expr: string,
+  fallbackDefault: string,
+  cmRef?: ReactCodeMirrorRef | null
+): string {
+  const view = cmRef?.view;
+  if (view?.hasFocus) {
+    const { from, to } = view.state.selection.main;
+    view.dispatch({
+      changes: { from, to, insert: expr },
+      selection: { anchor: from + expr.length },
+    });
+    return view.state.doc.toString();
+  }
+  const source = (current || fallbackDefault).trim();
+  if (!source) {
+    return JSON.stringify({ [deriveVariableKey(expr)]: expr }, null, 2);
+  }
+  try {
+    const parsed = JSON.parse(source);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const baseKey = deriveVariableKey(expr);
+      let key = baseKey;
+      let idx = 2;
+      while (Object.prototype.hasOwnProperty.call(parsed, key)) {
+        key = `${baseKey}_${idx++}`;
+      }
+      return JSON.stringify({ ...parsed, [key]: expr }, null, 2);
+    }
+  } catch {
+    // Source may contain unquoted {{vars}}; splice before the closing brace when it looks like a JSON object
+  }
+  const closeIdx = source.lastIndexOf('}');
+  if (source.startsWith('{') && closeIdx > 0) {
+    const inner = source.slice(1, closeIdx).trimEnd();
+    const needsComma = inner.length > 0 && !inner.endsWith(',');
+    const key = deriveVariableKey(expr);
+    const prefix = source.slice(0, closeIdx).trimEnd();
+    return `${prefix}${needsComma ? ',' : ''}\n  "${key}": "${expr}"\n${source.slice(closeIdx)}`;
+  }
+  return source ? `${source} ${expr}` : expr;
+}
+
 export function HttpInspector({
   node,
   nodes,
@@ -31,6 +82,8 @@ export function HttpInspector({
   const [showRawBody, setShowRawBody] = useState(true);
   const [showRawParams, setShowRawParams] = useState(false);
   const [newParamKey, setNewParamKey] = useState('');
+  const headersEditorRef = useRef<ReactCodeMirrorRef | null>(null);
+  const bodyEditorRef = useRef<ReactCodeMirrorRef | null>(null);
 
   const selectedNodeResult = useAppSelector(
     state => (state as any).flows?.nodeResults?.[selectedNodeId]
@@ -144,8 +197,10 @@ export function HttpInspector({
         {activeTab === 'general' && (
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-xs font-semibold text-fg-secondary block">Método HTTP</label>
+              <label htmlFor={`http-method-${node.id}`} className="text-xs font-semibold text-fg-secondary block">Método HTTP</label>
               <select
+                id={`http-method-${node.id}`}
+                aria-label="Método HTTP"
                 className={cn(
                   "w-full rounded-md border border-border bg-surface px-3 py-2.5 text-sm font-semibold",
                   "transition-colors duration-150 cursor-pointer",
@@ -281,8 +336,10 @@ export function HttpInspector({
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium">Formato de respuesta</label>
+              <label htmlFor={`http-resp-format-${node.id}`} className="text-xs font-medium">Formato de respuesta</label>
               <select
+                id={`http-resp-format-${node.id}`}
+                aria-label="Formato de respuesta HTTP"
                 className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
                 value={(node.data?.responseFormat as string) || 'JSON'}
                 onChange={(e) => updateNodeData('responseFormat', e.target.value)}
@@ -321,8 +378,10 @@ export function HttpInspector({
         {activeTab === 'auth' && (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium">Tipo de Autenticación</label>
+              <label htmlFor={`http-auth-type-${node.id}`} className="text-xs font-medium">Tipo de Autenticación</label>
               <select
+                id={`http-auth-type-${node.id}`}
+                aria-label="Tipo de autenticación HTTP"
                 className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-[9px] py-[8px] text-sm focus-visible:outline-none focus-visible:border-accent"
                 value={authType}
                 onChange={(e) => updateNodeData('authType', e.target.value)}
@@ -420,15 +479,27 @@ export function HttpInspector({
                     {showRawHeaders ? 'Vista Guiada' : 'Ver JSON'}
                   </button>
                   <div className="flex gap-1">
-                    <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) =>
-                          updateNodeData('headers', ((node.data?.headers as string) || '') + val)
-                        } />
+                    <MapSourceButton
+                      nodes={upstreamDataNodes}
+                      onSelectValue={(val) =>
+                        updateNodeData(
+                          'headers',
+                          insertVariableIntoJson(
+                            (node.data?.headers as string) || '',
+                            val,
+                            '{\n  "Content-Type": "application/json"\n}',
+                            showRawHeaders ? headersEditorRef.current : null
+                          )
+                        )
+                      }
+                    />
                   </div>
                 </div>
               </div>
 
               {showRawHeaders ? (
                 <JsonCodeField
+                  editorRef={headersEditorRef}
                   value={
                     (node.data?.headers as string) ||
                     '{\n  "Content-Type": "application/json"\n}'
@@ -565,15 +636,27 @@ export function HttpInspector({
                       {showRawBody ? 'Vista Guiada' : 'Ver JSON raw'}
                     </button>
                     <div className="flex gap-1">
-                      <MapSourceButton nodes={upstreamDataNodes} onSelectValue={(val) =>
-                            updateNodeData('body', ((node.data?.body as string) || '') + val)
-                          } />
+                      <MapSourceButton
+                        nodes={upstreamDataNodes}
+                        onSelectValue={(val) =>
+                          updateNodeData(
+                            'body',
+                            insertVariableIntoJson(
+                              (node.data?.body as string) || '',
+                              val,
+                              '',
+                              showRawBody ? bodyEditorRef.current : null
+                            )
+                          )
+                        }
+                      />
                     </div>
                   </div>
                 </div>
 
                 {showRawBody ? (
                   <JsonCodeField
+                    editorRef={bodyEditorRef}
                     minHeight="160px"
                     value={(node.data?.body as string) || ''}
                     onChange={(v) => updateNodeData('body', v)}
@@ -602,7 +685,7 @@ export function HttpInspector({
             {((node.data?.responseFormat as string) || 'JSON') === 'JSON' && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs font-medium text-accent">
+                  <label htmlFor={`http-extract-path-${node.id}`} className="text-xs font-medium text-accent">
                     Extraer Propiedad de Respuesta
                   </label>
                   {Boolean(node.data?.extractPath) && (
@@ -617,6 +700,8 @@ export function HttpInspector({
                 </div>
 
                 <select
+                  id={`http-extract-path-${node.id}`}
+                  aria-label="Extraer propiedad de respuesta HTTP"
                   className="flex w-full min-h-[36px] rounded-sm border border-border bg-surface px-[9px] py-[6px] text-xs focus-visible:outline-none focus-visible:border-accent"
                   value={
                     ['', 'data', 'items', 'rows', 'result', 'results'].includes(
@@ -763,6 +848,42 @@ export function HttpInspector({
                       Selecciona la lista completa con [*] y luego usa{' '}
                       <code>{'{{_item.propiedad}}'}</code> en la URL, headers o body.
                     </p>
+                    <div className="grid grid-cols-2 gap-2.5 pt-2 border-t border-border">
+                      <div className="space-y-1">
+                        <label htmlFor={`http-concurrency-${node.id}`} className="text-[11px] font-medium text-fg block">
+                          Concurrencia (1–10)
+                        </label>
+                        <Input
+                          id={`http-concurrency-${node.id}`}
+                          type="number"
+                          min={1}
+                          max={10}
+                          value={Number(node.data?.concurrency ?? 1)}
+                          onChange={(e) => {
+                            const parsed = Math.max(1, Math.min(10, Math.trunc(Number(e.target.value) || 1)));
+                            updateNodeData('concurrency', parsed);
+                          }}
+                          className="h-8 text-xs font-mono"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label htmlFor={`http-ratelimit-${node.id}`} className="text-[11px] font-medium text-fg block">
+                          Pausa entre ejecuciones (ms)
+                        </label>
+                        <Input
+                          id={`http-ratelimit-${node.id}`}
+                          type="number"
+                          min={0}
+                          step={50}
+                          value={Number(node.data?.rateLimitMs ?? 0)}
+                          onChange={(e) => {
+                            const parsed = Math.max(0, Math.trunc(Number(e.target.value) || 0));
+                            updateNodeData('rateLimitMs', parsed);
+                          }}
+                          className="h-8 text-xs font-mono"
+                        />
+                      </div>
+                    </div>
                   </div>
                 )}
 

@@ -162,7 +162,12 @@ export function ImportFlowModal({ isOpen, onClose, onSuccess }: ImportFlowModalP
   };
 
   return (
-    <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Importar flujo de trabajo"
+      className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast"
+    >
       <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-fast">
         {/* Header */}
         <div className="flex justify-between items-center px-6 py-4 border-b border-border shrink-0">

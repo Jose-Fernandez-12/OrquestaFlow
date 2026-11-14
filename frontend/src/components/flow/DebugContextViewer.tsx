@@ -32,6 +32,7 @@ import {
   Hourglass,
   SquareTerminal,
 } from 'lucide-react';
+import { copyToClipboard } from '../../lib/clipboard';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -384,10 +385,12 @@ export function DebugContextViewer({
     });
   }, [tabularRows, searchTerm]);
 
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async (text: string) => {
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const toggleCollapse = (path: string) => {
@@ -803,7 +806,12 @@ export function DebugContextViewer({
     const renderModal = () => {
       if (!isModalOpen) return null;
       return createPortal(
-        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Inspección de Depuración"
+          className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150"
+        >
           <div className="bg-surface rounded-lg shadow-raised border border-border w-full max-w-7xl h-[88vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
             <div className="p-4 bg-bg border-b border-border flex items-center justify-between">

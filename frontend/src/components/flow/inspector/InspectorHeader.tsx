@@ -4,9 +4,10 @@ import { TYPE_LABELS, TYPE_COLORS, TYPE_BG_COLORS } from './types';
 import {
   Play, Globe, Code, FileOutput, Database, Clock,
   FileSpreadsheet, List, Repeat, Square, Check, Loader2, X,
-  Pause, Hourglass, SquareTerminal, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal, Copy, StickyNote
+  Pause, Hourglass, SquareTerminal, GitFork, Braces, Radio, KeyRound, Bot, SlidersHorizontal, Copy, StickyNote, Workflow, Reply
 } from 'lucide-react';
 import { cn } from '../../../lib/utils';
+import { copyToClipboard } from '../../../lib/clipboard';
 import { useAppSelector } from '../../../store/hooks';
 import type { Node } from '@xyflow/react';
 
@@ -22,6 +23,7 @@ export const TYPE_ICONS: Record<string, React.ElementType> = {
   delay: Clock,
   waitFor: Hourglass,
   runScript: SquareTerminal,
+  runFlow: Workflow,
   dataSource: FileSpreadsheet,
   fileSource: FileSpreadsheet,
   dataList: List,
@@ -31,6 +33,7 @@ export const TYPE_ICONS: Record<string, React.ElementType> = {
   conditionalBranch: GitFork,
   jsonTransform: Braces,
   webhookTrigger: Radio,
+  webhookRespond: Reply,
   oauth2Connector: KeyRound,
   aiChatCompletion: Bot,
   note: StickyNote,
@@ -61,10 +64,12 @@ export function InspectorHeader({ node, updateNodeData, onClose }: InspectorHead
   const [editValue, setEditValue] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const copyId = () => {
-    navigator.clipboard?.writeText(node.id).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  const copyId = async () => {
+    const ok = await copyToClipboard(node.id);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
   };
 
   const startEdit = () => {

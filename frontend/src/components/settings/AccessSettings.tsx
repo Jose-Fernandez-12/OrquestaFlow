@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Check, Copy, Eye, EyeOff, LogOut, ShieldCheck } from 'lucide-react';
 import { getApiUrl } from '../../lib/api';
+import { copyToClipboard } from '../../lib/clipboard';
 import { Button } from '../ui/button';
 
 type AccessInfo =
@@ -29,11 +30,11 @@ export function AccessSettings() {
   }, []);
 
   const copy = async (token: string) => {
-    try {
-      await navigator.clipboard.writeText(token);
+    const ok = await copyToClipboard(token);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-    } catch {
+    } else {
       setVisible(true);
     }
   };

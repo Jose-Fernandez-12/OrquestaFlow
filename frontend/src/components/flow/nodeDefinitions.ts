@@ -1,4 +1,4 @@
-export const EXPERIMENTAL_NODE_TYPES = ['webhookTrigger', 'oauth2Connector', 'aiChatCompletion'];
+export const EXPERIMENTAL_NODE_TYPES = ['oauth2Connector', 'aiChatCompletion'];
 
 export const isExperimentalNode = (type?: string) => !!type && EXPERIMENTAL_NODE_TYPES.includes(type);
 
@@ -130,7 +130,7 @@ export interface NodeRetryConfig {
   retryCount: number | null;   // null = use the global default (HTTP) or 0
   retryDelayMs: number;
   retryBackoff: 'fixed' | 'exponential';
-  onError: 'stop' | 'continue';
+  onError: 'stop' | 'continue' | 'error_branch';
 }
 
 export function getNodeRetryConfig(data: Record<string, any> | undefined): NodeRetryConfig {
@@ -141,7 +141,12 @@ export function getNodeRetryConfig(data: Record<string, any> | undefined): NodeR
     retryCount: parsed !== null && Number.isFinite(parsed) ? parsed : null,
     retryDelayMs: Number.isFinite(delay) && data?.retryDelayMs !== '' && data?.retryDelayMs !== undefined ? delay : 1000,
     retryBackoff: data?.retryBackoff === 'fixed' ? 'fixed' : 'exponential',
-    onError: data?.onError === 'continue' ? 'continue' : 'stop',
+    onError:
+      data?.onError === 'error_branch'
+        ? 'error_branch'
+        : data?.onError === 'continue'
+          ? 'continue'
+          : 'stop',
   };
 }
 

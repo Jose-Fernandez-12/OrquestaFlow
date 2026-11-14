@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Input } from '../../../ui/input';
 import { Copy, Check } from 'lucide-react';
 import type { Node } from '@xyflow/react';
+import { copyToClipboard } from '../../../../lib/clipboard';
 
 interface OAuth2ConnectorInspectorProps {
   node: Node;
@@ -29,10 +30,12 @@ export function OAuth2ConnectorInspector({
   const [copiedToken, setCopiedToken] = useState(false);
   const tokenVar = `{{${node.id}.authorization_header}}`;
 
-  const handleCopyVar = () => {
-    navigator.clipboard.writeText(tokenVar);
-    setCopiedToken(true);
-    setTimeout(() => setCopiedToken(false), 2000);
+  const handleCopyVar = async () => {
+    const ok = await copyToClipboard(tokenVar);
+    if (ok) {
+      setCopiedToken(true);
+      setTimeout(() => setCopiedToken(false), 2000);
+    }
   };
 
   return (
@@ -41,6 +44,7 @@ export function OAuth2ConnectorInspector({
       <div className="space-y-1.5">
         <label className="text-xs font-medium">Tipo de Concesión (Grant Type)</label>
         <select
+          aria-label="Tipo de concesión OAuth2"
           value={grantType}
           onChange={(e) => updateNodeData('grantType', e.target.value)}
           className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"
@@ -91,6 +95,7 @@ export function OAuth2ConnectorInspector({
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Envío de credenciales del cliente</label>
           <select
+            aria-label="Método de envío de credenciales del cliente"
             value={authMethod}
             onChange={(e) => updateNodeData('authMethod', e.target.value)}
             className="flex w-full h-8 rounded-sm border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:border-accent"

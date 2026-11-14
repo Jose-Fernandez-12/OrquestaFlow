@@ -43,6 +43,30 @@ export function loadRunCache(flowId: string): RunCache | null {
   }
 }
 
+const SENSITIVE_KEY_PATTERN = /^(password|token|access_?token|client_?secret|api_?key|authorization)$/i;
+
+function redactSensitiveValues(value: unknown, seen = new WeakSet<object>()): any {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value as object)) return undefined;
+  seen.add(value as object);
+
+  if (Array.isArray(value)) {
+    return value.map(item => redactSensitiveValues(item, seen));
+  }
+
+  const out: Record<string, any> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) {
+      out[key] = '***REDACTED***';
+    } else {
+      out[key] = redactSensitiveValues(val, seen);
+    }
+  }
+  return out;
+}
+
 /**
  * Stores the results of a run. A full run replaces the cache; a partial run is merged on top,
  * so the outputs of the nodes it did not run are kept.
@@ -56,9 +80,10 @@ export function saveRunCache(
   try {
     const previous = opts.merge ? loadRunCache(flowId) : null;
     const ran = new Set(opts.ranNodeIds || []);
+    const mergedContext = withoutIterationKeys({ ...(previous?.context || {}), ...context });
     const cache: RunCache = {
       updatedAt: new Date().toISOString(),
-      context: withoutIterationKeys({ ...(previous?.context || {}), ...context }),
+      context: redactSensitiveValues(mergedContext),
       skipped: [...new Set([...(previous?.skipped || []).filter(id => !ran.has(id)), ...skipped])],
     };
     fs.mkdirSync(cacheDir(), { recursive: true });

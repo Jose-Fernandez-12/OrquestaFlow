@@ -3,6 +3,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchSchedules, createSchedule, updateSchedule, deleteSchedule, type Schedule } from '../../store/scheduleSlice';
 import { fetchFlows } from '../../store/flowSlice';
 import { fetchScripts } from '../../store/scriptSlice';
+import { fetchQueries } from '../../store/querySlice';
 import { showToast } from '../../store/uiSlice';
 import { getApiUrl, createSocket } from '../../lib/api';
 import {
@@ -22,6 +23,7 @@ import {
   Search,
   GitMerge,
   Code2,
+  Database,
   AlertTriangle,
   PlayCircle,
   Activity,
@@ -42,12 +44,13 @@ export function ScheduleView() {
   const { schedules, loading } = useAppSelector(state => state.schedules);
   const { flows } = useAppSelector(state => state.flows);
   const { scripts } = useAppSelector(state => state.scripts);
+  const { queries } = useAppSelector(state => state.queries);
 
   // Modal create/edit state
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<'create' | 'edit'>('create');
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [targetType, setTargetType] = useState<'flow' | 'script'>('flow');
+  const [targetType, setTargetType] = useState<'flow' | 'script' | 'query'>('flow');
   const [targetId, setTargetId] = useState('');
   const [cronExpr, setCronExpr] = useState('0 8 * * 1'); // Monday 8am
   const [scheduleName, setScheduleName] = useState('');
@@ -67,7 +70,7 @@ export function ScheduleView() {
 
   // Filter & Search state
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterType, setFilterType] = useState<'all' | 'flow' | 'script' | 'active'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'flow' | 'script' | 'query' | 'active'>('all');
 
   // History modal state
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
@@ -84,6 +87,7 @@ export function ScheduleView() {
     dispatch(fetchSchedules());
     dispatch(fetchFlows());
     dispatch(fetchScripts());
+    dispatch(fetchQueries());
 
     // Sync from server every 30 seconds
     const fetchInterval = setInterval(() => {
@@ -154,6 +158,7 @@ export function ScheduleView() {
     return schedules.filter(job => {
       if (filterType === 'flow' && job.target_type !== 'flow') return false;
       if (filterType === 'script' && job.target_type !== 'script') return false;
+      if (filterType === 'query' && job.target_type !== 'query') return false;
       if (filterType === 'active' && job.is_active !== 1) return false;
 
       if (searchTerm.trim()) {
@@ -187,7 +192,7 @@ export function ScheduleView() {
   const openEditModal = (job: Schedule) => {
     setModalMode('edit');
     setEditingId(job.id);
-    setTargetType(job.target_type as 'flow' | 'script');
+    setTargetType(job.target_type as 'flow' | 'script' | 'query');
     setTargetId(job.target_id);
     setScheduleName(job.name);
     setCronExpr(job.cron_expression);
@@ -198,25 +203,31 @@ export function ScheduleView() {
     e.preventDefault();
     if (!targetId) return;
 
-    if (modalMode === 'create') {
-      await dispatch(createSchedule({
-        target_type: targetType,
-        target_id: targetId,
-        name: scheduleName || 'Tarea programada',
-        cron_expression: cronExpr
-      }));
-    } else if (modalMode === 'edit' && editingId) {
-      await dispatch(updateSchedule({
-        id: editingId,
-        target_type: targetType,
-        target_id: targetId,
-        name: scheduleName || 'Tarea programada',
-        cron_expression: cronExpr
-      }));
-    }
+    try {
+      if (modalMode === 'create') {
+        await dispatch(createSchedule({
+          target_type: targetType,
+          target_id: targetId,
+          name: scheduleName || 'Tarea programada',
+          cron_expression: cronExpr
+        })).unwrap();
+        dispatch(showToast('Programación creada exitosamente'));
+      } else if (modalMode === 'edit' && editingId) {
+        await dispatch(updateSchedule({
+          id: editingId,
+          target_type: targetType,
+          target_id: targetId,
+          name: scheduleName || 'Tarea programada',
+          cron_expression: cronExpr
+        })).unwrap();
+        dispatch(showToast('Programación actualizada exitosamente'));
+      }
 
-    setIsModalOpen(false);
-    dispatch(fetchSchedules());
+      setIsModalOpen(false);
+      dispatch(fetchSchedules());
+    } catch (err: any) {
+      dispatch(showToast(`Error al guardar programación: ${err.message || 'datos inválidos'}`));
+    }
   };
 
   const handleDeleteConfirm = async () => {
@@ -272,7 +283,7 @@ export function ScheduleView() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 shrink-0">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Programación de tareas</h1>
-          <p className="text-sm text-muted mt-1">Configura temporizadores cron para ejecutar tus flujos y scripts de forma automática.</p>
+          <p className="text-sm text-muted mt-1">Configura temporizadores cron para ejecutar tus flujos, scripts y consultas SQL de forma automática.</p>
         </div>
         <Button variant="primary" size="sm" onClick={openCreateModal} className="gap-2 shrink-0">
           <Plus size={16} />
@@ -374,6 +385,15 @@ export function ScheduleView() {
             Scripts
           </Button>
           <Button
+            variant={filterType === 'query' ? 'primary' : 'default'}
+            size="sm"
+            onClick={() => setFilterType('query')}
+            className="text-xs h-8 gap-1.5"
+          >
+            <Database size={13} />
+            Consultas
+          </Button>
+          <Button
             variant={filterType === 'active' ? 'primary' : 'default'}
             size="sm"
             onClick={() => setFilterType('active')}
@@ -438,6 +458,11 @@ export function ScheduleView() {
                         <span className="flex items-center gap-1 text-[11px] font-semibold text-accent bg-accent-light px-2 py-0.5 rounded border border-accent/20 shrink-0">
                           <GitMerge size={12} />
                           Flujo
+                        </span>
+                      ) : job.target_type === 'query' ? (
+                        <span className="flex items-center gap-1 text-[11px] font-semibold text-amber-600 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 shrink-0">
+                          <Database size={12} />
+                          Consulta
                         </span>
                       ) : (
                         <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-600 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 shrink-0">
@@ -551,11 +576,17 @@ export function ScheduleView() {
 
       {/* Create / Edit Modal Dialog */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+        <div
+          className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast"
+          role="dialog"
+          aria-modal="true"
+          aria-label={modalMode === 'create' ? 'Nueva programación' : 'Editar programación'}
+        >
           <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-md overflow-hidden relative p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-fast">
             <button
               onClick={() => setIsModalOpen(false)}
               className="absolute top-4 right-4 text-muted hover:text-fg"
+              aria-label="Cerrar"
             >
               <X size={18} />
             </button>
@@ -566,7 +597,7 @@ export function ScheduleView() {
               </h2>
               <p className="text-xs text-muted mt-1">
                 {modalMode === 'create'
-                  ? 'Configura la ejecución automática de flujos o scripts.'
+                  ? 'Configura la ejecución automática de flujos, scripts o consultas SQL.'
                   : 'Modifica los parámetros y la frecuencia cron de esta tarea.'}
               </p>
             </div>
@@ -574,14 +605,19 @@ export function ScheduleView() {
             <form onSubmit={handleModalSubmit} className="flex flex-col gap-4">
               <div className="space-y-1.5">
                 <label className="text-xs font-medium">Tipo de tarea</label>
-                <div className="flex gap-2 p-1 bg-bg rounded-sm border border-border">
+                <div className="flex gap-1.5 p-1 bg-bg rounded-sm border border-border">
                   <button
                     type="button"
                     onClick={() => {
                       setTargetType('flow');
-                      if (flows.length > 0 && modalMode === 'create') {
-                        setTargetId(flows[0].id);
-                        setScheduleName(`Programación de ${flows[0].name}`);
+                      if (modalMode === 'create') {
+                        if (flows.length > 0) {
+                          setTargetId(flows[0].id);
+                          setScheduleName(`Programación de ${flows[0].name}`);
+                        } else {
+                          setTargetId('');
+                          setScheduleName('');
+                        }
                       }
                     }}
                     className={cn(
@@ -590,15 +626,20 @@ export function ScheduleView() {
                     )}
                   >
                     <GitMerge size={13} />
-                    Flujo de trabajo
+                    Flujo
                   </button>
                   <button
                     type="button"
                     onClick={() => {
                       setTargetType('script');
-                      if (scripts.length > 0 && modalMode === 'create') {
-                        setTargetId(scripts[0].id);
-                        setScheduleName(`Programación de ${scripts[0].name}`);
+                      if (modalMode === 'create') {
+                        if (scripts.length > 0) {
+                          setTargetId(scripts[0].id);
+                          setScheduleName(`Programación de ${scripts[0].name}`);
+                        } else {
+                          setTargetId('');
+                          setScheduleName('');
+                        }
                       }
                     }}
                     className={cn(
@@ -607,15 +648,38 @@ export function ScheduleView() {
                     )}
                   >
                     <Code2 size={13} />
-                    Script Python/JS
+                    Script
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTargetType('query');
+                      if (modalMode === 'create') {
+                        if (queries.length > 0) {
+                          setTargetId(queries[0].id);
+                          setScheduleName(`Programación de ${queries[0].name}`);
+                        } else {
+                          setTargetId('');
+                          setScheduleName('');
+                        }
+                      }
+                    }}
+                    className={cn(
+                      "flex-1 py-1.5 text-xs font-medium rounded-sm transition-colors flex items-center justify-center gap-1.5",
+                      targetType === 'query' ? "bg-surface text-fg shadow-sm border border-border/40" : "text-muted"
+                    )}
+                  >
+                    <Database size={13} />
+                    Consulta
                   </button>
                 </div>
               </div>
 
               {targetType === 'flow' ? (
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium">Seleccionar flujo</label>
+                  <label htmlFor="schedule-target-select" className="text-xs font-medium">Seleccionar flujo</label>
                   <select
+                    id="schedule-target-select"
                     value={targetId}
                     onChange={(e) => {
                       setTargetId(e.target.value);
@@ -624,15 +688,36 @@ export function ScheduleView() {
                     }}
                     className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:border-accent"
                   >
+                    {flows.length === 0 && <option value="">No hay flujos disponibles</option>}
                     {flows.map(f => (
                       <option key={f.id} value={f.id}>{f.name}</option>
                     ))}
                   </select>
                 </div>
+              ) : targetType === 'query' ? (
+                <div className="space-y-1.5">
+                  <label htmlFor="schedule-target-select" className="text-xs font-medium">Seleccionar consulta SQL</label>
+                  <select
+                    id="schedule-target-select"
+                    value={targetId}
+                    onChange={(e) => {
+                      setTargetId(e.target.value);
+                      const q = queries.find(x => x.id === e.target.value);
+                      if (q && modalMode === 'create') setScheduleName(`Programación de ${q.name}`);
+                    }}
+                    className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:border-accent"
+                  >
+                    {queries.length === 0 && <option value="">No hay consultas guardadas</option>}
+                    {queries.map(q => (
+                      <option key={q.id} value={q.id}>{q.name}</option>
+                    ))}
+                  </select>
+                </div>
               ) : (
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium">Seleccionar script</label>
+                  <label htmlFor="schedule-target-select" className="text-xs font-medium">Seleccionar script</label>
                   <select
+                    id="schedule-target-select"
                     value={targetId}
                     onChange={(e) => {
                       setTargetId(e.target.value);
@@ -641,6 +726,7 @@ export function ScheduleView() {
                     }}
                     className="flex w-full min-h-[38px] rounded-sm border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:border-accent"
                   >
+                    {scripts.length === 0 && <option value="">No hay scripts disponibles</option>}
                     {scripts.map(s => (
                       <option key={s.id} value={s.id}>{s.name}</option>
                     ))}
@@ -700,7 +786,12 @@ export function ScheduleView() {
 
       {/* Delete Confirmation Modal */}
       {scheduleToDelete && (
-        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast">
+        <div
+          className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50 animate-in fade-in duration-fast"
+          role="dialog"
+          aria-modal="true"
+          aria-label="¿Eliminar programación?"
+        >
           <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-sm p-5 flex flex-col gap-4 animate-in zoom-in-95 duration-fast">
             <div className="flex items-start gap-3">
               <div className="w-9 h-9 rounded-full bg-danger/10 text-danger flex items-center justify-center shrink-0 mt-0.5">
@@ -741,7 +832,12 @@ export function ScheduleView() {
       )}
       {/* History Modal Dialog */}
       {historyModalOpen && (
-        <div className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50">
+        <div
+          className="fixed inset-0 bg-fg/40 flex items-center justify-center p-4 z-50"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Historial de Ejecución"
+        >
           <div className="bg-surface border border-border rounded-md shadow-raised w-full max-w-2xl max-h-[80vh] flex flex-col relative animate-in fade-in zoom-in-95 duration-fast">
             <div className="p-5 border-b border-border flex justify-between items-center shrink-0">
               <div>

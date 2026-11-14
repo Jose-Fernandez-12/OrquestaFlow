@@ -3,6 +3,7 @@ import type { Node, Edge } from '@xyflow/react';
 import { validateFlow } from './flowValidation';
 import { getFlowParameters, hasPromptParameters } from '../flowParameters';
 import { FLOW_TEMPLATES } from '../flowTemplates';
+import { EXPERIMENTAL_NODE_TYPES, getNodeRetryConfig } from '../nodeDefinitions';
 
 const n = (id: string, type: string, data: Record<string, unknown> = {}): Node =>
   ({ id, type, position: { x: 0, y: 0 }, data: { label: id, ...data } }) as Node;
@@ -224,5 +225,43 @@ describe('validateFlow · Ejecutar flujo (runFlow), parámetros y plantillas', (
     const query = sql.nodes.find(n => n.type === 'query')!;
     const branch = sql.nodes.find(n => n.type === 'conditionalBranch')!;
     expect((branch.data as any).conditions[0].left).toBe(`{{${query.id}.length}}`);
+  });
+
+  it('warns on unconnected error_branch or sync webhookTrigger without webhookRespond', () => {
+    const httpErrNode = n('http1', 'httpRequest', {
+      endpoint: 'https://api.test/ok',
+      onError: 'error_branch',
+    });
+    const fallbackNode = n('log1', 'variables', { variables: [] });
+    const whSync = n('wh1', 'webhookTrigger', { responseMode: 'sync' });
+    const whResp = n('resp1', 'webhookRespond', { statusCode: 200 });
+
+    const missingErrWarnings = messagesFor(
+      validateFlow([whSync, httpErrNode, fallbackNode], [e('wh1', 'http1'), e('http1', 'log1')]),
+      'http1'
+    );
+    expect(missingErrWarnings).toContain(
+      'warning: Rama de error (try/catch) activa, pero la salida roja "error" no está conectada.'
+    );
+    expect(
+      messagesFor(
+        validateFlow([whSync, httpErrNode, fallbackNode], [e('wh1', 'http1'), e('http1', 'log1')]),
+        'wh1'
+      )
+    ).toContain('warning: El webhook está en modo síncrono, pero no hay ningún nodo "Responder Webhook" en el flujo.');
+
+    const resolvedIssues = validateFlow(
+      [whSync, httpErrNode, fallbackNode, whResp],
+      [e('wh1', 'http1'), e('http1', 'log1', 'error'), e('http1', 'resp1')]
+    );
+    expect(messagesFor(resolvedIssues, 'http1')).toEqual([]);
+    expect(messagesFor(resolvedIssues, 'wh1')).toEqual([]);
+  });
+
+  it('promotes webhookTrigger out of EXPERIMENTAL_NODE_TYPES and parses error_branch retry policy', () => {
+    expect(EXPERIMENTAL_NODE_TYPES).not.toContain('webhookTrigger');
+    expect(getNodeRetryConfig({ onError: 'error_branch' }).onError).toBe('error_branch');
+    expect(getNodeRetryConfig({ onError: 'continue' }).onError).toBe('continue');
+    expect(getNodeRetryConfig({}).onError).toBe('stop');
   });
 });

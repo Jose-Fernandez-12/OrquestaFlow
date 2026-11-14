@@ -1,9 +1,13 @@
 import cron from 'node-cron';
 import cronParser from 'cron-parser';
+import { v4 as uuid } from 'uuid';
 import { getDb } from '../db/database.js';
 import { executeFlowEngine, activeFlowExecutions } from './executor.js';
 import { ExecutionTracer, startExecutionLog, finishExecutionLog, isCancellationError } from './executionLog.js';
 import { startScriptRun } from './scriptRunner.js';
+import { openDefinition } from './nodeSecrets.js';
+import { executeSqliteQuery } from './sqlite.js';
+import { executeMssqlQuery } from './mssql.js';
 
 const activeJobs: Record<string, cron.ScheduledTask> = {};
 const runningJobIds = new Set<string>();
@@ -83,19 +87,18 @@ function getNextRunAt(cronExpression: string): string | null {
  * One run of a schedule: at its cron time, or right now from «Ejecutar ahora» (trigger "manual").
  * A run that is still in progress makes the new one be skipped, and the history says so.
  */
-async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' = 'schedule'): Promise<void> {
+export async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' = 'schedule'): Promise<void> {
   if (runningJobIds.has(schedule.id)) {
     console.warn(`[Scheduler] Skipping schedule ${schedule.id} (${schedule.name}): previous execution is still running`);
     getDb().prepare(`
       INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type, error_message, duration_ms, completed_at)
       VALUES (?, ?, ?, ?, 'cancelled', ?, ?, 0, datetime('now'))
-    `).run(require('uuid').v4(), schedule.target_type, schedule.target_id, schedule.id, trigger, SKIPPED_OVERLAP_MESSAGE);
+    `).run(uuid(), schedule.target_type, schedule.target_id, schedule.id, trigger, SKIPPED_OVERLAP_MESSAGE);
     return;
   }
 
   runningJobIds.add(schedule.id);
   console.log(`[Scheduler] Triggered job: ${schedule.name} (${schedule.target_type})`);
-  const { v4: uuid } = require('uuid');
   const db = getDb();
   const tracer = new ExecutionTracer();
   let logId: string;
@@ -112,19 +115,31 @@ async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' = 'sche
   const startTime = Date.now();
   try {
     let recordCount = 0;
-    let exportedFiles: string[] = [];
+    const exportedFiles: string[] = [];
+    let extraResult: Record<string, any> | null = null;
 
     if (schedule.target_type === 'flow') {
-      const context = await executeFlowEngine(schedule.target_id, undefined, { tracer });
-      
+      const flowRow = db
+        .prepare('SELECT published_definition FROM flows WHERE id = ?')
+        .get(schedule.target_id) as { published_definition?: string | null } | undefined;
+      const publishedRaw = flowRow?.published_definition ? String(flowRow.published_definition).trim() : '';
+      const definitionOverride = publishedRaw ? openDefinition(publishedRaw) : undefined;
+      const context = await executeFlowEngine(
+        schedule.target_id,
+        undefined,
+        definitionOverride
+          ? { tracer, definitionOverride, executionId: logId }
+          : { tracer, executionId: logId }
+      );
+
       const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
-      exportResults.forEach((exportResult: any) => {
+      for (const exportResult of exportResults as any[]) {
         const fileName = exportResult.filePath.split(/[/\\]/).pop();
         exportedFiles.push(fileName);
         recordCount += (exportResult.records || 0);
 
         try {
-          const { getIo } = require('./socket.js');
+          const { getIo } = await import('./socket.js');
           const io = getIo();
           io.emit('flow-export-ready', {
             flowId: schedule.target_id,
@@ -135,20 +150,58 @@ async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' = 'sche
             format: exportResult.format,
             filePath: exportResult.filePath
           });
-        } catch (e) {}
-      });
+        } catch {}
+      }
     } else if (schedule.target_type === 'script') {
       await runScriptById(schedule.target_id);
+    } else if (schedule.target_type === 'query') {
+      const query = db.prepare('SELECT * FROM queries WHERE id = ?').get(schedule.target_id) as Record<string, any> | undefined;
+      if (!query) {
+        throw new Error(`Consulta no encontrada: ${schedule.target_id}`);
+      }
+      let connectionIds: string[] = [];
+      try {
+        const parsed = JSON.parse(String(query.connection_ids || '[]'));
+        if (Array.isArray(parsed)) connectionIds = parsed.filter(Boolean).map(String);
+      } catch {}
+      if (connectionIds.length === 0) {
+        throw new Error('La consulta programada no tiene conexiones configuradas');
+      }
+
+      const results = await Promise.all(
+        connectionIds.map(async (connId) => {
+          const conn = db.prepare('SELECT * FROM connections WHERE id = ?').get(connId) as Record<string, any> | undefined;
+          if (!conn) throw new Error(`Conexión no encontrada: ${connId}`);
+          if (conn.driver === 'sqlite') {
+            return executeSqliteQuery(conn.host, String(query.sql_text || ''), {});
+          }
+          return executeMssqlQuery(connId, String(query.sql_text || ''), {}, logId);
+        })
+      );
+
+      let columns: string[] = [];
+      for (const res of results) {
+        if (columns.length === 0 && Array.isArray(res.columns)) columns = res.columns;
+        recordCount += Array.isArray(res.rows) ? res.rows.length : 0;
+      }
+
+      db.prepare(`
+        UPDATE queries
+        SET last_run_at = datetime('now'), last_row_count = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(recordCount, schedule.target_id);
+
+      extraResult = { connection_ids: connectionIds, columns, rowCount: recordCount };
     }
-    
+
     const duration = Date.now() - startTime;
-    const resultJson = exportedFiles.length > 0 ? JSON.stringify({ exportedFiles }) : null;
+    const resultPayload = exportedFiles.length > 0 ? { exportedFiles } : extraResult;
 
     finishExecutionLog(logId, {
       status: 'completed',
       durationMs: duration,
       recordCount,
-      result: resultJson ? JSON.parse(resultJson) : null,
+      result: resultPayload,
       trace: schedule.target_type === 'flow' ? tracer.toJSON('completed') : undefined
     });
   } catch (err: any) {

@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import CodeMirror from '@uiw/react-codemirror';
+import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 import { CheckCircle2, AlertCircle, Wand2 } from 'lucide-react';
 import { cn } from '../../../../lib/utils';
@@ -10,6 +10,7 @@ interface JsonCodeFieldProps {
   placeholder?: string;
   minHeight?: string;
   maxHeight?: string;
+  editorRef?: React.RefObject<ReactCodeMirrorRef | null>;
 }
 
 // {{variables}} may appear unquoted; swap them for a literal so the JSON can still be validated
@@ -22,7 +23,7 @@ function parseJson(text: string): { ok: boolean; value?: any; error?: string } {
   }
 }
 
-export function JsonCodeField({ value, onChange, placeholder, minHeight = '96px', maxHeight = '320px' }: JsonCodeFieldProps) {
+export function JsonCodeField({ value, onChange, placeholder, minHeight = '96px', maxHeight = '320px', editorRef }: JsonCodeFieldProps) {
   const check = useMemo(() => parseJson(value), [value]);
   const hasVars = /\{\{[^}]*\}\}/.test(value);
 
@@ -39,6 +40,7 @@ export function JsonCodeField({ value, onChange, placeholder, minHeight = '96px'
       )}
     >
       <CodeMirror
+        ref={editorRef}
         value={value}
         onChange={onChange}
         extensions={[javascript()]}

@@ -21,7 +21,8 @@ import {
   SlidersHorizontal,
   StickyNote,
   Search,
-  Workflow
+  Workflow,
+  Reply
 } from 'lucide-react';
 import { useAppSelector } from '../../store/hooks';
 
@@ -44,6 +45,7 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
       { type: 'query', label: 'Consulta DB', icon: Database, desc: 'Ejecutar consulta SQL' },
       { type: 'scraping', label: 'Web Scraping', icon: Code, desc: 'Extraer HTML/XML' },
       { type: 'dataList', label: 'Lista de datos', icon: List, desc: 'Definir array de datos JSON' },
+      { type: 'webhookTrigger', label: 'Webhook Trigger', icon: Radio, desc: 'Disparador HTTP externo' },
     ],
   },
   {
@@ -65,6 +67,7 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
     title: 'Salida',
     nodes: [
       { type: 'export', label: 'Exportar CSV/Excel', icon: FileOutput, desc: 'Generar archivo' },
+      { type: 'webhookRespond', label: 'Responder Webhook', icon: Reply, desc: 'Responder síncronamente al Webhook Trigger' },
     ],
   },
   {
@@ -79,7 +82,6 @@ const NODE_GROUPS: Array<{ id: string; title: string; experimental?: boolean; no
     title: 'Experimentales',
     experimental: true,
     nodes: [
-      { type: 'webhookTrigger', label: 'Webhook Trigger', icon: Radio, desc: 'Disparador HTTP externo' },
       { type: 'oauth2Connector', label: 'Conector OAuth2', icon: KeyRound, desc: 'Autenticación y tokens' },
       { type: 'aiChatCompletion', label: 'IA / Chat LLM', icon: Bot, desc: 'Prompts a APIs compatibles con OpenAI' },
     ],
@@ -166,7 +168,7 @@ export function NodeLibrary({ onAdd }: NodeLibraryProps) {
         ))}
         {!experimentalEnabled && !needle && (
           <p className="text-[10px] text-muted leading-relaxed border border-dashed border-border rounded p-2">
-            Hay nodos experimentales (Webhook, OAuth2, IA) disponibles. Actívalos en <b>Configuración → Experimental</b>.
+            Hay nodos experimentales (OAuth2, IA) disponibles. Actívalos en <b>Configuración → Experimental</b>.
           </p>
         )}
       </div>

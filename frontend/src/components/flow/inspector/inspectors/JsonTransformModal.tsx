@@ -7,6 +7,7 @@ import { javascript } from '@codemirror/lang-javascript';
 import { Button } from '../../../ui/button';
 import { VariablePicker } from '../editors/VariableField';
 import { breakpointGutter } from '../editors/breakpointGutter';
+import { copyToClipboard } from '../../../../lib/clipboard';
 
 interface JsonTransformModalProps {
   isOpen: boolean;
@@ -55,10 +56,12 @@ export function JsonTransformModal({
 
   if (!isOpen) return null;
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(currentCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(currentCode);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleApply = () => {
@@ -96,7 +99,12 @@ export function JsonTransformModal({
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-fg/40 animate-fade-in backdrop-blur-xs">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Editor de Código JavaScript"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-fg/40 animate-fade-in backdrop-blur-xs"
+    >
       <div className="bg-surface border border-border rounded-lg shadow-raised w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="p-3.5 border-b border-border flex items-center justify-between shrink-0 bg-bg/40">

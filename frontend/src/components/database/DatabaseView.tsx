@@ -14,6 +14,7 @@ import { Input } from '../ui/input';
 import { Card } from '../ui/card';
 import { cn } from '../../lib/utils';
 import { QueryResultsTable } from './QueryResultsTable';
+import { QueryExportMenu } from './QueryExportMenu';
 
 const LIST_HIDDEN_KEY = 'orquesta.database.listHidden';
 const LIST_WIDTH = 280;
@@ -255,9 +256,13 @@ export function DatabaseView() {
           if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
             val = val.substring(1, val.length - 1);
           }
-          // Convertir a número si es un número válido
-          if (val !== '' && !isNaN(Number(val))) {
-            parsedParams[k] = Number(val);
+          // Convertir a número si es un número válido (sin ceros iniciales ni desbordamiento seguro)
+          const numVal = Number(val);
+          const hasLeadingZeros = /^0\d+/.test(val);
+          const isUnsafeInteger = /^-?\d+$/.test(val) && !Number.isSafeInteger(numVal);
+          const exceedsMaxSafe = Number.isFinite(numVal) && Math.abs(numVal) > Number.MAX_SAFE_INTEGER;
+          if (val !== '' && !hasLeadingZeros && !isNaN(numVal) && Number.isFinite(numVal) && !isUnsafeInteger && !exceedsMaxSafe) {
+            parsedParams[k] = numVal;
           } else {
             parsedParams[k] = val;
           }
@@ -1020,14 +1025,21 @@ export function DatabaseView() {
                       <h4 className="text-sm font-semibold">Resultados</h4>
                       <p className="text-xs text-muted">{queriesState.results?.rowCount} registros devueltos en {queriesState.results?.duration}ms</p>
                     </div>
-                    <Button 
-                      variant="outline" 
-                      size="sm" 
-                      onClick={() => setIsColumnSelectorOpen(!isColumnSelectorOpen)}
-                      className="gap-2"
-                    >
-                      <Columns size={14} /> Columnas visibles
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <QueryExportMenu
+                        columns={activeColumns}
+                        rows={queriesState.results.rows || []}
+                        fileName={queryName || 'consulta_resultados'}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setIsColumnSelectorOpen(!isColumnSelectorOpen)}
+                        className="gap-2"
+                      >
+                        <Columns size={14} /> Columnas visibles
+                      </Button>
+                    </div>
                   </div>
                   
                   {isColumnSelectorOpen && (
