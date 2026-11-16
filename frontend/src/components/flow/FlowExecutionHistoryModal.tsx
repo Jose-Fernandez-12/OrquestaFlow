@@ -25,6 +25,7 @@ import { Button } from '../ui/button';
 import { format } from 'date-fns';
 import { cn } from '../../lib/utils';
 import { getApiUrl, getFileUrl } from '../../lib/api';
+import { normalizeExportedFilesList, triggerBrowserDownload, type ExportedFileItem } from '../../lib/exportUtils';
 
 interface ExportedFileInfo {
   fileName: string;
@@ -59,6 +60,7 @@ interface ExecutionLog {
   status: RunStatus;
   trigger_type?: 'manual' | 'debug' | 'schedule' | 'webhook' | null;
   result?: string | null;
+  exported_files?: ExportedFileItem[];
   error_message?: string | null;
   node_trace?: string | null;
   duration_ms?: number | null;
@@ -354,9 +356,16 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'go
 }
 
 function RunCard({ log, expanded, onToggle }: { log: ExecutionLog; expanded: boolean; onToggle: () => void }) {
-  const resultData = parseJson<{ exportedFiles?: ExportedFileInfo[]; warnings?: number; trigger?: string }>(log.result);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const resultData = parseJson<{ exportedFiles?: Array<ExportedFileInfo | string>; exported_files?: Array<ExportedFileInfo | string>; warnings?: number; trigger?: string }>(log.result);
   const trace = parseJson<NodeTraceEntry[]>(log.node_trace) || [];
-  const exportedFiles = Array.isArray(resultData?.exportedFiles) ? resultData!.exportedFiles! : [];
+  const rawExported =
+    Array.isArray(resultData?.exportedFiles) && resultData!.exportedFiles!.length > 0
+      ? resultData!.exportedFiles
+      : Array.isArray(resultData?.exported_files) && resultData!.exported_files!.length > 0
+        ? resultData!.exported_files
+        : (log.exported_files ?? resultData?.exportedFiles);
+  const exportedFiles = normalizeExportedFilesList(rawExported);
 
   const legacyCancelled = log.status === 'error' && /detenid|cancelad/i.test(log.error_message || '');
   const status: RunStatus = legacyCancelled ? 'cancelled' : log.status;
@@ -435,27 +444,43 @@ function RunCard({ log, expanded, onToggle }: { log: ExecutionLog; expanded: boo
 
         {/* Exported files */}
         {exportedFiles.length > 0 && (
-          <div className="pt-1.5 border-t border-border/60 flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-medium text-muted">Archivos exportados:</span>
-            {exportedFiles.map((file, idx) => {
-              const fileName = file?.fileName || `archivo_${idx + 1}`;
-              const downloadUrl = file?.downloadUrl || '#';
-              const isExcel = file?.format === 'Excel' || /\.xlsx?$/i.test(fileName);
-              return (
-                <a
-                  key={idx}
-                  href={downloadUrl.startsWith('http') ? downloadUrl : getFileUrl(downloadUrl)}
-                  download={fileName}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-accent bg-accent-light hover:bg-accent/20 px-2.5 py-1 rounded transition-colors"
-                >
-                  {isExcel ? <FileSpreadsheet size={13} /> : <FileText size={13} />}
-                  <span>{fileName}</span>
-                  <Download size={11} className="opacity-70" />
-                </a>
-              );
-            })}
+          <div className="pt-1.5 border-t border-border/60 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-medium text-muted">Archivos exportados:</span>
+              {exportedFiles.map((file, idx) => {
+                const fileName = file.fileName;
+                const href = getFileUrl(file.downloadUrl || fileName);
+                const isExcel = file.format === 'Excel' || /\.xlsx?$/i.test(fileName);
+                return (
+                  <a
+                    key={`${fileName}-${idx}`}
+                    href={href || '#'}
+                    download={fileName}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={async (e) => {
+                      e.preventDefault();
+                      setDownloadError(null);
+                      const ok = await triggerBrowserDownload(file.downloadUrl || fileName, fileName);
+                      if (!ok) {
+                        setDownloadError(`No se pudo descargar «${fileName}». Verifica que el archivo exista en el servidor.`);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-accent bg-accent-light hover:bg-accent/20 px-2.5 py-1 rounded transition-colors"
+                  >
+                    {isExcel ? <FileSpreadsheet size={13} /> : <FileText size={13} />}
+                    <span>{fileName}</span>
+                    {typeof file.records === 'number' && (
+                      <span className="text-[10px] opacity-75">({file.records.toLocaleString()})</span>
+                    )}
+                    <Download size={11} className="opacity-70" />
+                  </a>
+                );
+              })}
+            </div>
+            {downloadError && (
+              <p className="text-[11px] text-danger">{downloadError}</p>
+            )}
           </div>
         )}
 

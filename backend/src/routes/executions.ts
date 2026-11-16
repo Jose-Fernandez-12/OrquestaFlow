@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
+import { normalizeExportedFiles } from '../engine/executionLog.js';
 
 interface TraceEntryLike {
   status?: string;
@@ -215,10 +216,17 @@ export async function executionRoutes(app: FastifyInstance): Promise<void> {
     const data = rows.map(row => {
       const trace = safeJsonParse<TraceEntryLike[]>(row.node_trace, []);
       const resultText = row.result ? String(row.result) : '';
-      const parsedResult = resultText && (resultText.includes('failed_items') || resultText.includes('failedItems'))
+      const shouldParseResult = resultText && (
+        resultText.includes('failed_items') ||
+        resultText.includes('failedItems') ||
+        resultText.includes('exportedFiles') ||
+        resultText.includes('exported_files')
+      );
+      const parsedResult = shouldParseResult
         ? safeJsonParse<any>(row.result, null)
         : null;
       const failedItems = extractFailedItems(parsedResult, trace);
+      const exportedFiles = normalizeExportedFiles(parsedResult, trace);
       const traceSummary = summarizeTrace(trace);
       return {
         id: row.id,
@@ -239,6 +247,7 @@ export async function executionRoutes(app: FastifyInstance): Promise<void> {
         trace_summary: traceSummary,
         has_failed_items: failedItems.length > 0,
         failed_items_count: failedItems.length,
+        exported_files: exportedFiles,
       };
     });
 
@@ -267,7 +276,7 @@ export async function executionRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: 'Ejecución no encontrada' });
     }
 
-    const parsedResult = typeof row.result === 'string' ? safeJsonParse<any>(row.result, row.result) : (row.result ?? null);
+    let parsedResult = typeof row.result === 'string' ? safeJsonParse<any>(row.result, row.result) : (row.result ?? null);
     const rawTrace = Array.isArray(row.node_trace)
       ? row.node_trace
       : safeJsonParse<TraceEntryLike[]>(row.node_trace, []);
@@ -278,8 +287,12 @@ export async function executionRoutes(app: FastifyInstance): Promise<void> {
       return entry;
     });
     const failedItems = extractFailedItems(parsedResult, parsedTrace);
+    const exportedFiles = normalizeExportedFiles(parsedResult, parsedTrace);
+    if (parsedResult && typeof parsedResult === 'object' && !Array.isArray(parsedResult) && (Array.isArray(parsedResult.exportedFiles) || exportedFiles.length > 0)) {
+      parsedResult = { ...parsedResult, exportedFiles };
+    }
 
-    const children = db.prepare(`
+    const rawChildren = db.prepare(`
       SELECT
         e.id,
         e.target_type,
@@ -293,11 +306,18 @@ export async function executionRoutes(app: FastifyInstance): Promise<void> {
         e.trigger_type,
         e.started_at,
         e.completed_at,
+        e.result,
+        e.node_trace,
         ${TARGET_NAME_SQL} AS target_name
       ${BASE_FROM_SQL}
       WHERE e.parent_execution_id = ?
       ORDER BY e.started_at ASC, e.rowid ASC
-    `).all(request.params.id);
+    `).all(request.params.id) as Array<Record<string, any>>;
+
+    const children = rawChildren.map(({ result: childResult, node_trace: childTrace, ...child }) => ({
+      ...child,
+      exported_files: normalizeExportedFiles(childResult, childTrace),
+    }));
 
     return {
       data: {
@@ -307,6 +327,7 @@ export async function executionRoutes(app: FastifyInstance): Promise<void> {
         trace_summary: summarizeTrace(parsedTrace),
         failed_items: failedItems,
         has_failed_items: failedItems.length > 0,
+        exported_files: exportedFiles,
         children,
       },
     };

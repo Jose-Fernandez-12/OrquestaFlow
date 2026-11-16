@@ -11,7 +11,10 @@ import {
   finishExecutionLog,
   summarizeContext,
   isCancellationError,
+  buildExportedFileInfo,
+  normalizeExportedFiles,
   type ExecutionStatus,
+  type ExportedFileInfo,
 } from '../engine/executionLog.js';
 import { loadRunCache, saveRunCache, deleteRunCache, findMissingInputs, withoutIterationKeys } from '../engine/runCache.js';
 import { normalizeEdges, findForEachEndNode, getForEachSubgraphNodes } from '../engine/graph.js';
@@ -89,7 +92,8 @@ async function safeIo() {
 
 // Relays engine progress to the editor and announces exported files as soon as each one is ready
 function createProgressEmitter(io: any, flowId: string) {
-  const exportedFiles: any[] = [];
+  const exportedFiles: ExportedFileInfo[] = [];
+  const exportedKeys = new Set<string>();
   const skippedNodeIds: string[] = [];
   // Outputs of the nodes that finished, kept so a failed run still leaves its results for a partial rerun
   const outputs: Record<string, any> = {};
@@ -112,19 +116,15 @@ function createProgressEmitter(io: any, flowId: string) {
 
     // Emit export ready immediately when an export node finishes, so files download without waiting for other branches
     if (status === 'completed' && result?.filePath && result?.success) {
-      const fileName = result.filePath.split(/[/\\]/).pop();
-      const info = {
-        nodeId,
-        fileName,
-        downloadUrl: `/api/files/${fileName}`,
-        records: result.records,
-        format: result.format,
-        filePath: result.filePath,
-        previewRows: result.previewRows,
-        headers: result.headers
-      };
-      exportedFiles.push(info);
-      io.emit('flow-export-ready', { flowId, ...info });
+      const info = buildExportedFileInfo(result, nodeId);
+      if (info) {
+        const key = info.filePath || info.fileName;
+        if (!exportedKeys.has(key)) {
+          exportedKeys.add(key);
+          exportedFiles.push(info);
+        }
+        io.emit('flow-export-ready', { flowId, ...info });
+      }
     }
   };
   return { emit, exportedFiles, skippedNodeIds, outputs };
@@ -568,11 +568,31 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     const where = `target_type = 'flow' AND target_id = ?${status ? ' AND status = ?' : ''}`;
     const params: any[] = status ? [request.params.id, status] : [request.params.id];
 
-    const logs = db.prepare(`
+    const rawLogs = db.prepare(`
       SELECT * FROM execution_logs WHERE ${where}
       ORDER BY started_at DESC, rowid DESC
       LIMIT ? OFFSET ?
-    `).all(...params, limit, offset);
+    `).all(...params, limit, offset) as Array<Record<string, any>>;
+
+    const logs = rawLogs.map((row) => {
+      const exportedFiles = normalizeExportedFiles(row.result, row.node_trace);
+      let normalizedResult = row.result;
+      if (typeof row.result === 'string' && row.result.trim()) {
+        try {
+          const parsed = JSON.parse(row.result);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (Array.isArray(parsed.exportedFiles) || exportedFiles.length > 0)) {
+            normalizedResult = JSON.stringify({ ...parsed, exportedFiles });
+          }
+        } catch {}
+      } else if (!row.result && exportedFiles.length > 0) {
+        normalizedResult = JSON.stringify({ exportedFiles });
+      }
+      return {
+        ...row,
+        result: normalizedResult,
+        exported_files: exportedFiles,
+      };
+    });
     const total = (db.prepare(`SELECT COUNT(*) AS count FROM execution_logs WHERE ${where}`).get(...params) as any)?.count ?? 0;
 
     const stats = db.prepare(`
@@ -648,8 +668,10 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       saveRunCache(flowId, context, progress.skippedNodeIds, { merge: false });
       const duration = Date.now() - startTime;
 
-      const summary = summarizeContext(context);
-      const exportedFiles = progress.exportedFiles.length > 0 ? progress.exportedFiles : summary.exportedFiles;
+      const summary = summarizeContext(context, tracer);
+      const exportedFiles = normalizeExportedFiles({
+        exportedFiles: [...progress.exportedFiles, ...summary.exportedFiles],
+      });
       const { recordCount } = summary;
       const trace = tracer.toJSON('completed');
       const warnings = trace.filter(t => t.status === 'continued').length;
@@ -1096,7 +1118,7 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
 
         const completeWebhookRun = (context: Record<string, any>) => {
           const duration = Date.now() - startTime;
-          const { exportedFiles, recordCount } = summarizeContext(context);
+          const { exportedFiles, recordCount } = summarizeContext(context, tracer);
           finishExecutionLog(logId, {
             status: 'completed',
             durationMs: duration,
