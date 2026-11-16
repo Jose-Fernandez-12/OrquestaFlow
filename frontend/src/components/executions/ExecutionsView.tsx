@@ -14,7 +14,10 @@ import {
   Code2,
   Copy,
   Database,
+  Download,
   ExternalLink,
+  FileSpreadsheet,
+  FileText,
   FlaskConical,
   GitMerge,
   Layers,
@@ -29,8 +32,9 @@ import {
 } from 'lucide-react';
 import { useAppDispatch } from '../../store/hooks';
 import { showToast } from '../../store/uiSlice';
-import { API_URL, createSocket, readApiResponse } from '../../lib/api';
+import { API_URL, createSocket, getFileUrl, readApiResponse } from '../../lib/api';
 import { copyToClipboard } from '../../lib/clipboard';
+import { normalizeExportedFilesList, triggerBrowserDownload, type ExportedFileItem } from '../../lib/exportUtils';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Card } from '../ui/card';
@@ -71,6 +75,7 @@ interface ExecutionListItem {
   trace_summary: TraceSummary;
   has_failed_items: boolean;
   failed_items_count: number;
+  exported_files?: ExportedFileItem[];
 }
 
 interface ExecutionTraceEntry {
@@ -108,6 +113,7 @@ interface ExecutionChildItem {
   record_count: number | null;
   trigger_type: string | null;
   started_at: string;
+  exported_files?: ExportedFileItem[];
 }
 
 interface ExecutionDetail extends ExecutionListItem {
@@ -494,6 +500,25 @@ export function ExecutionsView() {
     return { minStart, totalSpan };
   }, [detail]);
 
+  const detailExportedFiles = useMemo(() => {
+    if (!detail) return [];
+    const resultObj = detail.result && typeof detail.result === 'object' ? (detail.result as Record<string, unknown>) : null;
+    const primary = normalizeExportedFilesList(
+      detail.exported_files && detail.exported_files.length > 0
+        ? detail.exported_files
+        : (resultObj?.exportedFiles ?? resultObj?.exported_files)
+    );
+    const childFiles = (detail.children ?? []).flatMap(c => normalizeExportedFilesList(c.exported_files));
+    return normalizeExportedFilesList([...primary, ...childFiles]);
+  }, [detail]);
+
+  const handleDownloadFile = async (file: ExportedFileItem) => {
+    const ok = await triggerBrowserDownload(file.downloadUrl || file.fileName, file.fileName);
+    if (!ok) {
+      dispatch(showToast(`No se pudo descargar «${file.fileName}». Es posible que el archivo ya no exista en el servidor.`));
+    }
+  };
+
   const pageFrom = total === 0 ? 0 : offset + 1;
   const pageTo = Math.min(total, offset + items.length);
 
@@ -838,6 +863,29 @@ export function ExecutionsView() {
                           {item.record_count !== null && <span>{item.record_count.toLocaleString('es')} reg.</span>}
                           {item.node_count > 0 && <span>{item.node_count} nodos</span>}
                         </div>
+                        {item.exported_files && item.exported_files.length > 0 && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1" onClick={e => e.stopPropagation()}>
+                            {item.exported_files.slice(0, 2).map((file, idx) => (
+                              <a
+                                key={`${file.fileName}-${idx}`}
+                                href={getFileUrl(file.downloadUrl || file.fileName) || '#'}
+                                download={file.fileName}
+                                onClick={e => {
+                                  e.preventDefault();
+                                  void handleDownloadFile(file);
+                                }}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent-light text-accent hover:bg-accent/20 text-[10px] font-medium max-w-[170px] transition-colors"
+                                title={`Descargar ${file.fileName}`}
+                              >
+                                <Download size={10} className="shrink-0" />
+                                <span className="truncate">{file.fileName}</span>
+                              </a>
+                            ))}
+                            {item.exported_files.length > 2 && (
+                              <span className="text-[10px] text-muted">+{item.exported_files.length - 2} más</span>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                       <td
@@ -1076,6 +1124,61 @@ export function ExecutionsView() {
                       </div>
                       <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">{detail.error_message}</pre>
                     </div>
+                  )}
+
+                  {/* Exported Files */}
+                  {detailExportedFiles.length > 0 && (
+                    <section className="space-y-2.5">
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">
+                        Archivos exportados ({detailExportedFiles.length})
+                      </h3>
+                      <div className="rounded-md border border-border divide-y divide-border overflow-hidden bg-bg/40">
+                        {detailExportedFiles.map((file, idx) => {
+                          const isExcel = file.format === 'Excel' || /\.xlsx?$/i.test(file.fileName);
+                          const href = getFileUrl(file.downloadUrl || file.fileName) || '#';
+                          return (
+                            <div
+                              key={`${file.fileName}-${idx}`}
+                              className="px-3.5 py-2.5 bg-surface flex items-center justify-between gap-3"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded bg-accent-light text-accent flex items-center justify-center shrink-0">
+                                  {isExcel ? <FileSpreadsheet size={15} /> : <FileText size={15} />}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-semibold text-fg truncate" title={file.fileName}>
+                                    {file.fileName}
+                                  </div>
+                                  <div className="text-[11px] text-muted flex items-center gap-2">
+                                    <span>{file.format || (isExcel ? 'Excel' : 'CSV')}</span>
+                                    {typeof file.records === 'number' && (
+                                      <>
+                                        <span>·</span>
+                                        <span>{file.records.toLocaleString('es')} registros</span>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                              <a
+                                href={href}
+                                download={file.fileName}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={e => {
+                                  e.preventDefault();
+                                  void handleDownloadFile(file);
+                                }}
+                                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-sm bg-accent text-white hover:bg-accent-hover text-xs font-medium shrink-0 transition-colors"
+                              >
+                                <Download size={12} />
+                                Descargar
+                              </a>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
                   )}
 
                   {/* Trace Waterfall */}

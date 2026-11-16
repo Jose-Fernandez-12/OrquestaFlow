@@ -13,8 +13,40 @@ export function getApiUrl(path: string): string {
   return `${API_URL}${cleanPath}`;
 }
 
+function encodeFileSegment(segment: string): string {
+  const clean = segment.trim();
+  if (!clean) return '';
+  try {
+    return encodeURIComponent(decodeURIComponent(clean));
+  } catch {
+    return encodeURIComponent(clean);
+  }
+}
+
 export function getFileUrl(path: string): string {
-  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  if (typeof path !== 'string') return '';
+  const trimmed = path.trim();
+  if (!trimmed || trimmed === '#') return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
+  const normalized = trimmed.replace(/\\/g, '/');
+  const exportsMatch = normalized.match(/(?:^|\/)data\/exports\/(.+)$/i);
+  if (exportsMatch && exportsMatch[1]) {
+    const fileName = exportsMatch[1].split('/').pop() || exportsMatch[1];
+    return `${BASE_URL}/api/files/${encodeFileSegment(fileName)}`;
+  }
+
+  if (/^\/?api\/files\//i.test(normalized)) {
+    const rest = normalized.replace(/^\/?api\/files\//i, '');
+    const encodedRest = rest.split('/').filter(Boolean).map(encodeFileSegment).join('/');
+    return encodedRest ? `${BASE_URL}/api/files/${encodedRest}` : '';
+  }
+
+  if (!normalized.includes('/')) {
+    return `${BASE_URL}/api/files/${encodeFileSegment(normalized)}`;
+  }
+
+  const cleanPath = normalized.startsWith('/') ? normalized : `/${normalized}`;
   return `${BASE_URL}${cleanPath}`;
 }
 

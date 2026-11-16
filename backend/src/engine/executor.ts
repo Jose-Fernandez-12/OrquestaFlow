@@ -2228,9 +2228,11 @@ async function executeExportNode(node: any, context: Record<string, any>, edges?
     ? Object.keys(exportData[0])
     : [];
 
+  const actualFileName = path.basename(filePath);
   return {
     filePath,
-    fileName: safeFileName,
+    fileName: actualFileName,
+    downloadUrl: `/api/files/${actualFileName}`,
     format,
     records: exportData.length,
     success: true,
@@ -4162,7 +4164,7 @@ async function executeRunFlowNode(
 
   if (childLogId && subTracer) {
     const subTrace = subTracer.toJSON('completed');
-    const subSummary = summarizeContext(subContext);
+    const subSummary = summarizeContext(subContext, subTracer);
     finishExecutionLog(childLogId, {
       status: 'completed',
       durationMs,

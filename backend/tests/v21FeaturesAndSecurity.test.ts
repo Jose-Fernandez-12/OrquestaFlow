@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -10,6 +11,7 @@ import initSqlJs from 'sql.js';
 import { getDb } from '../src/db/database';
 import { executeFlowEngine, validateHttpUrl } from '../src/engine/executor';
 import { ExecutionTracer } from '../src/engine/executionLog';
+import { deleteRunCache } from '../src/engine/runCache';
 import { PYTHON_RUNTIME } from '../src/engine/python/runtime';
 import { transpileFlowToPython } from '../src/engine/pythonTranspiler';
 import { runSchedule } from '../src/engine/scheduler';
@@ -841,5 +843,171 @@ describe('webhooks, /api/executions, scheduler query target, and runFlow Python 
     const pyPath = path.join(tmpPyDir, 'padre_flow.py');
     fs.writeFileSync(pyPath, out.script);
     execFileSync('python3', ['-m', 'py_compile', pyPath], { encoding: 'utf8' });
+  });
+
+  it('persists full ExportedFileInfo without duplicates for scheduled flows (direct and inside forEach), normalizes legacy logs, and serves files via /api/files/', async () => {
+    const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const directFileBase = `sched_direct_${uniqueSuffix}`;
+    const directFileName = `${directFileBase}.xlsx`;
+    const directFilePath = path.join(process.cwd(), 'data', 'exports', directFileName);
+    uploadedFilesToClean.push(directFilePath);
+
+    const loopFlowFile1 = `sched_loop_${uniqueSuffix}_A1.csv`;
+    const loopFlowFile2 = `sched_loop_${uniqueSuffix}_B2.csv`;
+    uploadedFilesToClean.push(
+      path.join(process.cwd(), 'data', 'exports', loopFlowFile1),
+      path.join(process.cwd(), 'data', 'exports', loopFlowFile2)
+    );
+
+    const directFlowId = createFlow(
+      [
+        startNode,
+        { id: 'rows', type: 'dataList', data: { label: 'Datos', items: '[{"id":1,"name":"Uno"},{"id":2,"name":"Dos"}]' } },
+        { id: 'exp', type: 'export', data: { label: 'Exportar Ventas', format: 'Excel', fileName: directFileBase } },
+      ],
+      [edge('start', 'rows'), edge('rows', 'exp')]
+    );
+
+    const loopFlowId = createFlow(
+      [
+        startNode,
+        { id: 'items', type: 'dataList', data: { label: 'Lotes', items: '[{"code":"A1","val":10},{"code":"B2","val":20}]' } },
+        { id: 'loop', type: 'forEach', data: { label: 'Loop', iterateOver: '{{items}}', concurrency: 1 } },
+        { id: 'expItem', type: 'export', data: { label: 'Exportar Item', format: 'CSV', fileName: `sched_loop_${uniqueSuffix}_{{_item.code}}`, dataSource: '{{_item}}' } },
+        { id: 'endLoop', type: 'forEachEnd', data: { label: 'Fin' } },
+      ],
+      [edge('start', 'items'), edge('items', 'loop'), edge('loop', 'expItem'), edge('expItem', 'endLoop')]
+    );
+
+    const exportsDir = path.join(process.cwd(), 'data', 'exports');
+    fs.mkdirSync(exportsDir, { recursive: true });
+
+    const app = Fastify();
+    await app.register(fastifyStatic, {
+      root: exportsDir,
+      prefix: '/api/files/',
+      decorateReply: false,
+      setHeaders: (res, filePath) => {
+        const name = path.join(filePath).split(/[/\\]/).pop() || 'export';
+        const safeAscii = name.replace(/["\\\r\n]/g, '_');
+        res.setHeader('Content-Disposition', `attachment; filename="${safeAscii}"; filename*=UTF-8''${encodeURIComponent(name)}`);
+      },
+    });
+    await app.register(flowRoutes, { prefix: '/api/flows' });
+    await app.register(executionRoutes, { prefix: '/api/executions' });
+    await app.register(scheduleRoutes, { prefix: '/api/schedules' });
+
+    let schedDirectId = '';
+    let schedLoopId = '';
+    try {
+      const s1 = (await app.inject({
+        method: 'POST',
+        url: '/api/schedules',
+        payload: { target_type: 'flow', target_id: directFlowId, name: 'Job Export Direct', cron_expression: '0 8 * * *' },
+      })).json().data;
+      schedDirectId = s1.id;
+
+      await runSchedule(s1, 'schedule');
+      expect(fs.existsSync(directFilePath)).toBe(true);
+
+      const db = getDb();
+      const directLogs = db.prepare('SELECT * FROM execution_logs WHERE schedule_id = ?').all(schedDirectId) as any[];
+      expect(directLogs).toHaveLength(1);
+      expect(directLogs[0].status).toBe('completed');
+      expect(directLogs[0].record_count).toBe(2);
+
+      const parsedDirectResult = JSON.parse(directLogs[0].result);
+      expect(parsedDirectResult.exportedFiles).toHaveLength(1);
+      expect(parsedDirectResult.exportedFiles[0]).toMatchObject({
+        nodeId: 'exp',
+        fileName: directFileName,
+        downloadUrl: `/api/files/${directFileName}`,
+        records: 2,
+        format: 'Excel',
+        filePath: directFilePath,
+      });
+
+      // Verify all history/execution endpoints return normalized exported_files
+      const flowLogsRes = await app.inject({ method: 'GET', url: `/api/flows/${directFlowId}/logs` });
+      expect(flowLogsRes.statusCode).toBe(200);
+      expect(flowLogsRes.json().data[0].exported_files).toHaveLength(1);
+      expect(flowLogsRes.json().data[0].exported_files[0]).toMatchObject({
+        fileName: directFileName,
+        downloadUrl: `/api/files/${directFileName}`,
+      });
+
+      const execListRes = await app.inject({ method: 'GET', url: `/api/executions?search=${directLogs[0].id}` });
+      expect(execListRes.statusCode).toBe(200);
+      expect(execListRes.json().data[0].exported_files).toHaveLength(1);
+      expect(execListRes.json().data[0].exported_files[0].downloadUrl).toBe(`/api/files/${directFileName}`);
+
+      const execDetailRes = await app.inject({ method: 'GET', url: `/api/executions/${directLogs[0].id}` });
+      expect(execDetailRes.statusCode).toBe(200);
+      expect(execDetailRes.json().data.exported_files).toHaveLength(1);
+      expect(execDetailRes.json().data.exported_files[0].fileName).toBe(directFileName);
+
+      const schedLogsRes = await app.inject({ method: 'GET', url: `/api/schedules/${schedDirectId}/logs` });
+      expect(schedLogsRes.statusCode).toBe(200);
+      expect(schedLogsRes.json().data[0].exported_files).toHaveLength(1);
+      expect(schedLogsRes.json().data[0].exported_files[0].fileName).toBe(directFileName);
+
+      // Verify actual HTTP download from /api/files/:fileName
+      const downloadRes = await app.inject({ method: 'GET', url: `/api/files/${encodeURIComponent(directFileName)}` });
+      expect(downloadRes.statusCode).toBe(200);
+      expect(downloadRes.headers['content-disposition']).toContain('attachment');
+      expect(downloadRes.headers['content-disposition']).toContain(directFileName);
+      expect(downloadRes.rawPayload.length).toBeGreaterThan(100);
+
+      // Run scheduled flow with export inside forEach loop
+      const s2 = (await app.inject({
+        method: 'POST',
+        url: '/api/schedules',
+        payload: { target_type: 'flow', target_id: loopFlowId, name: 'Job Export Loop', cron_expression: '0 9 * * *' },
+      })).json().data;
+      schedLoopId = s2.id;
+
+      await runSchedule(s2, 'schedule');
+      expect(fs.existsSync(path.join(exportsDir, loopFlowFile1))).toBe(true);
+      expect(fs.existsSync(path.join(exportsDir, loopFlowFile2))).toBe(true);
+
+      const loopLogs = db.prepare('SELECT * FROM execution_logs WHERE schedule_id = ?').all(schedLoopId) as any[];
+      expect(loopLogs).toHaveLength(1);
+      const parsedLoopResult = JSON.parse(loopLogs[0].result);
+      expect(parsedLoopResult.exportedFiles.map((f: any) => f.fileName)).toEqual([loopFlowFile1, loopFlowFile2]);
+      expect(loopLogs[0].record_count).toBe(2);
+
+      // Verify backward compatibility with legacy string-array scheduler logs
+      const legacyId = 'legacy-sched-log-1';
+      db.prepare(`
+        INSERT INTO execution_logs (id, target_type, target_id, schedule_id, status, trigger_type, result, started_at)
+        VALUES (?, 'flow', ?, ?, 'completed', 'schedule', ?, datetime('now', '-1 minute'))
+      `).run(legacyId, directFlowId, schedDirectId, JSON.stringify({ exportedFiles: ['legacy_sched.csv'] }));
+
+      const legacyExecDetail = (await app.inject({ method: 'GET', url: `/api/executions/${legacyId}` })).json().data;
+      expect(legacyExecDetail.exported_files).toEqual([
+        { fileName: 'legacy_sched.csv', downloadUrl: '/api/files/legacy_sched.csv', format: 'CSV' },
+      ]);
+      expect(legacyExecDetail.result.exportedFiles).toEqual([
+        { fileName: 'legacy_sched.csv', downloadUrl: '/api/files/legacy_sched.csv', format: 'CSV' },
+      ]);
+
+      const legacyFlowLogs = (await app.inject({ method: 'GET', url: `/api/flows/${directFlowId}/logs` })).json().data;
+      const legacyFlowLog = legacyFlowLogs.find((l: any) => l.id === legacyId);
+      expect(legacyFlowLog.exported_files).toEqual([
+        { fileName: 'legacy_sched.csv', downloadUrl: '/api/files/legacy_sched.csv', format: 'CSV' },
+      ]);
+
+      const legacySchedLogs = (await app.inject({ method: 'GET', url: `/api/schedules/${schedDirectId}/logs` })).json().data;
+      const legacySchedLog = legacySchedLogs.find((l: any) => l.id === legacyId);
+      expect(legacySchedLog.exported_files).toEqual([
+        { fileName: 'legacy_sched.csv', downloadUrl: '/api/files/legacy_sched.csv', format: 'CSV' },
+      ]);
+    } finally {
+      deleteRunCache(directFlowId);
+      deleteRunCache(loopFlowId);
+      if (schedDirectId) await app.inject({ method: 'DELETE', url: `/api/schedules/${schedDirectId}` });
+      if (schedLoopId) await app.inject({ method: 'DELETE', url: `/api/schedules/${schedLoopId}` });
+      await app.close();
+    }
   });
 });

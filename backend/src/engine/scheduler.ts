@@ -3,7 +3,16 @@ import cronParser from 'cron-parser';
 import { v4 as uuid } from 'uuid';
 import { getDb } from '../db/database.js';
 import { executeFlowEngine, activeFlowExecutions } from './executor.js';
-import { ExecutionTracer, startExecutionLog, finishExecutionLog, isCancellationError } from './executionLog.js';
+import {
+  ExecutionTracer,
+  startExecutionLog,
+  finishExecutionLog,
+  isCancellationError,
+  summarizeContext,
+  buildExportedFileInfo,
+  type ExportedFileInfo,
+} from './executionLog.js';
+import { saveRunCache } from './runCache.js';
 import { startScriptRun } from './scriptRunner.js';
 import { openDefinition } from './nodeSecrets.js';
 import { executeSqliteQuery } from './sqlite.js';
@@ -115,8 +124,9 @@ export async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' 
   const startTime = Date.now();
   try {
     let recordCount = 0;
-    const exportedFiles: string[] = [];
+    let exportedFiles: ExportedFileInfo[] = [];
     let extraResult: Record<string, any> | null = null;
+    let flowTrace: ReturnType<ExecutionTracer['toJSON']> | undefined;
 
     if (schedule.target_type === 'flow') {
       const flowRow = db
@@ -124,34 +134,85 @@ export async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' 
         .get(schedule.target_id) as { published_definition?: string | null } | undefined;
       const publishedRaw = flowRow?.published_definition ? String(flowRow.published_definition).trim() : '';
       const definitionOverride = publishedRaw ? openDefinition(publishedRaw) : undefined;
+      const skippedNodeIds: string[] = [];
+      const emittedKeys = new Set<string>();
+
+      const onNodeProgress = async (nodeId: string, status: string, result?: any) => {
+        if (status === 'completed' && result?.skipped) {
+          skippedNodeIds.push(nodeId);
+          return;
+        }
+        if (status === 'completed' && result?.filePath && result?.success) {
+          const info = buildExportedFileInfo(result, nodeId);
+          if (!info) return;
+          const key = info.filePath || info.fileName;
+          if (emittedKeys.has(key)) return;
+          emittedKeys.add(key);
+          try {
+            const { getIo } = await import('./socket.js');
+            const io = getIo();
+            io.emit('flow-export-ready', {
+              flowId: schedule.target_id,
+              source: 'scheduler',
+              ...info,
+            });
+          } catch {}
+        }
+      };
+
       const context = await executeFlowEngine(
         schedule.target_id,
-        undefined,
+        onNodeProgress,
         definitionOverride
           ? { tracer, definitionOverride, executionId: logId }
           : { tracer, executionId: logId }
       );
 
-      const exportResults = Object.values(context).filter((v: any) => v?.filePath && v?.success);
-      for (const exportResult of exportResults as any[]) {
-        const fileName = exportResult.filePath.split(/[/\\]/).pop();
-        exportedFiles.push(fileName);
-        recordCount += (exportResult.records || 0);
+      saveRunCache(schedule.target_id, context, skippedNodeIds, { merge: false });
+      const summary = summarizeContext(context, tracer);
+      exportedFiles = summary.exportedFiles;
+      recordCount = summary.recordCount;
+      flowTrace = tracer.toJSON('completed');
+      const warnings = flowTrace.filter(t => t.status === 'continued').length;
+      const duration = Date.now() - startTime;
 
-        try {
-          const { getIo } = await import('./socket.js');
-          const io = getIo();
-          io.emit('flow-export-ready', {
-            flowId: schedule.target_id,
-            source: 'scheduler',
-            fileName,
-            downloadUrl: `/api/files/${fileName}`,
-            records: exportResult.records,
-            format: exportResult.format,
-            filePath: exportResult.filePath
-          });
-        } catch {}
-      }
+      extraResult = {
+        exportedFiles,
+        recordCount,
+        duration,
+        nodeCount: Object.keys(context).length,
+        warnings,
+      };
+
+      db.prepare(`
+        UPDATE flows
+        SET last_run_at = datetime('now'), last_run_duration_ms = ?, last_run_record_count = ?
+        WHERE id = ?
+      `).run(duration, recordCount, schedule.target_id);
+
+      try {
+        const { getIo } = await import('./socket.js');
+        const io = getIo();
+        for (const info of exportedFiles) {
+          const key = info.filePath || info.fileName;
+          if (!emittedKeys.has(key)) {
+            emittedKeys.add(key);
+            io.emit('flow-export-ready', {
+              flowId: schedule.target_id,
+              source: 'scheduler',
+              ...info,
+            });
+          }
+        }
+        io.emit('flow-completed', {
+          flowId: schedule.target_id,
+          duration,
+          recordCount,
+          exportedFiles,
+          warnings,
+          source: 'scheduler',
+        });
+      } catch {}
     } else if (schedule.target_type === 'script') {
       await runScriptById(schedule.target_id);
     } else if (schedule.target_type === 'query') {
@@ -195,14 +256,14 @@ export async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' 
     }
 
     const duration = Date.now() - startTime;
-    const resultPayload = exportedFiles.length > 0 ? { exportedFiles } : extraResult;
+    const resultPayload = extraResult;
 
     finishExecutionLog(logId, {
       status: 'completed',
       durationMs: duration,
       recordCount,
       result: resultPayload,
-      trace: schedule.target_type === 'flow' ? tracer.toJSON('completed') : undefined
+      trace: schedule.target_type === 'flow' ? (flowTrace ?? tracer.toJSON('completed')) : undefined
     });
   } catch (err: any) {
     console.error(`[Scheduler] Error running job ${schedule.id}:`, err.message);
@@ -214,6 +275,17 @@ export async function runSchedule(schedule: any, trigger: 'schedule' | 'manual' 
       errorMessage: err.message,
       trace: schedule.target_type === 'flow' ? tracer.toJSON(status) : undefined
     });
+    if (schedule.target_type === 'flow') {
+      try {
+        const { getIo } = await import('./socket.js');
+        getIo().emit('flow-failed', {
+          flowId: schedule.target_id,
+          error: err.message,
+          duration,
+          source: 'scheduler',
+        });
+      } catch {}
+    }
   } finally {
     runningJobIds.delete(schedule.id);
     // Also after a failed run; otherwise the schedule keeps showing a next run in the past

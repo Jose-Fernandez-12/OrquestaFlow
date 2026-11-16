@@ -99,8 +99,10 @@ async function start(): Promise<void> {
     root: exportsDir,
     prefix: '/api/files/',
     decorateReply: false,
-    setHeaders: (res, path) => {
-      res.setHeader('Content-Disposition', 'attachment');
+    setHeaders: (res, filePath) => {
+      const name = join(filePath).split(/[/\\]/).pop() || 'export';
+      const safeAscii = name.replace(/["\\\r\n]/g, '_');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeAscii}"; filename*=UTF-8''${encodeURIComponent(name)}`);
     }
   });
 

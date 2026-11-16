@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { X, Copy, Download, Check, Terminal, Code2 } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { X, Copy, Download, Check, Terminal, Code2, FileSpreadsheet } from 'lucide-react';
 import { Button } from '../ui/button';
 import { cn } from '../../lib/utils';
 import { copyToClipboard } from '../../lib/clipboard';
+import { normalizeExportedFilesList, triggerBrowserDownload } from '../../lib/exportUtils';
 
 interface NodeResultModalProps {
   inspectNodeData: {
@@ -27,12 +28,29 @@ const LOG_LEVEL_STYLES: Record<string, { color: string; badge: string; badgeBg: 
 export function NodeResultModal({ inspectNodeData, jsonStr, logs, hasLogs, onClose }: NodeResultModalProps) {
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<'data' | 'logs'>('data');
+  const [fileDownloadError, setFileDownloadError] = useState<string | null>(null);
+
+  const exportedFile = useMemo(() => {
+    const res = inspectNodeData.result;
+    if (!res || typeof res !== 'object') return null;
+    if (!res.filePath && !res.downloadUrl) return null;
+    return normalizeExportedFilesList([res])[0] ?? null;
+  }, [inspectNodeData.result]);
 
   const handleCopy = async () => {
     const ok = await copyToClipboard(jsonStr);
     if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleDownloadFile = async () => {
+    if (!exportedFile) return;
+    setFileDownloadError(null);
+    const ok = await triggerBrowserDownload(exportedFile.downloadUrl || exportedFile.fileName, exportedFile.fileName);
+    if (!ok) {
+      setFileDownloadError(`No se pudo descargar «${exportedFile.fileName}». Es posible que el archivo ya no exista en el servidor.`);
     }
   };
 
@@ -67,6 +85,18 @@ export function NodeResultModal({ inspectNodeData, jsonStr, logs, hasLogs, onClo
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0 ml-3">
+            {exportedFile && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleDownloadFile}
+                className="text-xs h-8 px-2.5 gap-1.5"
+                title={`Descargar ${exportedFile.fileName}`}
+              >
+                <FileSpreadsheet size={14} />
+                <span className="hidden sm:inline">Descargar archivo</span>
+              </Button>
+            )}
             <Button
               variant="default"
               size="sm"
@@ -126,6 +156,11 @@ export function NodeResultModal({ inspectNodeData, jsonStr, logs, hasLogs, onClo
 
         {/* Content */}
         <div className="flex-1 overflow-auto bg-bg/50">
+          {fileDownloadError && (
+            <div className="mx-4 mt-3 p-2.5 rounded border border-danger/30 bg-danger/10 text-danger text-xs">
+              {fileDownloadError}
+            </div>
+          )}
           {activeTab === 'data' ? (
             <div className="p-4">
               <pre className="text-xs font-mono p-4 bg-black/80 text-green-400 rounded-md overflow-auto max-h-[60vh]">

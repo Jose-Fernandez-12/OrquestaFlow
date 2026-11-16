@@ -3,6 +3,7 @@ import { getDb } from '../db/database.js';
 import { v4 as uuid } from 'uuid';
 import { CronExpressionParser } from 'cron-parser';
 import cron from 'node-cron';
+import { normalizeExportedFiles } from '../engine/executionLog.js';
 
 function isValidCronExpression(expr: unknown): boolean {
   if (typeof expr !== 'string') return false;
@@ -140,14 +141,34 @@ export async function scheduleRoutes(app: FastifyInstance): Promise<void> {
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(request.params.id);
     if (!existing) return reply.status(404).send({ error: 'Schedule not found' });
 
-    const logs = db.prepare(`
-      SELECT id, status, error_message, duration_ms, record_count, result, started_at, completed_at
+    const rawLogs = db.prepare(`
+      SELECT id, status, error_message, duration_ms, record_count, result, node_trace, started_at, completed_at
       FROM execution_logs 
       WHERE schedule_id = ?
       ORDER BY started_at DESC
       LIMIT 20
-    `).all(request.params.id);
-    
+    `).all(request.params.id) as Array<Record<string, any>>;
+
+    const logs = rawLogs.map(({ node_trace, ...row }) => {
+      const exportedFiles = normalizeExportedFiles(row.result, node_trace);
+      let normalizedResult = row.result;
+      if (typeof row.result === 'string' && row.result.trim()) {
+        try {
+          const parsed = JSON.parse(row.result);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (Array.isArray(parsed.exportedFiles) || exportedFiles.length > 0)) {
+            normalizedResult = JSON.stringify({ ...parsed, exportedFiles });
+          }
+        } catch {}
+      } else if (!row.result && exportedFiles.length > 0) {
+        normalizedResult = JSON.stringify({ exportedFiles });
+      }
+      return {
+        ...row,
+        result: normalizedResult,
+        exported_files: exportedFiles,
+      };
+    });
+
     return { data: logs };
   });
 }

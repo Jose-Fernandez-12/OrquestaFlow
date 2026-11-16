@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Node, Edge } from '@xyflow/react';
 import { copyToClipboard } from '../../lib/clipboard';
 import { applyThemeColor, getHexLuminance } from '../../lib/theme';
+import { API_BASE_URL, getFileUrl } from '../../lib/api';
+import { normalizeExportedFilesList } from '../../lib/exportUtils';
 import {
   EXPERIMENTAL_NODE_TYPES,
   getNodeRetryConfig,
@@ -199,5 +201,64 @@ describe('webhookTrigger, webhookRespond, and error_branch definitions', () => {
       ]
     );
     expect(wiredIssues).toEqual([]);
+  });
+});
+
+describe('getFileUrl and normalizeExportedFilesList', () => {
+  it('resolves relative paths, plain filenames, data/exports paths, special chars and full URLs idempotently', () => {
+    expect(getFileUrl('')).toBe('');
+    expect(getFileUrl('#')).toBe('');
+    expect(getFileUrl('/api/files/reporte.xlsx')).toBe(`${API_BASE_URL}/api/files/reporte.xlsx`);
+    expect(getFileUrl('api/files/reporte.xlsx')).toBe(`${API_BASE_URL}/api/files/reporte.xlsx`);
+    expect(getFileUrl('reporte.xlsx')).toBe(`${API_BASE_URL}/api/files/reporte.xlsx`);
+    expect(getFileUrl('data/exports/ventas_mes.csv')).toBe(`${API_BASE_URL}/api/files/ventas_mes.csv`);
+    expect(getFileUrl('C:\\orquesta\\data\\exports\\ventas #1.xlsx')).toBe(`${API_BASE_URL}/api/files/ventas%20%231.xlsx`);
+    expect(getFileUrl('/api/files/ventas%202026.xlsx')).toBe(`${API_BASE_URL}/api/files/ventas%202026.xlsx`);
+    expect(getFileUrl('https://cdn.example.com/files/a.csv')).toBe('https://cdn.example.com/files/a.csv');
+    expect(getFileUrl('/uploads/input.csv')).toBe(`${API_BASE_URL}/uploads/input.csv`);
+  });
+
+  it('normalizes mixed string and object entries and deduplicates by fileName', () => {
+    const normalized = normalizeExportedFilesList([
+      'reporte_cron.xlsx',
+      'data/exports/datos.csv',
+      {
+        nodeId: 'exp_1',
+        fileName: 'reporte_cron.xlsx',
+        downloadUrl: '/api/files/reporte_cron.xlsx',
+        records: 42,
+        format: 'Excel',
+        filePath: '/srv/data/exports/reporte_cron.xlsx',
+      },
+      {
+        filePath: 'data\\exports\\extra.csv',
+        records: 5,
+      },
+      '#',
+      '',
+    ]);
+
+    expect(normalized).toEqual([
+      {
+        nodeId: 'exp_1',
+        fileName: 'reporte_cron.xlsx',
+        downloadUrl: '/api/files/reporte_cron.xlsx',
+        records: 42,
+        format: 'Excel',
+        filePath: '/srv/data/exports/reporte_cron.xlsx',
+      },
+      {
+        fileName: 'datos.csv',
+        downloadUrl: '/api/files/datos.csv',
+        format: 'CSV',
+      },
+      {
+        fileName: 'extra.csv',
+        downloadUrl: '/api/files/extra.csv',
+        records: 5,
+        format: 'CSV',
+        filePath: 'data\\exports\\extra.csv',
+      },
+    ]);
   });
 });
