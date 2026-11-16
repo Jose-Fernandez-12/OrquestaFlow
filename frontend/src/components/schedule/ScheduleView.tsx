@@ -5,7 +5,8 @@ import { fetchFlows } from '../../store/flowSlice';
 import { fetchScripts } from '../../store/scriptSlice';
 import { fetchQueries } from '../../store/querySlice';
 import { showToast } from '../../store/uiSlice';
-import { getApiUrl, createSocket } from '../../lib/api';
+import { getApiUrl, getFileUrl, createSocket } from '../../lib/api';
+import { normalizeExportedFilesList, triggerBrowserDownload } from '../../lib/exportUtils';
 import {
   Calendar,
   Plus,
@@ -17,7 +18,9 @@ import {
   History,
   AlertCircle,
   CheckCircle2,
+  Download,
   FileSpreadsheet,
+  FileText,
   Pencil,
   Trash2,
   Search,
@@ -894,19 +897,64 @@ export function ScheduleView() {
                         </div>
                       )}
 
-                      {log.result && (
+                      {(log.result || (Array.isArray(log.exported_files) && log.exported_files.length > 0)) && (
                         <div className="mt-2 p-2 bg-accent-light border border-accent/20 rounded text-fg text-xs">
                           <span className="font-semibold block mb-1 text-accent">Resultado:</span>
                           {(() => {
-                            try {
-                              const parsed = JSON.parse(log.result);
-                              if (parsed.exportedFiles && parsed.exportedFiles.length > 0) {
-                                return <span>Archivos exportados: {parsed.exportedFiles.join(', ')}</span>;
+                            let parsed: any = null;
+                            if (typeof log.result === 'string') {
+                              try {
+                                parsed = JSON.parse(log.result);
+                              } catch {
+                                parsed = null;
                               }
-                              return <span>Ejecutado con éxito.</span>;
-                            } catch (e) {
-                              return <span>{log.result}</span>;
+                            } else if (log.result && typeof log.result === 'object') {
+                              parsed = log.result;
                             }
+
+                            const files = normalizeExportedFilesList(
+                              Array.isArray(log.exported_files) && log.exported_files.length > 0
+                                ? log.exported_files
+                                : (parsed?.exportedFiles ?? parsed?.exported_files)
+                            );
+
+                            if (files.length > 0) {
+                              return (
+                                <div className="flex flex-wrap items-center gap-2 mt-1">
+                                  <span className="text-muted">Archivos exportados:</span>
+                                  {files.map((file, idx) => {
+                                    const isExcel = file.format === 'Excel' || /\.xlsx?$/i.test(file.fileName);
+                                    const href = getFileUrl(file.downloadUrl || file.fileName) || '#';
+                                    return (
+                                      <a
+                                        key={`${file.fileName}-${idx}`}
+                                        href={href}
+                                        download={file.fileName}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={async (e) => {
+                                          e.preventDefault();
+                                          const ok = await triggerBrowserDownload(file.downloadUrl || file.fileName, file.fileName);
+                                          if (!ok) {
+                                            dispatch(showToast(`No se pudo descargar «${file.fileName}». Es posible que el archivo ya no exista en el servidor.`));
+                                          }
+                                        }}
+                                        className="inline-flex items-center gap-1.5 text-xs font-medium text-accent bg-surface border border-accent/30 hover:bg-accent/15 px-2.5 py-1 rounded transition-colors"
+                                      >
+                                        {isExcel ? <FileSpreadsheet size={13} /> : <FileText size={13} />}
+                                        <span>{file.fileName}</span>
+                                        <Download size={11} className="opacity-70" />
+                                      </a>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            }
+
+                            if (parsed) {
+                              return <span>Ejecutado con éxito.</span>;
+                            }
+                            return <span>{String(log.result || 'Ejecutado con éxito.')}</span>;
                           })()}
                         </div>
                       )}

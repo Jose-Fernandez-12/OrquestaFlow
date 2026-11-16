@@ -195,11 +195,97 @@ export function downloadAsCSV(
 
 import { getFileUrl } from './api';
 
-export async function triggerBrowserDownload(downloadUrl: string, fileName?: string) {
-  const fullUrl = downloadUrl.startsWith('http') ? downloadUrl : getFileUrl(downloadUrl);
+export interface ExportedFileItem {
+  nodeId?: string;
+  fileName: string;
+  downloadUrl: string;
+  records?: number;
+  format?: string;
+  filePath?: string;
+}
+
+export function normalizeExportedFilesList(raw: unknown): ExportedFileItem[] {
+  if (!Array.isArray(raw)) return [];
+  const byName = new Map<string, ExportedFileItem>();
+
+  const decodeName = (value: string) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+
+  for (const entry of raw) {
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim();
+      if (!trimmed || trimmed === '#') continue;
+      const base = trimmed.split(/[?#]/)[0].split(/[/\\]/).pop()?.trim() || '';
+      const fileName = decodeName(base);
+      if (!fileName || fileName === '#') continue;
+      if (!byName.has(fileName)) {
+        byName.set(fileName, {
+          fileName,
+          downloadUrl: `/api/files/${fileName}`,
+          format: /\.xlsx?$/i.test(fileName) ? 'Excel' : 'CSV',
+        });
+      }
+      continue;
+    }
+
+    if (!entry || typeof entry !== 'object') continue;
+    const obj = entry as Record<string, any>;
+    const rawPath = typeof obj.filePath === 'string' ? obj.filePath.trim() : '';
+    const rawName = typeof obj.fileName === 'string' ? obj.fileName.trim() : '';
+    const rawUrl = typeof obj.downloadUrl === 'string' && obj.downloadUrl.trim() !== '#' ? obj.downloadUrl.trim() : '';
+
+    const pathBase = rawPath ? rawPath.split(/[/\\]/).pop()?.trim() || '' : '';
+    const nameBase = rawName ? rawName.split(/[/\\]/).pop()?.trim() || '' : '';
+    const urlBase = rawUrl ? decodeName(rawUrl.split(/[?#]/)[0].split('/').pop()?.trim() || '') : '';
+
+    const fileName = nameBase || pathBase || urlBase;
+    if (!fileName || fileName === '#') continue;
+
+    const item: ExportedFileItem = {
+      ...(typeof obj.nodeId === 'string' && obj.nodeId.trim() ? { nodeId: obj.nodeId.trim() } : {}),
+      fileName,
+      downloadUrl: rawUrl || `/api/files/${fileName}`,
+      ...(typeof obj.records === 'number' && Number.isFinite(obj.records) ? { records: obj.records } : {}),
+      format: typeof obj.format === 'string' && obj.format.trim()
+        ? obj.format.trim()
+        : (/\.xlsx?$/i.test(fileName) ? 'Excel' : 'CSV'),
+      ...(rawPath ? { filePath: rawPath } : {}),
+    };
+
+    const existing = byName.get(fileName);
+    if (existing) {
+      byName.set(fileName, {
+        ...existing,
+        ...(item.nodeId && !existing.nodeId ? { nodeId: item.nodeId } : {}),
+        ...(item.records !== undefined && existing.records === undefined ? { records: item.records } : {}),
+        ...(item.filePath && !existing.filePath ? { filePath: item.filePath } : {}),
+        ...(item.format && !existing.format ? { format: item.format } : {}),
+        downloadUrl: existing.downloadUrl || item.downloadUrl,
+      });
+    } else {
+      byName.set(fileName, item);
+    }
+  }
+
+  return [...byName.values()];
+}
+
+export async function triggerBrowserDownload(downloadUrl: string, fileName?: string): Promise<boolean> {
+  const target = (downloadUrl && downloadUrl.trim() !== '#' ? downloadUrl.trim() : '') || (fileName || '').trim();
+  const fullUrl = getFileUrl(target);
+  if (!fullUrl) return false;
+
   try {
-    const res = await fetch(fullUrl);
-    if (!res.ok) throw new Error('Download failed');
+    const res = await fetch(fullUrl, { credentials: 'include' });
+    if (!res.ok) {
+      if (res.status === 404) return false;
+      throw new Error(`Download failed (${res.status})`);
+    }
     const blob = await res.blob();
     const blobUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -216,16 +302,19 @@ export async function triggerBrowserDownload(downloadUrl: string, fileName?: str
       }
       window.URL.revokeObjectURL(blobUrl);
     }, 1500);
-  } catch (err) {
+    return true;
+  } catch {
     const link = document.createElement('a');
     link.href = fullUrl;
     if (fileName) link.download = fileName;
     link.target = '_blank';
+    link.rel = 'noreferrer';
     link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
     setTimeout(() => {
       if (document.body.contains(link)) document.body.removeChild(link);
     }, 1500);
+    return false;
   }
 }
