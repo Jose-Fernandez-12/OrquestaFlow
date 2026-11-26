@@ -595,9 +595,11 @@ function FlowCanvas() {
 
   // Load flow definition only when opening a different flow or explicitly re-hydrating
   const hydratedFlowIdRef = useRef<string | null>(null);
+  const [hydratedFlowId, setHydratedFlowId] = useState<string | null>(null);
   useEffect(() => {
-    if (!currentFlow) {
+    if (!currentFlow || (routeFlowId && currentFlow.id !== routeFlowId)) {
       hydratedFlowIdRef.current = null;
+      setHydratedFlowId(null);
       setNodes([]);
       setEdges([]);
       setSavedSignature(canvasSignature([], []));
@@ -637,8 +639,15 @@ function FlowCanvas() {
         setEdges([]);
         setSavedSignature(canvasSignature([], []));
       }
+      setHydratedFlowId(currentFlow.id);
     }
-  }, [currentFlow?.id, currentFlow?.definition, setNodes, setEdges]);
+  }, [routeFlowId, currentFlow?.id, currentFlow?.definition, setNodes, setEdges]);
+
+  const isFlowHydrated = Boolean(
+    currentFlow &&
+    (!routeFlowId || currentFlow.id === routeFlowId) &&
+    hydratedFlowId === currentFlow.id
+  );
 
   const canvasHistory = useCanvasHistory({
     nodes,
@@ -1889,7 +1898,7 @@ function FlowCanvas() {
               />
             </ReactFlow>
 
-            {nodes.length === 0 && !isLocked && !isLiveExecuting && (
+            {isFlowHydrated && nodes.length === 0 && !isLocked && !isLiveExecuting && (
               <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center p-6">
                 <div className="pointer-events-auto bg-surface/95 backdrop-blur border border-border rounded-md shadow-raised p-5 max-w-2xl w-full space-y-4">
                   <div className="flex items-center gap-2.5">
@@ -2277,6 +2286,7 @@ function FlowCanvas() {
           }}
           onRestored={(restored) => {
             hydratedFlowIdRef.current = null;
+            setHydratedFlowId(null);
             dispatch(resetNodeStates());
             dispatch(setCurrentFlow(restored));
             dispatch(showToast('Versión restaurada'));
